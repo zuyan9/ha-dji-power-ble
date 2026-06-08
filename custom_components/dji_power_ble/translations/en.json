@@ -1,0 +1,78 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "DJI Power (local BLE)",
+        "description": "How do you want to provide the station's local pair key?",
+        "menu_options": {
+          "account": "Fetch it from my DJI account",
+          "token": "Paste a DJI member token",
+          "manual": "Enter the pair key manually"
+        }
+      },
+      "manual": {
+        "title": "Enter pair key",
+        "description": "Enter the station's Bluetooth address and its 32-character local pair key.",
+        "data": {
+          "address": "Bluetooth address (e.g. AA:BB:CC:DD:EE:FF)",
+          "pair_key": "Pair key (32 hex characters)",
+          "name": "Name"
+        }
+      },
+      "token": {
+        "title": "Paste a DJI member token",
+        "description": "Paste an existing DJI `x-member-token`. It is used once to fetch the local key and is not stored.",
+        "data": {
+          "address": "Bluetooth address (e.g. AA:BB:CC:DD:EE:FF)",
+          "member_token": "DJI member token (US_...)",
+          "name": "Name"
+        }
+      },
+      "account": {
+        "title": "Sign in to DJI",
+        "description": "Sign in to the DJI account this station is bound to. Your password is used once to fetch the local key and is not stored. You'll solve a quick reCAPTCHA next.",
+        "data": {
+          "address": "Bluetooth address (e.g. AA:BB:CC:DD:EE:FF)",
+          "email": "DJI account email",
+          "password": "DJI account password",
+          "name": "Name"
+        }
+      },
+      "captcha": {
+        "title": "Verify you're human",
+        "description": "Type the characters shown in the image (case-sensitive). A wrong or unreadable code just loads a new image.\n\n![captcha]({image})",
+        "data": {
+          "captcha_code": "Characters in the image"
+        }
+      },
+      "twofa": {
+        "title": "Verification code",
+        "description": "DJI sent a verification code to your account. Enter it to finish signing in.",
+        "data": {
+          "code": "Verification code"
+        }
+      },
+      "finish": {
+        "title": "Choose your station",
+        "description": "Your DJI account has more than one device. Pick the one for this integration.",
+        "data": {
+          "device": "Device"
+        }
+      }
+    },
+    "error": {
+      "invalid_pair_key": "Pair key must be exactly 32 hexadecimal characters.",
+      "address_required": "A Bluetooth address is required.",
+      "invalid_code": "That verification code was not accepted. Try again.",
+      "invalid_token": "That token was not accepted, or it has no devices with a pair key. Check the token and try again.",
+      "rate_limited": "Too many verification attempts. Wait a while and try again.",
+      "login_failed": "Sign-in failed. Check your email and password and try again."
+    },
+    "abort": {
+      "already_configured": "This station is already configured.",
+      "cannot_connect": "Could not reach the DJI cloud to fetch the pair key.",
+      "no_devices": "No DJI devices with a local pair key were found on this account."
+    }
+  }
+}

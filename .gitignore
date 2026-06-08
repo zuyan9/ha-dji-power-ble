@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Reverse-engineering and development material — not part of the integration
+artifacts/
+decompiled/
+docs/
+notes/
+src/
+tools/
+tests/
+requirements.txt
+
+# Editor / tooling
+.agents/
+.codex/
+.claude/
+.idea/
+.vscode/

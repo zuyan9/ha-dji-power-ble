@@ -1,0 +1,9 @@
+"""Constants for the DJI Power local BLE integration."""
+DOMAIN = "dji_power_ble"
+
+CONF_ADDRESS = "address"
+CONF_PAIR_KEY = "pair_key"
+CONF_NAME = "name"
+
+DEFAULT_SCAN_INTERVAL = 60  # seconds
+MANUFACTURER_ID = 0x08AA
