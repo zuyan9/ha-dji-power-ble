@@ -98,6 +98,10 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict]):
         """Open a fresh notify-subscribed BLE link with empty reassembly state."""
         device = bluetooth.async_ble_device_from_address(self.hass, self.address, connectable=True)
         if device is None:
+            _LOGGER.warning(f"Device {self.address} not in HA cache. Falling back to bleak scanner...")
+            from bleak import BleakScanner
+            device = await BleakScanner.find_device_by_address(self.address, timeout=10.0)
+        if device is None:
             raise UpdateFailed(f"{self.address} not in BLE range")
         self._buffer.clear()
         while not self._queue.empty():
