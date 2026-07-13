@@ -396,11 +396,8 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
     }
 
     if len(base := keyed.get(0x00, b"")) >= 40:
-        country = _ascii_field(base[0:2])
         firmware = _ascii_field(base[7:23])
         bms_firmware = _ascii_field(base[24:40])
-        if country:
-            data["country_code"] = country
         if firmware:
             data["firmware"] = firmware
         if bms_firmware:

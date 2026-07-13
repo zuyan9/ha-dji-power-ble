@@ -26,13 +26,14 @@ captures and live tests.
 - Individual USB-A and USB-C port power
 - AC output control
 - Discharge and recharge limit controls
-- Firmware, country, timezone, display, reserve, and cloud-status diagnostics
+- Firmware, timezone, display, reserve, and cloud-status diagnostics
 - Automatic discovery, reconnect-on-advertisement, and sanitized HA diagnostics
 
 The integration keeps one authenticated BLE connection open and consumes the station's
 roughly 1 Hz telemetry pushes. It does not reconnect and re-authenticate for every
-sample. Pushes are coalesced into ten-second Home Assistant updates to avoid needless
-recorder churn while retaining the latest station values.
+sample. Pushes are coalesced into five-second Home Assistant updates by default to
+avoid needless recorder churn while retaining the latest station values. The publish
+interval is configurable from 1 to 60 seconds in the integration's options.
 
 ## Requirements
 

@@ -18,6 +18,7 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -194,12 +195,6 @@ DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         entity_registry_enabled_default=False,
     ),
     SensorEntityDescription(
-        key="country_code",
-        name="Country code",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
-    ),
-    SensorEntityDescription(
         key="timezone_offset_min",
         name="Timezone offset",
         native_unit_of_measurement=UnitOfTime.MINUTES,
@@ -222,6 +217,11 @@ DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
+    registry = er.async_get(hass)
+    legacy_unique_id = f"{entry.data[CONF_ADDRESS]}_country_code"
+    if entity_id := registry.async_get_entity_id("sensor", DOMAIN, legacy_unique_id):
+        registry.async_remove(entity_id)
+
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         DjiPowerSensor(coordinator, description) for description in DESCRIPTIONS

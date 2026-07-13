@@ -86,7 +86,7 @@ class KeyedConfigTests(unittest.TestCase):
     def test_captured_config_decodes_known_fields(self) -> None:
         parsed = duml.parse_telemetry(CAPTURED_KEYED_CONFIG)
 
-        self.assertEqual(parsed["country_code"], "CN")
+        self.assertNotIn("country_code", parsed)
         self.assertEqual(parsed["firmware"], "01.00.1100")
         self.assertEqual(parsed["firmware_secondary"], "03.03.0000")
         self.assertTrue(parsed["cloud_connected"])
