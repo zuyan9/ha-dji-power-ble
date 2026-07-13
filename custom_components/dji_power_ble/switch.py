@@ -3,6 +3,7 @@
 Verified by btsnoop capture of the DJI Home app plus a live A/B test driving the
 station from a non-phone BLE client with only the pair_key.
 """
+
 from __future__ import annotations
 
 from typing import Any

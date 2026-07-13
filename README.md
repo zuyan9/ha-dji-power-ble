@@ -1,80 +1,114 @@
-# DJI Power (local BLE) — Home Assistant integration
+# DJI Power (local BLE) for Home Assistant
 
-Local **Bluetooth** control and monitoring of the **DJI Power 1000 V2** portable
-power station in Home Assistant. Telemetry and writes go straight to the station
-over BLE — no DJI cloud at runtime.
+Local Bluetooth monitoring and control for DJI Power stations. Runtime traffic goes
+directly between Home Assistant and the station; DJI cloud access is optional and is
+used only during setup to retrieve the station's local credential.
 
-> Unofficial / community project. Not affiliated with or endorsed by DJI.
+> Unofficial community project. Not affiliated with or endorsed by DJI.
+
+## Device support
+
+The **DJI Power 1000 V2** is capture-verified and hardware-tested. The shared protocol
+and advertisement model codes are also implemented for these stations, but they still
+need hardware validation:
+
+- DJI Power 1000
+- DJI Power 1000 Mini
+- DJI Power 2000
+
+Please treat writes on those three models as experimental until there are model-specific
+captures and live tests.
 
 ## Features
 
-Entities exposed for a paired station:
+- Live battery level, remaining time, temperature, and charging state
+- Total input/output and AC, USB-A, USB-C, SDC, SDC Lite, 12 V, and XT60 power
+- Individual USB-A and USB-C port power
+- AC output control
+- Discharge and recharge limit controls
+- Firmware, country, timezone, display, reserve, and cloud-status diagnostics
+- Automatic discovery, reconnect-on-advertisement, and sanitized HA diagnostics
 
-- **Switch** — AC output on/off
-- **Sensors** — battery %, runtime remaining, input/output power, AC/DC/USB-C/USB-A
-  output power, battery temperature, firmware + dongle firmware
-- **Numbers** — discharge limit, recharge limit (energy-management charge limits)
-- **Binary sensors** — connected, charging
-
-Everything runs over local BLE once set up. The DJI cloud is touched only once, at
-setup, and only if you choose the account/token method to fetch the key.
+The integration keeps one authenticated BLE connection open and consumes the station's
+roughly 1 Hz telemetry pushes. It does not reconnect and re-authenticate for every
+sample. Pushes are coalesced into ten-second Home Assistant updates to avoid needless
+recorder churn while retaining the latest station values.
 
 ## Requirements
 
-- A DJI Power 1000 V2 station.
-- Home Assistant with **Bluetooth** — a built-in adapter or, recommended, an
-  **ESPHome Bluetooth proxy placed near the station**. The station's signal must be
-  strong and stable enough to hold a connection through authentication.
-- The station's 32-character local **`pair_key`** (the integration can fetch this
-  for you from your DJI account — see Setup).
+- Home Assistant with Bluetooth, either through a local adapter or an ESPHome Bluetooth
+  proxy close to the station
+- The station's 32-character local `pair_key`
 
-> A BLE peripheral serves **one central at a time**. If the DJI Home app on a phone
-> is connected to the station, Home Assistant cannot connect. Force-stop the app (or
-> keep that phone away) so HA can hold the link.
+A DJI Power station accepts only one BLE central at a time. While this integration is
+loaded, DJI Home cannot connect to the same station. Temporarily disable or unload the
+HA config entry when you need to use the phone app.
 
 ## Installation
 
-**HACS (custom repository):**
-1. HACS → ⋮ → Custom repositories → add `https://github.com/zuyan9/ha-dji-power-ble`,
-   category *Integration*.
-2. Install **DJI Power (local BLE)**, then restart Home Assistant.
+With HACS:
 
-**Manual:** copy `custom_components/dji_power_ble` into your HA `config/custom_components/`
-and restart.
+1. Open HACS → Custom repositories.
+2. Add `https://github.com/zuyan9/ha-dji-power-ble` as an Integration.
+3. Install **DJI Power (local BLE)** and restart Home Assistant.
+
+For a manual installation, copy `custom_components/dji_power_ble` into
+`config/custom_components/` and restart Home Assistant.
 
 ## Setup
 
-Add it from **Settings → Devices & Services → Add Integration → "DJI Power"** (a
-station advertising nearby is also auto-discovered). Choose how to provide the
-`pair_key`:
+Add **DJI Power** from Settings → Devices & services. A nearby station should also be
+discovered automatically. The setup flow offers three credential paths:
 
-1. **Fetch from my DJI account** — sign in with the DJI account the station is bound
-   to and type the inline image captcha. The integration mints a member token, reads
-   the local `pair_key` from the DJI cloud, stores the key, and discards the token.
-2. **Paste a DJI member token** — if you already have an `x-member-token`, paste it;
-   the key is fetched with no login or captcha.
-3. **Enter the pair key manually** — paste the 32-hex key and the BLE address.
+1. **DJI account** — sign in and solve DJI's image captcha. The integration reads the
+   station's `pair_key`, then discards the password and member token.
+2. **Existing DJI member token** — use an `x-member-token` once to fetch the key.
+3. **Manual pair key** — enter the BLE address and 32-character key directly.
 
-After setup, operation is local BLE only.
+Only the pair key and device metadata are stored. Normal operation is local BLE.
 
-## How it works
+## Architecture
 
-The station speaks a DJI DUML-style protocol over BLE GATT (service `a002`, write
-`c304`, notify `c305`). After connecting, the client authenticates with the
-`pair_key` (`0x5a/0x6a` challenge–response), reads keyed telemetry (`0x62`) and the
-~1 Hz report (`0x61`), and writes settings with keyed `0x63` commands. The link is
-unencrypted at the BLE layer; security is the app-layer `pair_key`. Treat the
-`pair_key` as a credential.
+The station exposes service `a002`, write characteristic `c304`, and notify
+characteristic `c305`. It carries plaintext DJI DUML v1 frames with CRC8/CRC16 checks,
+then authenticates each connection with `0x5a/0x6a` and the local pair key.
 
-## Notes & limitations
+The implementation separates three concerns:
 
-- Keep a Bluetooth proxy close to the station; weak/edge-of-range signal causes the
-  connection to flap and telemetry to stay unavailable.
-- AC output voltage is fixed by the hardware model (`DYM1000V2L` = 120 V, `…V2H` =
-  220–240 V); it is not reported in BLE telemetry.
-- The account-login path reproduces DJI Home's mobile account signing to obtain a
-  token. DJI may change this at any time.
+- `duml.py` is an HA-independent frame, stream, keyed-config, report, and advertisement
+  codec.
+- `device.py` owns the persistent GATT session, authentication, sequence-matched
+  requests, push state, SET acknowledgement validation, and write readback.
+- The coordinator and entity platforms only adapt that device state to Home Assistant.
+
+This split and persistent-device approach were informed by the excellent
+[`rabits/ha-ef-ble`](https://github.com/rabits/ha-ef-ble) project, while the DJI byte
+layouts come from firmware analysis and live captures in the sibling
+`dji-power-firmware-research` workspace.
+
+## Development
+
+The protocol tests are deterministic and require neither Home Assistant nor Bluetooth:
+
+```bash
+python3 -m unittest discover -v
+uvx ruff check custom_components tests
+```
+
+The suite includes captured keyed config and `0x61` report payloads, nested interface
+trees, DUML fragmentation/recovery, advertisement model data, the 64-bit keyed timestamp,
+charge-limit preservation, and per-key SET acknowledgements.
+
+## Known gaps
+
+- Power 1000, Power 1000 Mini, and Power 2000 need live validation.
+- `0x66` HMS fault records have only been captured empty, so raw HMS bytes remain
+  diagnostics-only.
+- SDC output-voltage data is a subtype-dependent union and is not exposed until captures
+  with real accessories establish safe entity mappings.
+- Cell-level BMS values are not present on the known app-facing BLE command path.
+- DJI can change the optional account-login endpoints at any time.
 
 ## License
 
-No license is set yet. Until one is added, all rights reserved by the author.
+No license is set yet. Until one is added, all rights are reserved by the author.

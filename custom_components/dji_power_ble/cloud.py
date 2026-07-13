@@ -10,6 +10,7 @@ Daily operation is local BLE only and needs none of this.
 Flow: validate_captcha(gRecaptchaResponse) -> captchaTicket -> user_login -> a
 US_ member token -> home-api /users/devices/list -> pair_key.
 """
+
 from __future__ import annotations
 
 import base64
@@ -99,8 +100,14 @@ def _signed_headers(client_name: str, device_id: str) -> dict[str, str]:
     material = (
         "AppId-Mc"
         "cr-app"
-        "ClientName-Mc" + client_name + "DeviceId-Mc" + device_id
-        + "InvokeId-Mc" + invoke_id + "Timestamp-Mc" + timestamp
+        "ClientName-Mc"
+        + client_name
+        + "DeviceId-Mc"
+        + device_id
+        + "InvokeId-Mc"
+        + invoke_id
+        + "Timestamp-Mc"
+        + timestamp
     )
     sign = base64.b64encode(
         hmac.new(SIGN_MC_KEY.encode(), material.encode(), hashlib.sha1).digest()
@@ -123,7 +130,9 @@ def _signed_headers(client_name: str, device_id: str) -> dict[str, str]:
 class DjiCloudClient:
     """Minimal async DJI account/Home-API client for one-time pair_key fetch."""
 
-    def __init__(self, session: aiohttp.ClientSession, *, timeout: float = 20.0) -> None:
+    def __init__(
+        self, session: aiohttp.ClientSession, *, timeout: float = 20.0
+    ) -> None:
         self._session = session
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._client_name = "android-1.5.16"
@@ -132,7 +141,10 @@ class DjiCloudClient:
     async def _post(self, action: str, data: dict[str, str]) -> dict:
         headers = _signed_headers(self._client_name, self._device_id)
         async with self._session.post(
-            f"{ACCOUNT_BASE}/{action}", headers=headers, data=data, timeout=self._timeout
+            f"{ACCOUNT_BASE}/{action}",
+            headers=headers,
+            data=data,
+            timeout=self._timeout,
         ) as resp:
             resp.raise_for_status()
             return await resp.json(content_type=None)
@@ -148,7 +160,9 @@ class DjiCloudClient:
         headers = _signed_headers(self._client_name, self._device_id)
         headers.pop("Content-Type", None)
         async with self._session.get(
-            f"{ACCOUNT_BASE}/vcode?srandom={srandom}", headers=headers, timeout=self._timeout
+            f"{ACCOUNT_BASE}/vcode?srandom={srandom}",
+            headers=headers,
+            timeout=self._timeout,
         ) as resp:
             resp.raise_for_status()
             return srandom, await resp.read()
@@ -202,7 +216,11 @@ class DjiCloudClient:
         Raises DjiTwoFactorRequired if the account needs an email/2-step code,
         DjiRateLimited if code requests are throttled, DjiAuthError otherwise.
         """
-        body = {"userName": email, "password": password, "captchaTicket": captcha_ticket}
+        body = {
+            "userName": email,
+            "password": password,
+            "captchaTicket": captcha_ticket,
+        }
         if email_code:
             # DEFENSIVE 2FA: the app's login body carries the verification code in
             # `emailCode`/`verificationCode`. The exact 2-step submit endpoint was

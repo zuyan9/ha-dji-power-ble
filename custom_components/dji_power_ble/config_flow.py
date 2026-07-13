@@ -1,29 +1,30 @@
 """Config flow for DJI Power local BLE.
 
-Two ways to provide the credential:
+Three ways to provide the credential:
   * manual  — type the 32-hex pair_key (and BLE address) directly.
-  * account — sign in to the DJI account (with a reCAPTCHA the user solves in a
-              popup) and fetch the pair_key from the cloud automatically. The
-              cloud token is used once here and discarded; runtime is local BLE.
+  * token   — paste an existing DJI member token for a one-time key lookup.
+  * account — sign in to the DJI account, solve its image captcha, and fetch the
+              pair_key automatically. Runtime remains local BLE.
 """
+
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_ADDRESS, CONF_EMAIL, CONF_NAME, CONF_PASSWORD
+from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
 
-from .const import MANUFACTURER_ID
 from .cloud import (
     CODE_IMAGE_CAPTCHA_ERROR,
     DjiAuthError,
@@ -33,8 +34,14 @@ from .cloud import (
     DjiRateLimited,
     DjiTwoFactorRequired,
 )
-from .const import CONF_PAIR_KEY, DOMAIN
-from .duml import ProtocolError, normalize_pair_key
+from .const import (
+    CONF_MODEL,
+    CONF_PAIR_KEY,
+    CONF_SERIAL_NUMBER,
+    DOMAIN,
+    MANUFACTURER_ID,
+)
+from .duml import ProtocolError, normalize_pair_key, parse_manufacturer_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +58,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._discovered_address: str | None = None
         self._discovered_name: str | None = None
+        self._discovered_model: str | None = None
         # Account-flow transient state (never persisted).
         self._address: str | None = None
         self._name: str | None = None
@@ -64,18 +72,24 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
-    ) -> ConfigFlowResult:
-        """Triggered when HA sees a Power1000V2-* advertisement."""
+    ) -> FlowResult:
+        """Handle a manufacturer-matched DJI Power advertisement."""
         await self.async_set_unique_id(format_mac(discovery_info.address))
         self._abort_if_unique_id_configured()
         self._discovered_address = discovery_info.address
         self._discovered_name = discovery_info.name or "DJI Power"
+        manufacturer_data = discovery_info.manufacturer_data.get(MANUFACTURER_ID)
+        if manufacturer_data:
+            with contextlib.suppress(ProtocolError):
+                self._discovered_model = parse_manufacturer_data(
+                    manufacturer_data
+                ).model
         self.context["title_placeholders"] = {"name": self._discovered_name}
         return await self.async_step_user()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Let the user choose how to supply the pair key."""
         return self.async_show_menu(
             step_id="user", menu_options=["account", "token", "manual"]
@@ -89,9 +103,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             if info.address in configured:
                 continue
             name = info.name or ""
-            if name.startswith("Power1000V2") or MANUFACTURER_ID in (
-                info.manufacturer_data or {}
-            ):
+            if MANUFACTURER_ID in (info.manufacturer_data or {}):
                 out[info.address] = f"{name or 'DJI Power'} ({info.address})"
         return out
 
@@ -112,10 +124,10 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
     # ----------------------------------------------------------------- manual
     async def async_step_manual(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            address = user_input[CONF_ADDRESS].strip()
+            address = format_mac(user_input[CONF_ADDRESS].strip())
             try:
                 normalize_pair_key(user_input[CONF_PAIR_KEY])
             except ProtocolError:
@@ -133,6 +145,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_NAME: user_input.get(CONF_NAME)
                         or self._discovered_name
                         or "DJI Power",
+                        CONF_MODEL: self._discovered_model or "DJI Power",
                     },
                 )
 
@@ -141,18 +154,16 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 **self._address_schema_part(),
                 vol.Required(CONF_PAIR_KEY): str,
                 vol.Optional(
-                    CONF_NAME, default=self._discovered_name or "DJI Power 1000 V2"
+                    CONF_NAME, default=self._discovered_name or "DJI Power"
                 ): str,
             }
         )
-        return self.async_show_form(
-            step_id="manual", data_schema=schema, errors=errors
-        )
+        return self.async_show_form(step_id="manual", data_schema=schema, errors=errors)
 
     # ------------------------------------------------------------------ token
     async def async_step_token(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Paste an existing DJI x-member-token; fetch the pair_key directly.
 
         For users who already have a token (e.g. from tools/mem_scrape.py). No
@@ -160,7 +171,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         errors: dict[str, str] = {}
         if user_input is not None:
-            self._address = user_input[CONF_ADDRESS].strip()
+            self._address = format_mac(user_input[CONF_ADDRESS].strip())
             self._name = user_input.get(CONF_NAME) or self._discovered_name
             token = user_input[CONF_TOKEN].strip()
             if not self._address:
@@ -183,22 +194,20 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 **self._address_schema_part(),
                 vol.Required(CONF_TOKEN): str,
                 vol.Optional(
-                    CONF_NAME, default=self._discovered_name or "DJI Power 1000 V2"
+                    CONF_NAME, default=self._discovered_name or "DJI Power"
                 ): str,
             }
         )
-        return self.async_show_form(
-            step_id="token", data_schema=schema, errors=errors
-        )
+        return self.async_show_form(step_id="token", data_schema=schema, errors=errors)
 
     # ---------------------------------------------------------------- account
     async def async_step_account(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Collect the BLE address and DJI account credentials."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            self._address = user_input[CONF_ADDRESS].strip()
+            self._address = format_mac(user_input[CONF_ADDRESS].strip())
             self._email = user_input[CONF_EMAIL].strip()
             self._password = user_input[CONF_PASSWORD]
             self._name = user_input.get(CONF_NAME) or self._discovered_name
@@ -213,7 +222,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_EMAIL): str,
                 vol.Required(CONF_PASSWORD): str,
                 vol.Optional(
-                    CONF_NAME, default=self._discovered_name or "DJI Power 1000 V2"
+                    CONF_NAME, default=self._discovered_name or "DJI Power"
                 ): str,
             }
         )
@@ -223,7 +232,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_captcha(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Show DJI's image captcha inline; the user types the characters.
 
         DJI serves a plain image captcha (no Google, no domain lock), so it can be
@@ -275,7 +284,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_twofa(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Ask for the email/2-step verification code and resubmit login."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -305,7 +314,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_finish(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> FlowResult:
         """Fetch devices with the token and create the entry."""
         if self._devices is None:
             assert self._client and self._token
@@ -338,7 +347,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({vol.Required(CONF_DEVICE): vol.In(options)}),
         )
 
-    async def _create_from_device(self, device: DjiDevice) -> ConfigFlowResult:
+    async def _create_from_device(self, device: DjiDevice) -> FlowResult:
         assert self._address
         await self.async_set_unique_id(
             format_mac(self._address), raise_on_progress=False
@@ -350,5 +359,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_ADDRESS: self._address,
                 CONF_PAIR_KEY: device.pair_key,
                 CONF_NAME: self._name or device.name or "DJI Power",
+                CONF_MODEL: self._discovered_model or "DJI Power",
+                CONF_SERIAL_NUMBER: device.sn,
             },
         )
