@@ -1,10 +1,10 @@
 {
   "domain": "dji_power_ble",
   "name": "DJI Power (local BLE)",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "config_flow": true,
-  "documentation": "https://github.com/zuyang/ha-dji-power-ble",
-  "issue_tracker": "https://github.com/zuyang/ha-dji-power-ble/issues",
+  "documentation": "https://github.com/zuyan9/ha-dji-power-ble",
+  "issue_tracker": "https://github.com/zuyan9/ha-dji-power-ble/issues",
   "dependencies": ["bluetooth_adapters"],
   "after_dependencies": ["bluetooth"],
   "bluetooth": [
@@ -12,7 +12,7 @@
     { "local_name": "Power1000V2-*" }
   ],
   "requirements": ["bleak-retry-connector>=3.5.0"],
-  "iot_class": "local_polling",
+  "iot_class": "local_push",
   "integration_type": "device",
   "codeowners": []
 }

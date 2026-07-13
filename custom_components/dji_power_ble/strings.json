@@ -31,7 +31,7 @@
       },
       "account": {
         "title": "Sign in to DJI",
-        "description": "Sign in to the DJI account this station is bound to. Your password is used once to fetch the local key and is not stored. You'll solve a quick reCAPTCHA next.",
+        "description": "Sign in to the DJI account this station is bound to. Your password is used once to fetch the local key and is not stored. You'll solve a DJI image captcha next.",
         "data": {
           "address": "Bluetooth address (e.g. AA:BB:CC:DD:EE:FF)",
           "email": "DJI account email",

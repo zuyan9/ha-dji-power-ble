@@ -1,9 +1,10 @@
 """Energy-management charge-limit controls (cmd 0x63 keyed SET, key 0x05)."""
+
 from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS, EntityCategory, PERCENTAGE
+from homeassistant.const import CONF_ADDRESS, PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -17,8 +18,12 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         [
-            DjiPowerLimitNumber(coordinator, "discharge_limit", "Discharge limit", 0, 15),
-            DjiPowerLimitNumber(coordinator, "recharge_limit", "Recharge limit", 70, 100),
+            DjiPowerLimitNumber(
+                coordinator, "discharge_limit", "Discharge limit", 0, 15
+            ),
+            DjiPowerLimitNumber(
+                coordinator, "recharge_limit", "Recharge limit", 70, 100
+            ),
         ]
     )
 
@@ -31,7 +36,9 @@ class DjiPowerLimitNumber(DjiPowerEntity, NumberEntity):
     _attr_native_step = 1
     _attr_mode = NumberMode.SLIDER
 
-    def __init__(self, coordinator, key: str, name: str, minimum: int, maximum: int) -> None:
+    def __init__(
+        self, coordinator, key: str, name: str, minimum: int, maximum: int
+    ) -> None:
         super().__init__(coordinator)
         self._key = key
         self._attr_name = name
