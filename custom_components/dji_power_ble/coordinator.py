@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DEFAULT_UPDATE_INTERVAL, DOMAIN
+from .const import CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .device import (
     DjiPowerAuthenticationError,
     DjiPowerDevice,
@@ -33,6 +33,9 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         super().__init__(hass, _LOGGER, name=f"{DOMAIN} {device.address}")
         self.entry = entry
         self.device = device
+        self._publish_interval = float(
+            entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+        )
         self._last_push = 0.0
         self._pending_data: dict[str, object] | None = None
         self._push_timer: asyncio.TimerHandle | None = None
@@ -42,7 +45,7 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
     @callback
     def _handle_state(self, data: dict[str, object]) -> None:
         now = self.hass.loop.time()
-        remaining = DEFAULT_UPDATE_INTERVAL - (now - self._last_push)
+        remaining = self._publish_interval - (now - self._last_push)
         if remaining <= 0:
             self._publish(data)
             return

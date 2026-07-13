@@ -19,8 +19,13 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    OptionsFlowWithReload,
+)
 from homeassistant.const import CONF_ADDRESS, CONF_EMAIL, CONF_NAME, CONF_PASSWORD
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
@@ -38,8 +43,12 @@ from .const import (
     CONF_MODEL,
     CONF_PAIR_KEY,
     CONF_SERIAL_NUMBER,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MANUFACTURER_ID,
+    MAX_UPDATE_INTERVAL,
+    MIN_UPDATE_INTERVAL,
 )
 from .duml import ProtocolError, normalize_pair_key, parse_manufacturer_data
 
@@ -49,11 +58,28 @@ CONF_DEVICE = "device"
 CONF_CAPTCHA = "captcha_code"
 CONF_TOKEN = "member_token"
 
+OPTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_UPDATE_INTERVAL): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=MIN_UPDATE_INTERVAL, max=MAX_UPDATE_INTERVAL),
+        )
+    }
+)
+
 
 class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for DJI Power local BLE."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> DjiPowerOptionsFlow:
+        """Create the options flow."""
+        return DjiPowerOptionsFlow()
 
     def __init__(self) -> None:
         self._discovered_address: str | None = None
@@ -362,4 +388,25 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_MODEL: self._discovered_model or "DJI Power",
                 CONF_SERIAL_NUMBER: device.sn,
             },
+        )
+
+
+class DjiPowerOptionsFlow(OptionsFlowWithReload):
+    """Configure runtime behavior for a DJI Power station."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage integration options."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        current = {
+            CONF_UPDATE_INTERVAL: self.config_entry.options.get(
+                CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+            )
+        }
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, current),
         )

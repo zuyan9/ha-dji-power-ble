@@ -74,5 +74,16 @@
       "cannot_connect": "Could not reach the DJI cloud to fetch the pair key.",
       "no_devices": "No DJI devices with a local pair key were found on this account."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "DJI Power options",
+        "description": "Choose how often the latest BLE telemetry is published to Home Assistant. The station is still sampled roughly once per second.",
+        "data": {
+          "update_interval": "Home Assistant update interval (seconds)"
+        }
+      }
+    }
   }
 }

@@ -20,6 +20,7 @@ async def async_get_config_entry_diagnostics(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     return {
         "config_entry": async_redact_data(dict(entry.data), CONFIG_TO_REDACT),
+        "options": dict(entry.options),
         "connected": coordinator.device.is_connected,
         "state": async_redact_data(dict(coordinator.data or {}), STATE_TO_REDACT),
     }

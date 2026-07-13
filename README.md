@@ -31,8 +31,9 @@ captures and live tests.
 
 The integration keeps one authenticated BLE connection open and consumes the station's
 roughly 1 Hz telemetry pushes. It does not reconnect and re-authenticate for every
-sample. Pushes are coalesced into ten-second Home Assistant updates to avoid needless
-recorder churn while retaining the latest station values.
+sample. Pushes are coalesced into five-second Home Assistant updates by default to
+avoid needless recorder churn while retaining the latest station values. The publish
+interval is configurable from 1 to 60 seconds in the integration's options.
 
 ## Requirements
 
