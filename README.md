@@ -26,7 +26,7 @@ captures and live tests.
 - Individual USB-A and USB-C port power
 - AC output control
 - Discharge and recharge limit controls
-- Firmware, country, timezone, display, reserve, and cloud-status diagnostics
+- Firmware, timezone, display, reserve, and cloud-status diagnostics
 - Automatic discovery, reconnect-on-advertisement, and sanitized HA diagnostics
 
 The integration keeps one authenticated BLE connection open and consumes the station's
