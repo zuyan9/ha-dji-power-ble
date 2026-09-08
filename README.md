@@ -69,6 +69,7 @@ Only the pair key and device metadata are stored. Normal operation is local BLE.
 
 - [Architecture](docs/architecture.md)
 - [BLE protocol reference](docs/protocol.md)
+- [Troubleshooting and capture tools](docs/troubleshooting.md)
 
 ## Development
 
@@ -76,7 +77,7 @@ The protocol tests are deterministic and require neither Home Assistant nor Blue
 
 ```bash
 python3 -m unittest discover -v
-uvx ruff check custom_components tests
+uvx ruff check custom_components tests scripts
 ```
 
 The suite includes captured keyed config and `0x61` report payloads, nested interface
