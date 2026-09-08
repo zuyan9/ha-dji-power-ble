@@ -306,8 +306,23 @@ class DjiPowerDevice:
                 # raised before this coroutine got as far as awaiting the future.
                 future.exception()
 
+    def _log_auth_response(self, stage: str, packet: DumlPacket) -> None:
+        """Log response metadata without credentials, nonces, or device identifiers."""
+        _LOGGER.debug(
+            "DJI Power auth response: stage=%s status=%s payload_length=%d "
+            "source=0x%02x destination=0x%02x flags=0x%02x sequence=%d",
+            stage,
+            packet.payload[:1].hex() or "missing",
+            len(packet.payload),
+            packet.source,
+            packet.destination,
+            packet.flags,
+            packet.sequence,
+        )
+
     async def _authenticate(self) -> None:
         challenge = await self._request(AUTH_COMMAND, bytes((START_BIND,)))
+        self._log_auth_response("start_bind", challenge)
         if challenge.payload[:1] != b"\x00" or len(challenge.payload) < 5:
             raise DjiPowerAuthenticationError(
                 "station returned an invalid auth challenge"
@@ -316,6 +331,7 @@ class DjiPowerDevice:
         result = await self._request(
             AUTH_COMMAND, bytes((CHECK_SECRET_KEY,)) + material
         )
+        self._log_auth_response("check_secret_key", result)
         if result.payload[:1] != b"\x00":
             raise DjiPowerAuthenticationError("station rejected the pair key")
 

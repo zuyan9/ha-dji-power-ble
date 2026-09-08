@@ -7,6 +7,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, call
 
 ROOT = Path(__file__).parents[1]
 COMPONENT = ROOT / "custom_components" / "dji_power_ble"
@@ -128,6 +129,109 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.device = device_module.DjiPowerDevice(
             FakeBleDevice(), "ab" * 16, name="Test station"
         )
+
+    @staticmethod
+    def _auth_response(payload: bytes) -> duml.DumlPacket:
+        return duml.DumlPacket(
+            0xAB, 0x02, 1, 0x80, duml.POWER_COMMAND_SET, duml.AUTH_COMMAND, payload
+        )
+
+    async def test_authentication_logs_both_stages_and_sends_existing_credential(
+        self,
+    ) -> None:
+        nonce = b"\x12\x34\x56\x78"
+        self.device._request = AsyncMock(
+            side_effect=[
+                self._auth_response(b"\x00" + nonce),
+                self._auth_response(b"\x00" * 5),
+            ]
+        )
+
+        with self.assertLogs(device_module.__name__, level="DEBUG") as logs:
+            await self.device._authenticate()
+
+        self.assertEqual(
+            self.device._request.await_args_list,
+            [
+                call(duml.AUTH_COMMAND, b"\x00"),
+                call(duml.AUTH_COMMAND, b"\x01" + nonce + b"ab" * 16 + b"\x00"),
+            ],
+        )
+        self.assertEqual(len(logs.output), 2)
+        self.assertIn("stage=start_bind status=00 payload_length=5", logs.output[0])
+        self.assertIn("source=0xab destination=0x02 flags=0x80", logs.output[0])
+        self.assertIn("stage=check_secret_key status=00", logs.output[1])
+        self.assertNotIn(nonce.hex(), "\n".join(logs.output))
+        self.assertNotIn("ab" * 16, "\n".join(logs.output))
+
+    async def test_failed_challenges_log_metadata_without_sending_pair_key(
+        self,
+    ) -> None:
+        for payload in (b"", b"\x00", b"\x00" * 4, b"\x01" + b"\x00" * 4, b"\xff"):
+            with self.subTest(payload=payload):
+                self.device._request = AsyncMock(
+                    return_value=self._auth_response(payload)
+                )
+                with (
+                    self.assertLogs(device_module.__name__, level="DEBUG") as logs,
+                    self.assertRaisesRegex(
+                        device_module.DjiPowerAuthenticationError,
+                        "invalid auth challenge",
+                    ),
+                ):
+                    await self.device._authenticate()
+
+                self.device._request.assert_awaited_once_with(
+                    duml.AUTH_COMMAND, b"\x00"
+                )
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn(
+                    f"status={payload[:1].hex() or 'missing'}", logs.output[0]
+                )
+                self.assertIn(f"payload_length={len(payload)}", logs.output[0])
+
+    async def test_auth_failure_log_omits_unknown_payload_and_device_identifiers(
+        self,
+    ) -> None:
+        self.device.serial_number = "TEST-SERIAL"
+        private_data = b"ab" * 16 + b"-private-response"
+        self.device._request = AsyncMock(
+            return_value=self._auth_response(b"\xff" + private_data)
+        )
+
+        with (
+            self.assertLogs(device_module.__name__, level="DEBUG") as logs,
+            self.assertRaises(device_module.DjiPowerAuthenticationError),
+        ):
+            await self.device._authenticate()
+
+        output = "\n".join(logs.output)
+        for value in (
+            "ab" * 16,
+            private_data.decode(),
+            private_data.hex(),
+            FakeBleDevice.address,
+            "Test station",
+            self.device.serial_number,
+        ):
+            self.assertNotIn(value, output)
+
+    async def test_key_check_failure_is_logged_and_still_rejected(self) -> None:
+        self.device._request = AsyncMock(
+            side_effect=[
+                self._auth_response(b"\x00\x12\x34\x56\x78"),
+                self._auth_response(b"\x02" + b"\x00" * 4),
+            ]
+        )
+
+        with (
+            self.assertLogs(device_module.__name__, level="DEBUG") as logs,
+            self.assertRaises(device_module.DjiPowerAuthenticationError),
+        ):
+            await self.device._authenticate()
+
+        self.assertEqual(self.device._request.await_count, 2)
+        self.assertIn("stage=check_secret_key status=02", logs.output[1])
 
     async def test_requests_are_matched_by_sequence(self) -> None:
         self.device._client = RespondingClient(self.device)
