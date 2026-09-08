@@ -89,7 +89,7 @@ def _model_from_discovery(
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up and retain one authenticated local-push connection."""
-    address = entry.data[CONF_ADDRESS]
+    address = entry.data[CONF_ADDRESS].upper()
     discovery_info = bluetooth.async_last_service_info(hass, address, connectable=True)
     if (
         not bluetooth.async_address_present(hass, address)
