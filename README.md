@@ -28,12 +28,13 @@ used only during setup to retrieve the device's local credential.
 
 ## Requirements
 
+- DJI Power Station set up and linked to the DJI account in the DJI Home app
 - Home Assistant with Bluetooth, either through a local adapter or a Bluetooth proxy
 - [HACS](https://hacs.xyz/) installed (recommended method)
 
 A DJI Power station accepts only one BLE central at a time. While this integration is
 loaded, DJI Home cannot connect to the same station via Bluetooth. Temporarily disable
-or unload the HA config entry when you need to use the phone app.
+or unload the HA config entry when you need to use the DJI Home app.
 
 ## Installation
 
