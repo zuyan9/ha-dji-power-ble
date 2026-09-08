@@ -64,23 +64,10 @@ discovered automatically. The setup flow offers three credential paths:
 
 Only the pair key and device metadata are stored. Normal operation is local BLE.
 
-## Architecture
+## Technical documentation
 
-The station exposes service `a002`, write characteristic `c304`, and notify
-characteristic `c305`. It carries plaintext DJI DUML v1 frames with CRC8/CRC16 checks,
-then authenticates each connection with `0x5a/0x6a` and the local pair key.
-
-The implementation separates three concerns:
-
-- `duml.py` is an HA-independent frame, stream, keyed-config, report, and advertisement
-  codec.
-- `device.py` owns the persistent GATT session, authentication, sequence-matched
-  requests, push state, SET acknowledgement validation, and write readback.
-- The coordinator and entity platforms only adapt that device state to Home Assistant.
-
-This split and persistent-device approach were informed by the excellent
-[`rabits/ha-ef-ble`](https://github.com/rabits/ha-ef-ble) project, while the DJI byte
-layouts come from firmware analysis and live captures.
+- [Architecture](docs/architecture.md)
+- [BLE protocol reference](docs/protocol.md)
 
 ## Development
 
