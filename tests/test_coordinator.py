@@ -7,11 +7,19 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 COMPONENT = Path(__file__).parents[1] / "custom_components" / "dji_power_ble"
 PACKAGE = "_dji_power_coordinator_tests"
 LOADED = object()
+
+
+class DjiPowerError(Exception):
+    """Test protocol failure."""
+
+
+class DjiPowerAuthenticationError(DjiPowerError):
+    """Test authentication failure."""
 
 
 class _DataUpdateCoordinator:
@@ -46,10 +54,8 @@ def _load_coordinator() -> types.ModuleType:
         f"{PACKAGE}.device": _module(
             f"{PACKAGE}.device",
             DjiPowerDevice=object,
-            DjiPowerError=type("DjiPowerError", (Exception,), {}),
-            DjiPowerAuthenticationError=type(
-                "DjiPowerAuthenticationError", (Exception,), {}
-            ),
+            DjiPowerError=DjiPowerError,
+            DjiPowerAuthenticationError=DjiPowerAuthenticationError,
         ),
         "homeassistant": _module("homeassistant"),
         "homeassistant.config_entries": _module(
@@ -69,7 +75,9 @@ def _load_coordinator() -> types.ModuleType:
             DataUpdateCoordinator=_DataUpdateCoordinator,
             UpdateFailed=type("UpdateFailed", (Exception,), {}),
         ),
-        "bleak.exc": _module("bleak.exc", BleakError=Exception),
+        "bleak.exc": _module(
+            "bleak.exc", BleakError=type("BleakError", (Exception,), {})
+        ),
     }
     with patch.dict(sys.modules, modules):
         spec = importlib.util.spec_from_file_location(
@@ -85,7 +93,7 @@ def _load_coordinator() -> types.ModuleType:
 coordinator_module = _load_coordinator()
 
 
-class CoordinatorDisconnectTests(unittest.TestCase):
+class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.loop = Mock()
         self.loop.time.return_value = 100.0
@@ -100,6 +108,8 @@ class CoordinatorDisconnectTests(unittest.TestCase):
             address="AA:BB:CC:DD:EE:FF",
             add_state_listener=Mock(),
             add_disconnect_listener=Mock(),
+            connect=AsyncMock(),
+            disconnect=AsyncMock(),
         )
         self.coordinator = coordinator_module.DjiPowerCoordinator(
             self.hass, self.entry, self.device
@@ -154,3 +164,14 @@ class CoordinatorDisconnectTests(unittest.TestCase):
             str(self.coordinator.last_exception), "Bluetooth connection lost"
         )
         self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    async def test_authentication_error_retains_the_actual_failure_reason(self) -> None:
+        error = DjiPowerAuthenticationError(
+            "station returned an invalid auth challenge"
+        )
+        self.device.connect.side_effect = error
+
+        with self.assertRaisesRegex(
+            coordinator_module.UpdateFailed, "invalid auth challenge"
+        ):
+            await self.coordinator._async_update_data()

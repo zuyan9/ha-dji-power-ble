@@ -44,7 +44,9 @@ def _load_diagnostics() -> types.ModuleType:
         "homeassistant.config_entries": _module(
             "homeassistant.config_entries", ConfigEntry=object
         ),
-        "homeassistant.const": _module("homeassistant.const", CONF_ADDRESS="address"),
+        "homeassistant.const": _module(
+            "homeassistant.const", CONF_ADDRESS="address", CONF_NAME="name"
+        ),
         "homeassistant.core": _module("homeassistant.core", HomeAssistant=object),
     }
     with patch.dict(sys.modules, modules):

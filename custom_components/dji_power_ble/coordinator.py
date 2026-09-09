@@ -12,11 +12,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
-from .device import (
-    DjiPowerAuthenticationError,
-    DjiPowerDevice,
-    DjiPowerError,
-)
+from .device import DjiPowerDevice, DjiPowerError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,8 +84,6 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         """Establish the initial link; later updates arrive as pushes."""
         try:
             await self.device.connect()
-        except DjiPowerAuthenticationError as error:
-            raise UpdateFailed("station rejected the pair key") from error
         except (BleakError, DjiPowerError, TimeoutError) as error:
             raise UpdateFailed(str(error)) from error
         return dict(self.device.data)
