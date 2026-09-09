@@ -18,6 +18,15 @@ APP_SOURCE = 0x02
 POWER_DESTINATION = 0xAB
 POWER_COMMAND_SET = 0x5A
 
+DUML_ENCRYPTION_MASK = 0x0F
+POWER_1000_ENCRYPTION_TYPE = 0x06
+
+# Fixed original Power 1000 transport parameters, independent of the pair key.
+_POWER_1000_TRANSPORT_KEY = bytes.fromhex(
+    "c2ffbc72909d78a160082c3c256e28365899c3d374fc3e6078ea7fbf533fdf29"
+)
+_POWER_1000_TRANSPORT_IV = bytes.fromhex("bf85b37e2b370a4ab754768d04e6e3d6")
+
 REPORT_COMMAND = 0x61
 GET_COMMAND = 0x60
 TELEMETRY_COMMAND = 0x62
@@ -38,6 +47,42 @@ _SET_STATE_RULES = (RULES_KEY, bytes.fromhex("0a00") + b"1800efffff")
 
 class ProtocolError(ValueError):
     """A DJI Power payload or DUML frame is malformed."""
+
+
+def encrypt_power_1000_payload(payload: bytes) -> bytes:
+    """Wrap an original Power 1000 payload with AES-256-CBC and PKCS7."""
+    if not payload:
+        raise ProtocolError("cannot encrypt an empty payload")
+
+    # Keep raw frame decoding available without the optional runtime dependency.
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    padder = padding.PKCS7(algorithms.AES.block_size).padder()
+    padded = padder.update(payload) + padder.finalize()
+    encryptor = Cipher(
+        algorithms.AES(_POWER_1000_TRANSPORT_KEY), modes.CBC(_POWER_1000_TRANSPORT_IV)
+    ).encryptor()
+    return encryptor.update(padded) + encryptor.finalize()
+
+
+def decrypt_power_1000_payload(payload: bytes) -> bytes:
+    """Unwrap an original Power 1000 payload, validating every padding byte."""
+    if not payload or len(payload) % 16:
+        raise ProtocolError("encrypted payload must contain complete AES blocks")
+
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    decryptor = Cipher(
+        algorithms.AES(_POWER_1000_TRANSPORT_KEY), modes.CBC(_POWER_1000_TRANSPORT_IV)
+    ).decryptor()
+    padded = decryptor.update(payload) + decryptor.finalize()
+    unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+    try:
+        return unpadder.update(padded) + unpadder.finalize()
+    except ValueError as error:
+        raise ProtocolError("invalid encrypted payload padding") from error
 
 
 def crc8(data: bytes, initial: int = 0x77) -> int:
@@ -72,6 +117,11 @@ class DumlPacket:
     command_id: int
     payload: bytes = b""
     version: int = 1
+
+    @property
+    def encryption_type(self) -> int:
+        """Return the payload encryption type without modifying the wire frame."""
+        return self.flags & DUML_ENCRYPTION_MASK
 
     @property
     def is_response(self) -> bool:

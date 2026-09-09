@@ -44,7 +44,7 @@ command set | command ID | payload | CRC16
 | `4` | 1 | Sender | Device type and index |
 | `5` | 1 | Receiver | Device type and index |
 | `6` | 2 | Sequence | Matches requests with responses |
-| `8` | 1 | Attributes | Bit 7 marks a response |
+| `8` | 1 | Attributes | Bit 7 marks a response; low nibble selects encryption |
 | `9` | 1 | Command set | `0x5A` for DJI Power |
 | `10` | 1 | Command ID | Operation within the command set |
 | `11` | variable | Payload | Command-specific bytes |
@@ -54,19 +54,35 @@ Total length is a 10-bit value and includes the complete frame. CRC8 uses reflec
 polynomial `0x8C` with initial value `0x77`. CRC16 uses reflected polynomial `0x8408`
 with initial value `0x3692` and is stored little-endian.
 
-The integration sends requests from `0x02` to `0xAB` with attributes `0x20`. Responses
-set bit 7 and retain the request sequence. Periodic pushes use attributes `0x00`.
+The integration sends requests from `0x02` to `0xAB`. Responses set bit 7 and retain
+the request sequence. Transport attributes depend on the model:
+
+| Model | Requests | Responses | Pushes | Payload encoding |
+| --- | --- | --- | --- | --- |
+| Original Power 1000 | `0x26` | `0x86` | `0x06` | AES-256-CBC with PKCS#7 padding |
+| Power 1000 V2, Mini, 2000 | `0x20` | `0x80` | `0x00` | Plaintext in the implemented path |
+
+Power 1000 uses a fixed transport key and IV, separate from the account's `pair_key`.
+Encryption covers the command payload, including authentication, configuration, and
+telemetry. Frame lengths and CRC16 cover the encrypted bytes. The client selects this
+profile before its first request and decrypts responses before parsing command fields.
+Other encryption types are rejected without interpreting ciphertext as status or state.
 
 ## Authentication
 
-The implemented `0x5A` command path carries plaintext frames and requires application-
-layer authentication on every connection:
+The implemented `0x5A` command path requires application-layer authentication on every
+connection. These steps describe the decoded payloads:
 
 1. Subscribe to notifications.
 2. Send command `0x6A`, operation `0x00` (`startBind`).
 3. Receive a success byte and four-byte challenge.
 4. Send operation `0x01`, echoing the challenge with the 32-character `pair_key`.
 5. Continue only after a zero status response.
+
+On the original Power 1000, the five-byte challenge becomes a 16-byte encrypted
+payload with attributes `0x86`. Its first wire byte is ciphertext, so it is not an
+authentication status. This transport behavior is verified in firmware `01.00.15.00`
+through `01.00.18.00`; physical-device validation of this implementation is pending.
 
 The integration authenticates an already-bound station. Account and token setup are
 optional ways to retrieve its existing pair key; they are not part of runtime BLE

@@ -38,7 +38,7 @@ Offline decoding needs only Python 3.11+; scanning/capture also need BLE depende
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install "bleak>=3.0" "bleak-retry-connector>=3.5"
+.venv/bin/python -m pip install "bleak>=3.0" "bleak-retry-connector>=3.5" "cryptography>=44.0.0"
 ```
 
 On Windows, use `.venv\Scripts\python.exe`. The CLI needs a local Bluetooth adapter;
@@ -79,6 +79,9 @@ the device sent nothing.
 ## Inspect and share
 
 Default reports contain metadata, not names, addresses, credentials, or payloads.
+Encrypted authentication responses are labeled `status: encrypted`; their first wire
+byte is ciphertext and cannot be interpreted as an authentication status. Capture uses
+the advertised model to select the same transport handling as the integration.
 For private payload inspection, add `--raw`; optionally filter with `--command 0x66`
 (HMS), `0x61` (reports), or `0x62` (configuration). Known credential-bearing auth
 requests remain suppressed even in raw mode.

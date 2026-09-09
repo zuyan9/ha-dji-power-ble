@@ -34,8 +34,8 @@ entry.
 - [`device.py`](../custom_components/dji_power_ble/device.py) owns the authenticated GATT
   connection, request routing, notification handling, writes, and readback checks.
 - [`duml.py`](../custom_components/dji_power_ble/duml.py) is the Home Assistant-independent
-  protocol boundary: framing, checksums, stream reassembly, payload parsing, and SET
-  construction.
+  protocol boundary: framing, checksums, stream reassembly, Power 1000 payload encryption,
+  payload parsing, and SET construction.
 - [`coordinator.py`](../custom_components/dji_power_ble/coordinator.py) adapts device pushes
   to Home Assistant. Entity platforms expose the resulting state.
 
@@ -89,8 +89,9 @@ reappears.
 
 ## Security and diagnostics
 
-The BLE Power command path is not encrypted by this integration, so proximity and the
-pair key are the security boundary. Never publish pair keys, DJI account tokens,
-passwords, serial numbers, BLE addresses, or raw captures containing them. Downloaded
-diagnostics redact the address, pair key, and serial number; account passwords and member
-tokens are transient and are not stored.
+The original Power 1000 uses payload encryption with a fixed transport key; the other
+implemented model paths use plaintext. The transport key does not replace the station's
+pair-key authentication. Treat captures as sensitive even when payloads are encrypted.
+Never publish pair keys, DJI account tokens, passwords, serial numbers, BLE addresses,
+or raw captures containing them. Downloaded diagnostics redact the address, pair key, and
+serial number; account passwords and member tokens are transient and are not stored.
