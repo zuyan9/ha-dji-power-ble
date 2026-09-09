@@ -124,6 +124,59 @@ class GetClient:
         self.device._handle_packet(reply)
 
 
+class StationClient:
+    """Exercise full wire framing with fragmented station replies."""
+
+    is_connected = True
+
+    def __init__(self, device, *, encrypted=True, challenge=None, result=b"\x00" * 5):
+        self.device = device
+        self.encrypted = encrypted
+        self.challenge = challenge if challenge is not None else b"\x00\x11\x22\x33\x44"
+        self.result = result
+        self.requests = []
+        self.wire_requests = []
+
+    def send(self, command, payload, *, sequence=0, flags=0):
+        if self.encrypted:
+            payload = duml.encrypt_power_1000_payload(payload)
+            flags |= duml.POWER_1000_ENCRYPTION_TYPE
+        wire = duml.DumlPacket(
+            0xAB, 0x02, sequence, flags, duml.POWER_COMMAND_SET, command, payload
+        ).encode()
+        for offset in range(0, len(wire), 7):
+            self.device._on_notify(None, bytearray(wire[offset : offset + 7]))
+
+    async def write_gatt_char(self, uuid, value, *, response):  # noqa: ARG002
+        request = duml.DumlPacket.decode(value)
+        self.wire_requests.append(request)
+        assert request.flags == (0x26 if self.encrypted else 0x20)
+        payload = (
+            duml.decrypt_power_1000_payload(request.payload)
+            if self.encrypted
+            else request.payload
+        )
+        self.requests.append((request.command_id, payload))
+        if request.command_id == duml.AUTH_COMMAND:
+            if payload == b"\x00":
+                reply = self.challenge
+            else:
+                assert payload == b"\x01\x11\x22\x33\x44" + b"ab" * 16 + b"\x00"
+                reply = self.result
+        elif request.command_id == duml.GET_COMMAND:
+            reply = b"\x00" * 4 + duml.build_keyed_set_payload(
+                [(0x15, (60).to_bytes(2, "little"))], timestamp_ms=1
+            )
+        elif request.command_id == duml.SET_COMMAND:
+            reply = duml.build_keyed_set_payload(
+                [(key, b"\x00" * 4) for key in duml.parse_keyed_values(payload)],
+                timestamp_ms=1,
+            )
+        else:
+            raise AssertionError(f"unexpected command {request.command_id}")
+        self.send(request.command_id, reply, sequence=request.sequence, flags=0x80)
+
+
 class DeviceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.device = device_module.DjiPowerDevice(
@@ -135,6 +188,133 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         return duml.DumlPacket(
             0xAB, 0x02, 1, 0x80, duml.POWER_COMMAND_SET, duml.AUTH_COMMAND, payload
         )
+
+    def _station(self, model="DJI Power 1000", **kwargs):
+        device = device_module.DjiPowerDevice(
+            FakeBleDevice(), "ab" * 16, name="Test station", model=model
+        )
+        client = StationClient(device, **kwargs)
+        device._client = client
+        return device, client
+
+    async def test_power_1000_auth_config_set_and_fragmented_pushes(self):
+        device, client = self._station()
+        with self.assertLogs(device_module.__name__, level="DEBUG") as logs:
+            await device._authenticate()
+        self.assertEqual([len(p.payload) for p in client.wire_requests], [16, 48])
+        self.assertIn("stage=start_bind status=00 payload_length=16", logs.output[0])
+        self.assertIn("flags=0x86", logs.output[0])
+        self.assertIn("decoded_payload_length=5", logs.output[0])
+        self.assertNotIn("11223344", "\n".join(logs.output))
+        self.assertNotIn("ab" * 16, "\n".join(logs.output))
+
+        await device.refresh_config()
+        self.assertEqual(device.data["timezone_offset_min"], 60)
+        await device._set(duml.build_ac_set_payload(True), (0x0D, 0x0E))
+        self.assertEqual(
+            [p.command_id for p in client.wire_requests],
+            [
+                duml.AUTH_COMMAND,
+                duml.AUTH_COMMAND,
+                duml.GET_COMMAND,
+                duml.GET_COMMAND,
+                duml.SET_COMMAND,
+            ],
+        )
+
+        battery = (5000).to_bytes(2, "little") + b"\x00" * 7
+        report = duml.build_keyed_header(1) + b"\x20\x30\x09\x00" + battery
+        client.send(duml.REPORT_COMMAND, report)
+        self.assertEqual(device.data["battery_percent"], 50)
+        self.assertTrue(device._report_event.is_set())
+        client.send(
+            duml.TELEMETRY_COMMAND,
+            duml.build_keyed_set_payload(
+                [(0x15, (120).to_bytes(2, "little"))], timestamp_ms=1
+            ),
+        )
+        self.assertEqual(device.data["timezone_offset_min"], 120)
+        client.send(duml.HMS_COMMAND, b"\x00" * 4)
+        self.assertEqual(device.data["hms_raw"], "00000000")
+
+    async def test_plaintext_models_keep_plaintext_wire_authentication(self):
+        for model in ("DJI Power 1000 V2", "DJI Power 1000 Mini", "DJI Power 2000"):
+            with self.subTest(model=model):
+                device, client = self._station(model, encrypted=False)
+                await device._authenticate()
+                self.assertEqual(
+                    [len(p.payload) for p in client.wire_requests], [1, 38]
+                )
+                self.assertEqual(client.requests[0], (duml.AUTH_COMMAND, b"\x00"))
+
+    async def test_encrypted_rejected_challenge_does_not_send_pair_key(self):
+        device, client = self._station(challenge=b"\x01" + b"\x00" * 4)
+        with (
+            self.assertLogs(device_module.__name__, level="DEBUG") as logs,
+            self.assertRaisesRegex(
+                device_module.DjiPowerAuthenticationError, "invalid auth challenge"
+            ),
+        ):
+            await device._authenticate()
+        self.assertEqual(len(client.requests), 1)
+        self.assertIn("status=01 payload_length=16", logs.output[0])
+
+    async def test_encrypted_key_rejection_remains_an_authentication_error(self):
+        device, client = self._station(result=b"\x02" + b"\x00" * 4)
+        with self.assertRaisesRegex(
+            device_module.DjiPowerAuthenticationError, "rejected the pair key"
+        ):
+            await device._authenticate()
+        self.assertEqual(len(client.requests), 2)
+
+    async def test_undecodable_auth_is_not_interpreted_as_status(self):
+        challenge = duml.encrypt_power_1000_payload(b"\x00\x11\x22\x33\x44")
+        for model, flags, payload in (
+            ("DJI Power 1000", 0x86, b"\x00"),
+            ("DJI Power 1000", 0x86, b"\x00" * 16),
+            ("DJI Power 1000", 0x8E, challenge),
+            ("DJI Power 1000 Mini", 0x86, challenge),
+        ):
+            with self.subTest(model=model, flags=flags, length=len(payload)):
+                device, _client = self._station(model)
+                device._request = AsyncMock(
+                    return_value=duml.DumlPacket(
+                        0xAB,
+                        0x02,
+                        1,
+                        flags,
+                        duml.POWER_COMMAND_SET,
+                        duml.AUTH_COMMAND,
+                        payload,
+                    )
+                )
+                with (
+                    self.assertLogs(device_module.__name__, level="DEBUG") as logs,
+                    self.assertRaisesRegex(
+                        device_module.DjiPowerError, "cannot decode"
+                    ),
+                ):
+                    await device._authenticate()
+                device._request.assert_awaited_once()
+                self.assertIn("status=encrypted", logs.output[0])
+
+    async def test_malformed_encrypted_push_does_not_publish_state(self):
+        device, _client = self._station()
+        changes = []
+        device.add_state_listener(changes.append)
+        device._handle_packet(
+            duml.DumlPacket(
+                0xAB,
+                0x02,
+                1,
+                6,
+                duml.POWER_COMMAND_SET,
+                duml.REPORT_COMMAND,
+                b"\x00" * 16,
+            )
+        )
+        self.assertEqual(changes, [])
+        self.assertEqual(device.data, {})
 
     async def test_authentication_logs_both_stages_and_sends_existing_credential(
         self,

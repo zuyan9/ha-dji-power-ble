@@ -60,6 +60,24 @@ CAPTURED_REPORT = bytes.fromhex(
     "3230190003333014003430100001040001000000003830000035300000"
 )
 
+# Synthetic known-answer vectors: no device nonce, credentials, or capture data.
+POWER_1000_AUTH_FRAME = bytes.fromhex(
+    "551d04dfab020110865a6a5748f5445a84623c2347b1f9fcbde0f5bb2e"
+)
+POWER_1000_CIPHER_VECTORS = (
+    (bytes.fromhex("0011223344"), "5748f5445a84623c2347b1f9fcbde0f5"),
+    (bytes.fromhex("0100000000"), "dce7729163478147e55088f405885904"),
+    (
+        bytes(range(16)),
+        "1d8457d6affce4d410217549ad683a7fa9d9eda83a8a41cec0450d2cfd1d2b3d",
+    ),
+    (
+        bytes(range(38)),
+        "1d8457d6affce4d410217549ad683a7f4f0dab801eba83c08939050c1de81f68"
+        "8f3d0366a135382f3666b65324c1e0c0",
+    ),
+)
+
 
 class DumlFrameTests(unittest.TestCase):
     def test_encode_matches_captured_auth_request(self) -> None:
@@ -80,6 +98,50 @@ class DumlFrameTests(unittest.TestCase):
         self.assertEqual(duml.normalize_pair_key("AA" * 16), b"aa" * 16)
         with self.assertRaises(duml.ProtocolError):
             duml.normalize_pair_key("z" * 32)
+
+
+class Power1000TransportTests(unittest.TestCase):
+    def test_cipher_matches_synthetic_known_answers(self) -> None:
+        for plaintext, ciphertext_hex in POWER_1000_CIPHER_VECTORS:
+            with self.subTest(plaintext_length=len(plaintext), status=plaintext[0]):
+                ciphertext = bytes.fromhex(ciphertext_hex)
+                self.assertEqual(
+                    duml.encrypt_power_1000_payload(plaintext), ciphertext
+                )
+                self.assertEqual(
+                    duml.decrypt_power_1000_payload(ciphertext), plaintext
+                )
+
+    def test_auth_frame_preserves_ciphertext_and_wire_metadata(self) -> None:
+        packet = duml.DumlPacket.decode(POWER_1000_AUTH_FRAME)
+
+        self.assertEqual(packet.encryption_type, duml.POWER_1000_ENCRYPTION_TYPE)
+        self.assertTrue(packet.is_response)
+        self.assertEqual(len(packet.payload), 16)
+        self.assertEqual(
+            duml.decrypt_power_1000_payload(packet.payload),
+            bytes.fromhex("0011223344"),
+        )
+        self.assertEqual(packet.flags, 0x86)
+        self.assertEqual(packet.sequence, 4097)
+        self.assertEqual(packet.encode(), POWER_1000_AUTH_FRAME)
+
+    def test_rejects_empty_or_partial_ciphertext(self) -> None:
+        for payload in (b"", b"\x00", bytes(15), bytes(17)):
+            with (
+                self.subTest(length=len(payload)),
+                self.assertRaisesRegex(duml.ProtocolError, "AES blocks"),
+            ):
+                duml.decrypt_power_1000_payload(payload)
+
+    def test_rejects_corrupt_padding_before_its_final_byte(self) -> None:
+        ciphertext = bytearray.fromhex(POWER_1000_CIPHER_VECTORS[2][1])
+        # CBC makes this flip the penultimate padding byte, leaving the final
+        # padding-length byte intact. Checking only that final byte would pass.
+        ciphertext[14] ^= 1
+
+        with self.assertRaisesRegex(duml.ProtocolError, "padding"):
+            duml.decrypt_power_1000_payload(bytes(ciphertext))
 
 
 class KeyedConfigTests(unittest.TestCase):

@@ -76,13 +76,15 @@ Only the pair key and device metadata are stored. Normal operation is local BLE.
 The protocol tests are deterministic and require neither Home Assistant nor Bluetooth:
 
 ```bash
+python3 -m pip install "cryptography>=44.0.0"
 python3 -m unittest discover -v
 uvx ruff check custom_components tests scripts
 ```
 
 The suite includes captured keyed config and `0x61` report payloads, nested interface
-trees, DUML fragmentation/recovery, advertisement model data, the 64-bit keyed timestamp,
-charge-limit preservation, and per-key SET acknowledgements.
+trees, Power 1000 encryption vectors, DUML fragmentation/recovery, advertisement model
+data, the 64-bit keyed timestamp, charge-limit preservation, and per-key SET
+acknowledgements.
 
 ## Known gaps
 

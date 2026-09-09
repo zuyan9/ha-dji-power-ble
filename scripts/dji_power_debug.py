@@ -61,6 +61,13 @@ def credential_request(packet) -> bool:
     )
 
 
+def auth_stage(packet) -> str:
+    """Interpret an operation only when its payload is plaintext."""
+    if packet.flags & 0x0F:
+        return "encrypted"
+    return AUTH_STAGES.get(packet.payload[0] if packet.payload else -1, "unknown")
+
+
 class Recorder:
     """Write private JSONL evidence, including original notification boundaries."""
 
@@ -81,9 +88,7 @@ class Recorder:
                 self.emit(
                     "redacted_auth",
                     direction=direction,
-                    stage=AUTH_STAGES.get(
-                        packet.payload[0] if packet.payload else -1, "unknown"
-                    ),
+                    stage=auth_stage(packet),
                     **packet_fields(packet),
                 )
                 return
@@ -122,7 +127,7 @@ def recording_device_class(base):
     return RecordingDevice
 
 
-async def scan(args, recorder: Recorder):
+async def scan(args, recorder: Recorder, *, advertisements: dict | None = None):
     from bleak import BleakScanner
 
     found = {}
@@ -144,6 +149,8 @@ async def scan(args, recorder: Recorder):
             # Local selection aid; the shareable report is produced by `decode`.
             print(f"Found DJI advertisement: {device.address}", file=sys.stderr)
         found[device.address] = device
+        if advertisements is not None:
+            advertisements[device.address] = data
 
     async with BleakScanner(detection_callback=discovered):
         await asyncio.sleep(args.scan_seconds)
@@ -157,11 +164,17 @@ async def capture(args, recorder: Recorder) -> None:
         if args.key_file
         else getpass.getpass("Existing pair key (hidden): ")
     )
-    devices = await scan(args, recorder)
+    advertisements = {}
+    devices = await scan(args, recorder, advertisements=advertisements)
     if not devices:
         raise RuntimeError("No matching DJI advertisement; no connection attempted")
+    address, ble_device = next(iter(devices.items()))
+    model = "DJI Power"
+    if address in advertisements:
+        with contextlib.suppress(duml.ProtocolError):
+            model = duml.parse_manufacturer_data(advertisements[address]).model
     device = recording_device_class(module.DjiPowerDevice)(
-        next(iter(devices.values())), key, name="Debug capture", recorder=recorder
+        ble_device, key, name="Debug capture", model=model, recorder=recorder
     )
     disconnected = asyncio.Event()
     device.add_disconnect_listener(lambda _: disconnected.set())
@@ -366,14 +379,16 @@ def decode(
             if auth:
                 if packet.is_response:
                     row["stage"] = operations.pop(request_key, "unknown")
-                    row["status"] = packet.payload[:1].hex() or "missing"
+                    row["status"] = (
+                        "encrypted"
+                        if packet.flags & 0x0F
+                        else packet.payload[:1].hex() or "missing"
+                    )
                 else:
                     stage = (
                         event.get("stage", "unknown")
                         if kind == "redacted_auth"
-                        else AUTH_STAGES.get(
-                            packet.payload[0] if packet.payload else -1, "unknown"
-                        )
+                        else auth_stage(packet)
                     )
                     row["stage"] = stage
                     operations[request_key] = stage

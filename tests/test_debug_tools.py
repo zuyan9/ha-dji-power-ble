@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -149,6 +150,22 @@ class DebugDecodeTests(unittest.TestCase):
         self.assertTrue(rows[0]["payload_redacted"])
         self.assertEqual(rows[1]["payload"], "0100000000")
 
+    def test_encrypted_auth_is_not_interpreted_as_plaintext(self):
+        request = replace(packet(b"\x01" * 16, response=False), flags=0x26)
+        reply = replace(packet(b"\xa9" * 16), flags=0x86)
+        rows = list(
+            debug.decode(
+                iter([gatt(request.encode(), direction="tx"), gatt(reply.encode())]),
+                raw=True,
+            )
+        )
+        self.assertEqual(rows[0]["stage"], "encrypted")
+        self.assertTrue(rows[0]["payload_redacted"])
+        self.assertNotIn("payload", rows[0])
+        self.assertEqual(rows[1]["stage"], "encrypted")
+        self.assertEqual(rows[1]["status"], "encrypted")
+        self.assertEqual(rows[1]["payload_length"], 16)
+
     def test_fragmented_gatt_values_and_command_filter(self):
         first = packet(command=0x61).encode()
         second = packet(b"alarm", command=0x66).encode()
@@ -272,6 +289,39 @@ class DebugDecodeTests(unittest.TestCase):
 
 
 class DebugCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capture_passes_advertised_model_to_session(self):
+        models = []
+
+        class Device:
+            def __init__(self, device, key, *, name, model):
+                models.append(model)
+
+            def add_disconnect_listener(self, callback):
+                pass
+
+            async def connect(self):
+                pass
+
+            async def disconnect(self):
+                pass
+
+        async def scan(args, recorder, *, advertisements):
+            advertisements["address"] = bytes.fromhex("911110")
+            return {"address": object()}
+
+        args = types.SimpleNamespace(key_file=None, seconds=0.001)
+        with (
+            patch.object(
+                debug.importlib,
+                "import_module",
+                return_value=types.SimpleNamespace(DjiPowerDevice=Device),
+            ),
+            patch.object(debug, "scan", scan),
+            patch.object(debug.getpass, "getpass", return_value="ab" * 16),
+        ):
+            await debug.capture(args, debug.Recorder(io.StringIO(), "capture"))
+        self.assertEqual(models, ["DJI Power 1000"])
+
     async def test_capture_reuses_real_session_auth_gets_and_cleanup(self):
         from .test_device import device_module
 

@@ -20,6 +20,7 @@ from .duml import (
     GET_COMMAND,
     HMS_COMMAND,
     NOTIFY_UUID,
+    POWER_1000_ENCRYPTION_TYPE,
     POWER_COMMAND_SET,
     POWER_DESTINATION,
     POWER_SWITCH_KEY,
@@ -34,6 +35,8 @@ from .duml import (
     ProtocolError,
     build_ac_set_payload,
     build_charge_limits_set_payload,
+    decrypt_power_1000_payload,
+    encrypt_power_1000_payload,
     normalize_pair_key,
     parse_report,
     parse_set_ack,
@@ -51,7 +54,7 @@ class DjiPowerError(Exception):
 
 
 class DjiPowerAuthenticationError(DjiPowerError):
-    """The station rejected the local pair key."""
+    """The station rejected the challenge or local pair key."""
 
 
 class DjiPowerDisconnectedError(DjiPowerError):
@@ -78,6 +81,7 @@ class DjiPowerDevice:
         self._pair_key = normalize_pair_key(pair_key)
         self._name = name
         self.model = model
+        self._encrypted_transport = model == "DJI Power 1000"
         self.serial_number = serial_number
         self._client: BleakClient | None = None
         self._stream = DumlStream()
@@ -149,18 +153,18 @@ class DjiPowerDevice:
             return
         try:
             if packet.command_id == REPORT_COMMAND:
-                update = parse_report(packet.payload)
+                update = parse_report(self._decode_payload(packet))
                 if update:
                     self._merge_data(update)
                     self._report_event.set()
             elif packet.command_id == TELEMETRY_COMMAND:
-                update = parse_telemetry(packet.payload)
+                update = parse_telemetry(self._decode_payload(packet))
                 if update:
                     self._merge_data(update)
             elif packet.command_id == HMS_COMMAND:
                 # The dy302+ HMS body is still capture-gated. Preserve it in
                 # diagnostics without inventing an entity schema.
-                self._merge_data({"hms_raw": packet.payload.hex()})
+                self._merge_data({"hms_raw": self._decode_payload(packet).hex()})
         except ProtocolError as error:
             _LOGGER.debug(
                 "%s: ignored malformed 0x%02x push: %s",
@@ -168,6 +172,20 @@ class DjiPowerDevice:
                 packet.command_id,
                 error,
             )
+
+    def _decode_payload(self, packet: DumlPacket) -> bytes:
+        """Decode a wire payload before interpreting command-specific fields."""
+        if packet.encryption_type == 0:
+            return packet.payload
+        if (
+            packet.encryption_type == POWER_1000_ENCRYPTION_TYPE
+            and self._encrypted_transport
+        ):
+            return decrypt_power_1000_payload(packet.payload)
+        raise ProtocolError(
+            f"unsupported payload encryption type {packet.encryption_type} "
+            f"for {self.model}"
+        )
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         self._client = None
@@ -278,11 +296,15 @@ class DjiPowerDevice:
             raise DjiPowerDisconnectedError(f"{self.address} is not connected")
 
         sequence = self._next_sequence()
+        flags = 0x20
+        if self._encrypted_transport:
+            payload = encrypt_power_1000_payload(payload)
+            flags |= POWER_1000_ENCRYPTION_TYPE
         packet = DumlPacket(
             APP_SOURCE,
             POWER_DESTINATION,
             sequence,
-            0x20,
+            flags,
             POWER_COMMAND_SET,
             command_id,
             payload,
@@ -306,33 +328,46 @@ class DjiPowerDevice:
                 # raised before this coroutine got as far as awaiting the future.
                 future.exception()
 
-    def _log_auth_response(self, stage: str, packet: DumlPacket) -> None:
+    def _log_auth_response(
+        self, stage: str, packet: DumlPacket, payload: bytes | None
+    ) -> None:
         """Log response metadata without credentials, nonces, or device identifiers."""
         _LOGGER.debug(
             "DJI Power auth response: stage=%s status=%s payload_length=%d "
-            "source=0x%02x destination=0x%02x flags=0x%02x sequence=%d",
+            "source=0x%02x destination=0x%02x flags=0x%02x sequence=%d "
+            "decoded_payload_length=%s",
             stage,
-            packet.payload[:1].hex() or "missing",
+            (payload[:1].hex() or "missing") if payload is not None else "encrypted",
             len(packet.payload),
             packet.source,
             packet.destination,
             packet.flags,
             packet.sequence,
+            len(payload) if payload is not None else "unknown",
         )
+
+    def _auth_payload(self, stage: str, packet: DumlPacket) -> bytes:
+        try:
+            payload = self._decode_payload(packet)
+        except ProtocolError as error:
+            self._log_auth_response(stage, packet, None)
+            raise DjiPowerError(f"cannot decode {stage} response: {error}") from error
+        self._log_auth_response(stage, packet, payload)
+        return payload
 
     async def _authenticate(self) -> None:
         challenge = await self._request(AUTH_COMMAND, bytes((START_BIND,)))
-        self._log_auth_response("start_bind", challenge)
-        if challenge.payload[:1] != b"\x00" or len(challenge.payload) < 5:
+        challenge_payload = self._auth_payload("start_bind", challenge)
+        if challenge_payload[:1] != b"\x00" or len(challenge_payload) < 5:
             raise DjiPowerAuthenticationError(
                 "station returned an invalid auth challenge"
             )
-        material = challenge.payload[1:5] + self._pair_key + b"\x00"
+        material = challenge_payload[1:5] + self._pair_key + b"\x00"
         result = await self._request(
             AUTH_COMMAND, bytes((CHECK_SECRET_KEY,)) + material
         )
-        self._log_auth_response("check_secret_key", result)
-        if result.payload[:1] != b"\x00":
+        result_payload = self._auth_payload("check_secret_key", result)
+        if result_payload[:1] != b"\x00":
             raise DjiPowerAuthenticationError("station rejected the pair key")
 
     async def refresh_config(self) -> None:
@@ -340,7 +375,7 @@ class DjiPowerDevice:
         for module in (0x01, 0x04):
             response = await self._request(GET_COMMAND, bytes((0x00, module, 0x10)))
             try:
-                update = parse_telemetry(response.payload)
+                update = parse_telemetry(self._decode_payload(response))
             except ProtocolError as error:
                 raise DjiPowerError("station returned malformed config data") from error
             self._merge_data(update)
@@ -348,7 +383,7 @@ class DjiPowerDevice:
     async def _set(self, payload: bytes, expected_keys: tuple[int, ...]) -> None:
         response = await self._request(SET_COMMAND, payload)
         try:
-            parse_set_ack(response.payload, expected_keys)
+            parse_set_ack(self._decode_payload(response), expected_keys)
         except ProtocolError as error:
             raise DjiPowerError(str(error)) from error
 
