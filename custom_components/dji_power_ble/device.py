@@ -223,10 +223,14 @@ class DjiPowerDevice:
             raise DjiPowerError(
                 f"connection timed out after {DEFAULT_CONNECT_TIMEOUT:.0f} seconds"
             ) from error
+        except BaseException:
+            await self.disconnect()
+            raise
 
     async def _connect_and_initialize(self) -> None:
         """Establish and initialize the link within the caller's deadline."""
         client = await self._establish()
+        self._client = client
         try:
             await client.start_notify(NOTIFY_UUID, self._on_notify)
         except BleakError:
@@ -235,39 +239,19 @@ class DjiPowerDevice:
             _LOGGER.debug("%s: clearing incomplete GATT cache", self.address)
             with contextlib.suppress(AttributeError, BleakError):
                 await client.clear_cache()
-            self._disconnecting = True
-            try:
-                with contextlib.suppress(BleakError):
-                    await client.disconnect()
-            finally:
-                self._disconnecting = False
-            client = await self._establish()
-            try:
-                await client.start_notify(NOTIFY_UUID, self._on_notify)
-            except Exception:
-                self._disconnecting = True
-                try:
-                    with contextlib.suppress(BleakError):
-                        await client.disconnect()
-                finally:
-                    self._disconnecting = False
-                raise
-        self._client = client
-        try:
-            await self._authenticate()
-            await self.refresh_config()
-            try:
-                async with asyncio.timeout(5):
-                    await self._report_event.wait()
-            except TimeoutError:
-                # Config state is enough to set up; the periodic report may be
-                # delayed on an idle or older station.
-                _LOGGER.debug(
-                    "%s: no initial 0x61 push within five seconds", self.address
-                )
-        except Exception:
             await self.disconnect()
-            raise
+            client = await self._establish()
+            self._client = client
+            await client.start_notify(NOTIFY_UUID, self._on_notify)
+        await self._authenticate()
+        await self.refresh_config()
+        try:
+            async with asyncio.timeout(5):
+                await self._report_event.wait()
+        except TimeoutError:
+            # Config state is enough to set up; the periodic report may be
+            # delayed on an idle or older station.
+            _LOGGER.debug("%s: no initial 0x61 push within five seconds", self.address)
 
     async def disconnect(self) -> None:
         """Cleanly close the persistent link."""
@@ -277,8 +261,7 @@ class DjiPowerDevice:
         self._disconnecting = True
         self._client = None
         try:
-            with contextlib.suppress(BleakError, EOFError):
-                await client.stop_notify(NOTIFY_UUID)
+            # Bleak stops notifications as part of disconnecting.
             with contextlib.suppress(BleakError):
                 await client.disconnect()
         finally:
@@ -312,8 +295,8 @@ class DjiPowerDevice:
         future = asyncio.get_running_loop().create_future()
         self._pending[sequence] = (POWER_COMMAND_SET, command_id, future)
         try:
-            await client.write_gatt_char(WRITE_UUID, packet.encode(), response=True)
             async with asyncio.timeout(timeout):
+                await client.write_gatt_char(WRITE_UUID, packet.encode(), response=True)
                 return await future
         except TimeoutError as error:
             raise DjiPowerError(

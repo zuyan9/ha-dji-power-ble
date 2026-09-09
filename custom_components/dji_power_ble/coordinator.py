@@ -12,11 +12,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
-from .device import (
-    DjiPowerAuthenticationError,
-    DjiPowerDevice,
-    DjiPowerError,
-)
+from .device import DjiPowerDevice, DjiPowerError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,11 +52,15 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
     @callback
     def _publish(self, data: dict[str, object]) -> None:
         self._last_push = self.hass.loop.time()
+        self._cancel_pending_push()
+        self.async_set_updated_data(data)
+
+    @callback
+    def _cancel_pending_push(self) -> None:
         self._pending_data = None
         if self._push_timer is not None:
             self._push_timer.cancel()
             self._push_timer = None
-        self.async_set_updated_data(data)
 
     @callback
     def _flush_pending(self) -> None:
@@ -70,6 +70,7 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
 
     @callback
     def _handle_disconnect(self, error: Exception | None) -> None:
+        self._cancel_pending_push()
         self.async_set_update_error(
             UpdateFailed(str(error) if error else "Bluetooth connection lost")
         )
@@ -83,8 +84,6 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         """Establish the initial link; later updates arrive as pushes."""
         try:
             await self.device.connect()
-        except DjiPowerAuthenticationError as error:
-            raise UpdateFailed("station rejected the pair key") from error
         except (BleakError, DjiPowerError, TimeoutError) as error:
             raise UpdateFailed(str(error)) from error
         return dict(self.device.data)
@@ -93,9 +92,7 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         """Unsubscribe callbacks and close the BLE link."""
         self._unsub_state()
         self._unsub_disconnect()
-        if self._push_timer is not None:
-            self._push_timer.cancel()
-            self._push_timer = None
+        self._cancel_pending_push()
         await self.device.disconnect()
 
     async def async_set_ac(self, enabled: bool) -> None:

@@ -404,10 +404,11 @@ def parse_report(payload: bytes) -> dict[str, object]:
 
 def _keyed_body(payload: bytes) -> bytes:
     """Return the TLV portion of a 0x60/0x62/0x63 payload."""
-    if len(payload) >= 20 and payload[6:8] == b"\x10\x00":
-        return payload[20:]  # 0x60 response: op/pad + shared 16-byte header
+    # Check the shared header first: its timestamp can contain the GET marker.
     if len(payload) >= 16 and payload[2:4] == b"\x10\x00":
         return payload[16:]
+    if len(payload) >= 20 and payload[6:8] == b"\x10\x00":
+        return payload[20:]  # 0x60 response: status + shared 16-byte header
     return payload
 
 

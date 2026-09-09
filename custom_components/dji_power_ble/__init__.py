@@ -45,11 +45,15 @@ def _register_reappear_callback(
     )
     if entry.entry_id in callbacks:
         return
+    registered_at = hass.loop.time()
 
     def _on_device_reappear(
         service_info: BluetoothServiceInfoBleak,
         change: BluetoothChange,
     ) -> None:
+        # HA replays cached advertisements while registering the callback.
+        if service_info.time <= registered_at:
+            return
         _LOGGER.info("Device %s reappeared; scheduling reload", address)
         _cancel_reappear_callback(hass, entry)
         hass.config_entries.async_schedule_reload(entry.entry_id)
@@ -115,21 +119,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         serial_number=entry.data.get(CONF_SERIAL_NUMBER),
     )
     coordinator = DjiPowerCoordinator(hass, entry, device)
+    platforms_started = False
     try:
         await coordinator.async_config_entry_first_refresh()
-    except ConfigEntryNotReady:
-        await coordinator.async_disconnect()
-        _register_reappear_callback(hass, entry, address)
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+        platforms_started = True
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        if not device.is_connected:
+            raise ConfigEntryNotReady(f"Device {address} disconnected during setup")
+    except BaseException as error:
+        try:
+            if platforms_started:
+                await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        finally:
+            hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+            await coordinator.async_disconnect()
+        if isinstance(error, ConfigEntryNotReady):
+            _register_reappear_callback(hass, entry, address)
         raise
-
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    if not device.is_connected:
-        await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-        await coordinator.async_disconnect()
-        _register_reappear_callback(hass, entry, address)
-        raise ConfigEntryNotReady(f"Device {address} disconnected during setup")
     return True
 
 
@@ -142,3 +149,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ):
         await coordinator.async_disconnect()
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Cancel the watcher even when removing an entry waiting for setup retry."""
+    _cancel_reappear_callback(hass, entry)

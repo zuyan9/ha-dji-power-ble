@@ -140,14 +140,17 @@ class DjiCloudClient:
 
     async def _post(self, action: str, data: dict[str, str]) -> dict:
         headers = _signed_headers(self._client_name, self._device_id)
-        async with self._session.post(
-            f"{ACCOUNT_BASE}/{action}",
-            headers=headers,
-            data=data,
-            timeout=self._timeout,
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json(content_type=None)
+        try:
+            async with self._session.post(
+                f"{ACCOUNT_BASE}/{action}",
+                headers=headers,
+                data=data,
+                timeout=self._timeout,
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            raise DjiCloudError("DJI account request failed") from err
 
     async def get_image_captcha(self) -> tuple[str, bytes]:
         """Fetch DJI's own image captcha. Returns (srandom, png_bytes).
@@ -159,13 +162,16 @@ class DjiCloudClient:
         srandom = uuid.uuid4().hex
         headers = _signed_headers(self._client_name, self._device_id)
         headers.pop("Content-Type", None)
-        async with self._session.get(
-            f"{ACCOUNT_BASE}/vcode?srandom={srandom}",
-            headers=headers,
-            timeout=self._timeout,
-        ) as resp:
-            resp.raise_for_status()
-            return srandom, await resp.read()
+        try:
+            async with self._session.get(
+                f"{ACCOUNT_BASE}/vcode?srandom={srandom}",
+                headers=headers,
+                timeout=self._timeout,
+            ) as resp:
+                resp.raise_for_status()
+                return srandom, await resp.read()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise DjiCloudError("DJI image captcha request failed") from err
 
     async def exchange_image_captcha(self, srandom: str, code: str) -> str:
         """Exchange a typed image-captcha code for a DJI captchaTicket.
@@ -258,14 +264,14 @@ class DjiCloudClient:
                 ) as resp:
                     resp.raise_for_status()
                     payload = await resp.json(content_type=None)
-            except aiohttp.ClientError as err:  # try the next region
+            except (aiohttp.ClientError, TimeoutError, ValueError) as err:
                 last_error = err
                 continue
             devices = _extract_devices(payload)
             if devices:
                 return devices
         if last_error:
-            raise DjiCloudError(f"home-api request failed: {last_error}")
+            raise DjiCloudError("DJI device list request failed") from last_error
         return []
 
 

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_PAIR_KEY, CONF_SERIAL_NUMBER, DOMAIN
 
-CONFIG_TO_REDACT = {CONF_ADDRESS, CONF_PAIR_KEY, CONF_SERIAL_NUMBER}
+CONFIG_TO_REDACT = {CONF_ADDRESS, CONF_NAME, CONF_PAIR_KEY, CONF_SERIAL_NUMBER}
 STATE_TO_REDACT = {"key_0e"}
 
 

@@ -165,9 +165,18 @@ class KeyedConfigTests(unittest.TestCase):
             "00001000e80300000000000000000000",
         )
 
+    def test_timestamp_marker_does_not_change_keyed_header_length(self) -> None:
+        # The timestamp has 0x0010 at the offset used by a GET header marker.
+        payload = bytes.fromhex("00001000000010009e01000000000000151002003c00")
+        for prefix in (b"", *(status.to_bytes(4, "little") for status in range(4))):
+            with self.subTest(prefix=prefix.hex()):
+                parsed = duml.parse_telemetry(prefix + payload)
+                self.assertEqual(parsed["timezone_offset_min"], 60)
+
     def test_set_ack_validates_each_requested_key(self) -> None:
         ack = duml.build_keyed_set_payload(
-            [(0x0D, b"\x00" * 4), (0x0E, b"\x00" * 4)], timestamp_ms=1
+            [(0x0D, b"\x00" * 4), (0x0E, b"\x00" * 4)],
+            timestamp_ms=0x0000019E00100000,
         )
         duml.parse_set_ack(ack, (0x0D, 0x0E))
         with self.assertRaisesRegex(duml.ProtocolError, "omitted key"):

@@ -154,6 +154,8 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             address = format_mac(user_input[CONF_ADDRESS].strip())
+            if not address:
+                errors["base"] = "address_required"
             try:
                 normalize_pair_key(user_input[CONF_PAIR_KEY])
             except ProtocolError:

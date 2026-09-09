@@ -29,7 +29,7 @@ used only during setup to retrieve the device's local credential.
 ## Requirements
 
 - DJI Power Station set up and linked to the DJI account in the DJI Home app
-- Home Assistant with Bluetooth, either through a local adapter or a Bluetooth proxy
+- Home Assistant 2025.8 or newer with Bluetooth, through a local adapter or Bluetooth proxy
 - [HACS](https://hacs.xyz/) installed (recommended method)
 
 A DJI Power station accepts only one BLE central at a time. While this integration is
@@ -76,7 +76,7 @@ Only the pair key and device metadata are stored. Normal operation is local BLE.
 The protocol tests are deterministic and require neither Home Assistant nor Bluetooth:
 
 ```bash
-python3 -m pip install "cryptography>=44.0.0"
+python3 -m pip install "cryptography>=44.0.0" aiohttp
 python3 -m unittest discover -v
 uvx ruff check custom_components tests scripts
 ```

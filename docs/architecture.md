@@ -81,11 +81,11 @@ state. The coordinator retains the newest snapshot and coalesces updates to the 
 the latest values.
 
 Connection establishment has a 30-second deadline and individual requests have an
-eight-second response timeout. If notification subscription exposes an incomplete GATT
-service cache, the client clears the cache, reconnects, and retries once. An unexpected
-disconnect marks the coordinator unavailable and schedules a config-entry reload. If the
-station is absent during setup, Home Assistant retries after a matching advertisement
-reappears.
+eight-second timeout covering the write and response. If subscription exposes an
+incomplete GATT service cache, the client clears the cache, reconnects, and retries once.
+An unexpected disconnect marks the coordinator unavailable and schedules a config-entry
+reload. If the station is absent during setup, Home Assistant retries after a matching
+advertisement reappears.
 
 ## Security and diagnostics
 
@@ -93,5 +93,5 @@ The original Power 1000 uses payload encryption with a fixed transport key; the 
 implemented model paths use plaintext. The transport key does not replace the station's
 pair-key authentication. Treat captures as sensitive even when payloads are encrypted.
 Never publish pair keys, DJI account tokens, passwords, serial numbers, BLE addresses,
-or raw captures containing them. Downloaded diagnostics redact the address, pair key, and
-serial number; account passwords and member tokens are transient and are not stored.
+or raw captures containing them. Downloaded diagnostics redact the name, address, pair key,
+and serial number; account passwords and member tokens are transient and are not stored.

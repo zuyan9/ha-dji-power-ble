@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -315,6 +316,89 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(changes, [])
         self.assertEqual(device.data, {})
+
+    async def test_interrupted_connection_closes_established_client(self):
+        for stage in ("subscribe", "authenticate"):
+            for failure in ("cancel", "timeout"):
+                with self.subTest(stage=stage, failure=failure):
+                    started = asyncio.Event()
+
+                    async def interrupt(*args, started=started, failure=failure):
+                        started.set()
+                        if failure == "timeout":
+                            raise TimeoutError
+                        await asyncio.Event().wait()
+
+                    client = types.SimpleNamespace(
+                        is_connected=True, start_notify=AsyncMock(),
+                        disconnect=AsyncMock(),
+                    )
+                    self.device._establish = AsyncMock(return_value=client)
+                    self.device._authenticate = AsyncMock()
+                    if stage == "subscribe":
+                        client.start_notify = interrupt
+                    else:
+                        self.device._authenticate = interrupt
+                    task = asyncio.create_task(self.device.connect())
+                    await started.wait()
+                    if failure == "cancel":
+                        task.cancel()
+                    error = (
+                        asyncio.CancelledError if failure == "cancel"
+                        else device_module.DjiPowerError
+                    )
+                    with self.assertRaises(error):
+                        await task
+                    client.disconnect.assert_awaited_once()
+                    self.assertIsNone(self.device._client)
+
+    async def test_cache_retry_closes_failed_clients(self):
+        for retry_fails in (False, True):
+            with self.subTest(retry_fails=retry_fails):
+                first = types.SimpleNamespace(
+                    is_connected=True,
+                    start_notify=AsyncMock(side_effect=BleakError("bad cache")),
+                    clear_cache=AsyncMock(), disconnect=AsyncMock(),
+                )
+
+                async def subscribe(*args, retry_fails=retry_fails):
+                    if retry_fails:
+                        raise BleakError("retry failed")
+                    self.device._report_event.set()
+
+                second = types.SimpleNamespace(
+                    is_connected=True, start_notify=subscribe, disconnect=AsyncMock()
+                )
+                self.device._establish = AsyncMock(side_effect=[first, second])
+                self.device._authenticate = AsyncMock()
+                self.device.refresh_config = AsyncMock()
+                if retry_fails:
+                    with self.assertRaisesRegex(BleakError, "retry failed"):
+                        await self.device.connect()
+                    self.assertIsNone(self.device._client)
+                    self.device._authenticate.assert_not_awaited()
+                else:
+                    await self.device.connect()
+                    self.assertIs(self.device._client, second)
+                    second.disconnect.assert_not_awaited()
+                    self.device._authenticate.assert_awaited_once()
+                    await self.device.disconnect()
+                first.clear_cache.assert_awaited_once()
+                first.disconnect.assert_awaited_once()
+                second.disconnect.assert_awaited_once()
+
+    async def test_request_timeout_includes_stalled_gatt_write(self):
+        async def stalled_write(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        self.device._client = types.SimpleNamespace(
+            is_connected=True, write_gatt_char=stalled_write
+        )
+        with self.assertRaisesRegex(device_module.DjiPowerError, "timeout waiting"):
+            await asyncio.wait_for(
+                self.device._request(duml.AUTH_COMMAND, b"\x00", timeout=0.01), 1
+            )
+        self.assertEqual(self.device._pending, {})
 
     async def test_authentication_logs_both_stages_and_sends_existing_credential(
         self,
