@@ -12,7 +12,7 @@ used only during setup to retrieve the device's local credential.
 | --- | --- |
 | DJI Power 1000 V2 | Hardware-tested |
 | DJI Power 1000 Mini | [Partially hardware-tested](https://github.com/zuyan9/ha-dji-power-ble/issues/4) |
-| DJI Power 1000 | Implemented, needs model-specific testing |
+| DJI Power 1000 | [Hardware Tested](https://github.com/zuyan9/ha-dji-power-ble/issues/10)|
 | DJI Power 2000 | Implemented, needs model-specific testing |
 
 ## Features
