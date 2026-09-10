@@ -94,7 +94,3 @@ acknowledgements.
   with real accessories establish safe entity mappings.
 - Cell-level BMS values are not present on the known app-facing BLE command path.
 - DJI can change the optional account-login endpoints at any time.
-
-## License
-
-WTFPL

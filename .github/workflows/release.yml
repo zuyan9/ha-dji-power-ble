@@ -88,7 +88,6 @@ jobs:
         with:
           category: integration
           comment: "false"
-          ignore: license # WTFPL is retained for custom-repository distribution.
       - name: Commit, tag, and publish
         env:
           GH_TOKEN: ${{ github.token }}
