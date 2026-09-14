@@ -18,6 +18,7 @@ from .duml import (
     AUTH_COMMAND,
     CHECK_SECRET_KEY,
     ECO_MODE_KEY,
+    EXPANSION_BATTERIES_KEY,
     GET_COMMAND,
     HMS_COMMAND,
     NOTIFY_UUID,
@@ -50,6 +51,8 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_REQUEST_TIMEOUT = 8.0
 DEFAULT_CONNECT_TIMEOUT = 30.0
+EXPANSION_REFRESH_INTERVAL = 30.0
+EXPANSION_MODELS = {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
 
 
 class DjiPowerError(Exception):
@@ -94,6 +97,7 @@ class DjiPowerDevice:
         self._disconnect_callbacks: set[DisconnectCallback] = set()
         self._report_event = asyncio.Event()
         self._operation_lock = asyncio.Lock()
+        self._expansion_refresh_task: asyncio.Task[None] | None = None
         self._disconnecting = False
         self.data: dict[str, object] = {}
 
@@ -169,6 +173,8 @@ class DjiPowerDevice:
                 # diagnostics without inventing an entity schema.
                 self._merge_data({"hms_raw": self._decode_payload(packet).hex()})
         except ProtocolError as error:
+            if packet.command_id == TELEMETRY_COMMAND:
+                self._merge_data({"expansion_batteries": None})
             _LOGGER.debug(
                 "%s: ignored malformed 0x%02x push: %s",
                 self.address,
@@ -192,6 +198,8 @@ class DjiPowerDevice:
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         self._client = None
+        if self._expansion_refresh_task is not None:
+            self._expansion_refresh_task.cancel()
         error = DjiPowerDisconnectedError(f"{self.address} disconnected")
         for _, _, future in self._pending.values():
             if not future.done():
@@ -221,6 +229,7 @@ class DjiPowerDevice:
         try:
             async with asyncio.timeout(DEFAULT_CONNECT_TIMEOUT):
                 await self._connect_and_initialize()
+            self._start_expansion_refresh()
         except TimeoutError as error:
             await self.disconnect()
             raise DjiPowerError(
@@ -274,6 +283,12 @@ class DjiPowerDevice:
 
     async def disconnect(self) -> None:
         """Cleanly close the persistent link."""
+        task = self._expansion_refresh_task
+        self._expansion_refresh_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         client = self._client
         if client is None:
             return
@@ -375,8 +390,8 @@ class DjiPowerDevice:
 
     async def refresh_config(self) -> None:
         """Fetch and publish a keyed configuration snapshot."""
-        for key in (0x01, 0x04):
-            await self._read_config(key)
+        await self._read_expansion_batteries()
+        await self._read_config(0x04)
         if self.model == "DJI Power 2000":
             try:
                 await self._read_eco_mode()
@@ -385,6 +400,48 @@ class DjiPowerDevice:
             except DjiPowerError as error:
                 # Older firmware may omit or reject this optional setting.
                 _LOGGER.debug("Eco-mode configuration unavailable: %s", error)
+
+    def _start_expansion_refresh(self) -> None:
+        """Refresh optional pack telemetry using the station's existing session."""
+        if self.model not in EXPANSION_MODELS or not self.is_connected:
+            return
+        if (
+            self._expansion_refresh_task is None
+            or self._expansion_refresh_task.done()
+        ):
+            self._expansion_refresh_task = asyncio.create_task(
+                self._refresh_expansion_loop(), name="dji_power_expansion_refresh"
+            )
+
+    async def _refresh_expansion_loop(self) -> None:
+        try:
+            while self.is_connected:
+                await asyncio.sleep(EXPANSION_REFRESH_INTERVAL)
+                async with self._operation_lock:
+                    await self._read_expansion_batteries()
+        except DjiPowerDisconnectedError:
+            return
+
+    async def _read_expansion_batteries(self) -> None:
+        """Read a fresh pack list; optional failures invalidate only pack state."""
+        try:
+            # Bound the write as well as the response so a stalled GATT write
+            # cannot hold the operation lock and leave old pack readings live.
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                update = await self._read_config(EXPANSION_BATTERIES_KEY)
+        except DjiPowerDisconnectedError:
+            raise
+        except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            self._merge_data({"expansion_batteries": None})
+            _LOGGER.debug(
+                "Expansion-battery snapshot unavailable: %s",
+                str(error) or "read timed out",
+            )
+            return
+        if "expansion_batteries" not in update:
+            self._merge_data({"expansion_batteries": None})
 
     async def _read_config(self, key: int) -> dict[str, object]:
         response = await self._request(GET_COMMAND, bytes((0x00, key, 0x10)))

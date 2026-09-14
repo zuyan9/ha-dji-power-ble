@@ -70,6 +70,11 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
 
     @callback
     def _handle_disconnect(self, error: Exception | None) -> None:
+        # A queued pre-disconnect snapshot must not make entities available again.
+        self._pending_data = None
+        if self._push_timer is not None:
+            self._push_timer.cancel()
+            self._push_timer = None
         self.async_set_update_error(
             UpdateFailed(str(error) if error else "Bluetooth connection lost")
         )

@@ -38,6 +38,7 @@ AUTH_COMMAND = 0x6A
 START_BIND = 0x00
 CHECK_SECRET_KEY = 0x01
 
+EXPANSION_BATTERIES_KEY = 0x01
 CHARGE_LIMIT_KEY = 0x05
 ENERGY_STORAGE_KEY = 0x06
 POWER_SWITCH_KEY = 0x0D
@@ -440,6 +441,57 @@ def _ascii_field(value: bytes) -> str | None:
     return decoded or None
 
 
+def _parse_expansion_batteries(value: bytes) -> list[dict[str, object]]:
+    """Decode an authoritative expansion-pack list, rejecting ambiguous identity."""
+    records = parse_tlvs(value, strict=True)
+    rows = _records(records, 0x100F)
+    if records and not rows:
+        raise ProtocolError("expansion-pack list has no recognized records")
+
+    packs: list[dict[str, object]] = []
+    serials: set[str] = set()
+    sequences: set[int] = set()
+    for row in rows:
+        if len(row) < 31:
+            raise ProtocolError("expansion-pack record is too short")
+        capacity = int.from_bytes(row[7:11], "little")
+        if not capacity:
+            # The station can include inactive slots with no rated capacity.
+            continue
+        serial = _ascii_field(row[15:31])
+        if serial is None or not serial.strip() or not serial.isprintable():
+            raise ProtocolError("expansion-pack record has no valid serial number")
+        sequence = row[0]
+        if serial in serials or sequence in sequences:
+            raise ProtocolError("expansion-pack list has duplicate identities")
+        serials.add(serial)
+        sequences.add(sequence)
+
+        percentage = int.from_bytes(row[1:3], "little") / 100
+        temperature = None
+        # Extended app records carry a signed temperature and a validity status:
+        # 0 is unknown; 1, 2 and 3 indicate normal, high and low temperature.
+        if len(row) >= 34 and row[33] in (1, 2, 3):
+            temperature = int.from_bytes(row[31:33], "little", signed=True) / 100
+        firmware = _ascii_field(row[34:50]) if len(row) >= 50 else None
+        if firmware is not None and (
+            not firmware.strip() or not firmware.isprintable()
+        ):
+            firmware = None
+        packs.append(
+            {
+                "seq": sequence,
+                "serial_number": serial,
+                "battery_percent": percentage if percentage <= 100 else None,
+                "cycle_count": int.from_bytes(row[11:15], "little"),
+                "rated_capacity_wh": capacity,
+                "temperature": temperature,
+                "firmware": firmware,
+            }
+        )
+    return packs
+
+
 def _parse_power_adjustment(value: bytes | bytearray) -> str:
     """Read power adjustment within an existing grid-tied Time of Use setup."""
     if len(value) < 86:
@@ -469,6 +521,15 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
     data: dict[str, object] = {
         f"key_{key:02x}": value.hex() for key, value in keyed.items()
     }
+
+    if EXPANSION_BATTERIES_KEY in keyed:
+        # A missing key preserves the previous snapshot. An explicit malformed
+        # list clears availability without suppressing unrelated station data.
+        data["expansion_batteries"] = None
+        with contextlib.suppress(ProtocolError):
+            data["expansion_batteries"] = _parse_expansion_batteries(
+                keyed[EXPANSION_BATTERIES_KEY]
+            )
 
     if len(base := keyed.get(0x00, b"")) >= 40:
         firmware = _ascii_field(base[7:23])

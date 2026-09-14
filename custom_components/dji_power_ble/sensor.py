@@ -13,15 +13,20 @@ from homeassistant.const import (
     CONF_ADDRESS,
     PERCENTAGE,
     EntityCategory,
+    UnitOfEnergy,
     UnitOfPower,
     UnitOfTemperature,
     UnitOfTime,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .coordinator import DjiPowerCoordinator
 from .entity import DjiPowerEntity
 
 DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
@@ -213,6 +218,44 @@ DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     ),
 )
 
+EXPANSION_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="battery_percent",
+        translation_key="expansion_battery",
+        device_class=SensorDeviceClass.BATTERY,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="cycle_count",
+        translation_key="expansion_cycle_count",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    SensorEntityDescription(
+        key="rated_capacity_wh",
+        translation_key="expansion_rated_capacity",
+        device_class=SensorDeviceClass.ENERGY_STORAGE,
+        native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    SensorEntityDescription(
+        key="temperature",
+        translation_key="expansion_temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+)
+
+
+def _expansion_batteries(coordinator: DjiPowerCoordinator) -> dict[str, dict]:
+    """Return the current packs with stable identities."""
+    return {
+        pack["serial_number"]: pack
+        for pack in (coordinator.data or {}).get("expansion_batteries") or []
+        if pack.get("serial_number")
+    }
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -226,6 +269,54 @@ async def async_setup_entry(
     async_add_entities(
         DjiPowerSensor(coordinator, description) for description in DESCRIPTIONS
     )
+    device_registry = dr.async_get(hass)
+    known: set[tuple[str, str]] = set()
+    restored = []
+    for registered in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if registered.domain != "sensor" or registered.platform != DOMAIN:
+            continue
+        for description in EXPANSION_DESCRIPTIONS:
+            prefix, suffix = "expansion_", f"_{description.key}"
+            if not registered.unique_id.startswith(prefix):
+                continue
+            if not registered.unique_id.endswith(suffix):
+                continue
+            serial = registered.unique_id[len(prefix) : -len(suffix)]
+            if serial:
+                restored.append(
+                    DjiPowerExpansionSensor(coordinator, serial, description)
+                )
+                known.add((serial, description.key))
+    if restored:
+        async_add_entities(restored)
+
+    @callback
+    def async_discover_expansion_batteries() -> None:
+        """Add connected packs and refresh their optional firmware metadata."""
+        entities = []
+        for serial, pack in _expansion_batteries(coordinator).items():
+            for description in EXPANSION_DESCRIPTIONS:
+                if (serial, description.key) in known:
+                    continue
+                if description.key == "temperature" and pack.get("temperature") is None:
+                    continue
+                entities.append(
+                    DjiPowerExpansionSensor(coordinator, serial, description)
+                )
+                known.add((serial, description.key))
+            if firmware := pack.get("firmware"):
+                device = device_registry.async_get_device(
+                    identifiers={(DOMAIN, f"expansion_{serial}")}
+                )
+                if device and device.sw_version != firmware:
+                    device_registry.async_update_device(device.id, sw_version=firmware)
+        if entities:
+            async_add_entities(entities)
+
+    entry.async_on_unload(
+        coordinator.async_add_listener(async_discover_expansion_batteries)
+    )
+    async_discover_expansion_batteries()
 
 
 class DjiPowerSensor(DjiPowerEntity, SensorEntity):
@@ -242,3 +333,44 @@ class DjiPowerSensor(DjiPowerEntity, SensorEntity):
         if isinstance(value, str) and len(value) > 255:
             return value[:255]
         return value
+
+
+class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEntity):
+    """A sensor on an expansion pack sharing the station's BLE connection."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: DjiPowerCoordinator,
+        serial: str,
+        description: SensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator)
+        self._serial = serial
+        self.entity_description = description
+        self._attr_unique_id = f"expansion_{serial}_{description.key}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        info = DeviceInfo(
+            identifiers={(DOMAIN, f"expansion_{self._serial}")},
+            name=f"Expansion battery {self._serial[-4:]}",
+            manufacturer="DJI",
+            model="DJI Power Expansion Battery 2000",
+            serial_number=self._serial,
+            via_device=(DOMAIN, self.coordinator.device.address),
+        )
+        pack = _expansion_batteries(self.coordinator).get(self._serial, {})
+        if firmware := pack.get("firmware"):
+            info["sw_version"] = firmware
+        return info
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.native_value is not None
+
+    @property
+    def native_value(self) -> float | int | None:
+        pack = _expansion_batteries(self.coordinator).get(self._serial, {})
+        return pack.get(self.entity_description.key)
