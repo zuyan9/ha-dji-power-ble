@@ -85,5 +85,21 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "expansion_battery": {
+        "name": "Battery"
+      },
+      "expansion_cycle_count": {
+        "name": "Cycle count"
+      },
+      "expansion_rated_capacity": {
+        "name": "Rated capacity"
+      },
+      "expansion_temperature": {
+        "name": "Battery temperature"
+      }
+    }
   }
 }

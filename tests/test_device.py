@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
 
-from tests.test_duml import SYNTHETIC_ECO_MODE
+from tests.test_duml import SYNTHETIC_ECO_MODE, expansion_battery
 
 ROOT = Path(__file__).parents[1]
 COMPONENT = ROOT / "custom_components" / "dji_power_ble"
@@ -740,6 +741,204 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.device.data["battery_percent"], 66)
         self.assertTrue(self.device.data["charging"])
         self.assertEqual(len(updates), 1)
+
+
+class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):
+    """Synthetic pack traffic and background-task lifecycle, without hardware."""
+
+    def setUp(self) -> None:
+        self.device = device_module.DjiPowerDevice(
+            FakeBleDevice(), "ab" * 16, name="Test station", model="DJI Power 2000"
+        )
+        self.client = types.SimpleNamespace(
+            is_connected=True,
+            stop_notify=AsyncMock(),
+            disconnect=AsyncMock(),
+        )
+        self.device._client = self.client
+        self.payload = duml.build_keyed_set_payload(
+            [(0x01, expansion_battery(temperature=2512))], timestamp_ms=1
+        )
+        self.device.data = {
+            "battery_percent": 80,
+            "expansion_batteries": [{"serial_number": "PREVIOUS-PACK"}],
+        }
+
+    async def asyncTearDown(self) -> None:
+        await self.device.disconnect()
+
+    def push(self, payload: bytes) -> None:
+        self.device._handle_packet(
+            duml.DumlPacket(
+                0xAB, 2, 1, 0, duml.POWER_COMMAND_SET,
+                duml.TELEMETRY_COMMAND, payload,
+            )
+        )
+
+    async def test_keyed_get_decodes_packs_through_each_model_transport(self):
+        for model in sorted(device_module.EXPANSION_MODELS):
+            with self.subTest(model=model):
+                device = device_module.DjiPowerDevice(
+                    FakeBleDevice(), "ab" * 16, name="Test station", model=model
+                )
+                requests = []
+
+                async def write(
+                    _uuid, value, *, response,
+                    device=device, model=model, requests=requests,
+                ):
+                    self.assertTrue(response)
+                    packet = duml.DumlPacket.decode(value)
+                    requests.append(packet)
+                    self.assertEqual(device._decode_payload(packet), b"\x00\x01\x10")
+                    payload = self.payload
+                    flags = 0x80
+                    if model == "DJI Power 1000":
+                        payload = duml.encrypt_power_1000_payload(payload)
+                        flags |= 6
+                    reply = duml.DumlPacket(
+                        0xAB, 2, packet.sequence, flags, duml.POWER_COMMAND_SET,
+                        duml.GET_COMMAND, payload,
+                    ).encode()
+                    for offset in range(0, len(reply), 7):
+                        device._on_notify(None, bytearray(reply[offset : offset + 7]))
+
+                device._client = types.SimpleNamespace(
+                    is_connected=True, write_gatt_char=write
+                )
+                await device._read_expansion_batteries()
+
+                self.assertEqual(requests[0].command_id, duml.GET_COMMAND)
+                self.assertEqual(
+                    requests[0].flags, 0x26 if model == "DJI Power 1000" else 0x20
+                )
+                self.assertEqual(
+                    device.data["expansion_batteries"][0]["battery_percent"], 62.5
+                )
+                self.assertEqual(
+                    device.data["expansion_batteries"][0]["temperature"], 25.12
+                )
+                self.assertEqual(device._pending, {})
+
+    async def test_push_preserves_missing_list_and_clears_explicit_empty(self):
+        self.push(self.payload)
+        packs = self.device.data["expansion_batteries"]
+        self.push(duml.build_keyed_set_payload([(0x15, b"\x3c\x00")], timestamp_ms=1))
+        self.assertEqual(self.device.data["expansion_batteries"], packs)
+        self.push(duml.build_keyed_set_payload([(0x01, b"")], timestamp_ms=1))
+        self.assertEqual(self.device.data["expansion_batteries"], [])
+        self.assertEqual(self.device.data["battery_percent"], 80)
+
+    async def test_malformed_keyed_push_invalidates_pack_state(self):
+        self.push(self.payload[:-1])
+        self.assertIsNone(self.device.data["expansion_batteries"])
+        self.assertEqual(self.device.data["battery_percent"], 80)
+
+    async def test_targeted_get_omission_invalidates_previous_pack_state(self):
+        with patch.object(self.device, "_read_config", AsyncMock(return_value={})):
+            await self.device._read_expansion_batteries()
+        self.assertIsNone(self.device.data["expansion_batteries"])
+        self.assertEqual(self.device.data["battery_percent"], 80)
+
+    async def test_optional_read_failure_invalidates_only_pack_state(self):
+        for error in (
+            device_module.DjiPowerError("timeout"), BleakError("read failed")
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.device.data["expansion_batteries"] = [{}]
+                with patch.object(
+                    self.device, "_read_config", AsyncMock(side_effect=error)
+                ):
+                    await self.device._read_expansion_batteries()
+                self.assertIsNone(self.device.data["expansion_batteries"])
+                self.assertEqual(self.device.data["battery_percent"], 80)
+
+    async def test_disconnect_during_read_never_publishes_a_successful_update(self):
+        updates = []
+        self.device.add_state_listener(updates.append)
+
+        async def read(_key):
+            self.device._on_disconnect(self.client)
+            raise device_module.DjiPowerDisconnectedError("disconnected")
+
+        with (
+            patch.object(self.device, "_read_config", read),
+            self.assertRaises(device_module.DjiPowerDisconnectedError),
+        ):
+            await self.device._read_expansion_batteries()
+        self.assertEqual(updates, [])
+
+    async def test_stalled_gatt_write_times_out_and_releases_request(self):
+        async def stalled_write(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        self.client.write_gatt_char = stalled_write
+        with patch.object(device_module, "DEFAULT_REQUEST_TIMEOUT", 0.01):
+            await asyncio.wait_for(self.device._read_expansion_batteries(), timeout=1)
+        self.assertIsNone(self.device.data["expansion_batteries"])
+        self.assertEqual(self.device.data["battery_percent"], 80)
+        self.assertEqual(self.device._pending, {})
+
+    async def test_connect_starts_one_worker_and_disconnect_cancels_it(self):
+        self.device._client = None
+
+        async def initialize():
+            self.device._client = self.client
+
+        with patch.object(self.device, "_connect_and_initialize", initialize):
+            await self.device.connect()
+            task = self.device._expansion_refresh_task
+            self.assertIsNotNone(task)
+            await self.device.connect()
+            self.assertIs(self.device._expansion_refresh_task, task)
+            await self.device.disconnect()
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(self.device._expansion_refresh_task)
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_unsupported_model_does_not_start_worker(self):
+        self.device.model = "DJI Power 1000 Mini"
+        self.device._start_expansion_refresh()
+        self.assertIsNone(self.device._expansion_refresh_task)
+
+    async def test_worker_refreshes_even_empty_snapshot_under_operation_lock(self):
+        self.device.data["expansion_batteries"] = []
+
+        async def read():
+            self.assertTrue(self.device._operation_lock.locked())
+            self.client.is_connected = False
+
+        with (
+            patch.object(device_module.asyncio, "sleep", AsyncMock()) as sleep,
+            patch.object(
+                self.device, "_read_expansion_batteries", AsyncMock(side_effect=read)
+            ) as refresh,
+        ):
+            await self.device._refresh_expansion_loop()
+        sleep.assert_awaited_once_with(30.0)
+        refresh.assert_awaited_once()
+
+    async def test_disconnect_cancels_worker_and_pending_request(self):
+        for unexpected in (False, True):
+            with self.subTest(unexpected=unexpected):
+                self.device._client = self.client
+                started = asyncio.Event()
+
+                async def write(*_args, started=started, **_kwargs):
+                    started.set()
+
+                self.client.write_gatt_char = write
+                with patch.object(device_module, "EXPANSION_REFRESH_INTERVAL", 0):
+                    self.device._start_expansion_refresh()
+                    task = self.device._expansion_refresh_task
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    self.assertEqual(len(self.device._pending), 1)
+                    if unexpected:
+                        self.device._on_disconnect(self.client)
+                    await self.device.disconnect()
+                self.assertTrue(task.cancelled())
+                self.assertEqual(self.device._pending, {})
+                self.assertIsNone(self.device._expansion_refresh_task)
 
 
 if __name__ == "__main__":

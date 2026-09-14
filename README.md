@@ -25,6 +25,7 @@ used only during setup to retrieve the device's local credential.
 - Firmware, timezone, display, reserve, and cloud-status diagnostics
 - Automatic discovery, reconnect-on-advertisement, and sanitized HA diagnostics
 - Persistent authenticated BLE connection with live telemetry pushes
+- Connected expansion-battery devices with battery level and pack diagnostics
 
 ## Requirements
 

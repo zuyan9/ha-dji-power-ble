@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_PAIR_KEY, CONF_SERIAL_NUMBER, DOMAIN
 
 CONFIG_TO_REDACT = {CONF_ADDRESS, CONF_PAIR_KEY, CONF_SERIAL_NUMBER}
-STATE_TO_REDACT = {"key_0e"}
+STATE_TO_REDACT = {"key_01", "key_0e", CONF_SERIAL_NUMBER}
 
 
 async def async_get_config_entry_diagnostics(

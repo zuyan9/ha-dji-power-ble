@@ -61,6 +61,12 @@ retrieval are setup concerns, not part of normal runtime. See the
 [BLE protocol reference](protocol.md) for GATT UUIDs, framing, commands, and payload
 layouts.
 
+On Power 1000, Power 1000 V2, and Power 2000, the same connection also reads expansion
+pack state every 30 seconds, serialized with writes. Each discovered pack becomes a
+separate Home Assistant device linked to the station. Pack serial numbers identify
+devices and entities independently of connection order. Missing packs retain their
+registry entries and history with unavailable sensors, including after a reload.
+
 ## Writes and consistency
 
 AC output uses keyed SET entries `0x0D` and `0x0E`. Charge limits use key `0x05`; the
@@ -95,3 +101,4 @@ pair-key authentication. Treat captures as sensitive even when payloads are encr
 Never publish pair keys, DJI account tokens, passwords, serial numbers, BLE addresses,
 or raw captures containing them. Downloaded diagnostics redact the address, pair key, and
 serial number; account passwords and member tokens are transient and are not stored.
+Expansion-pack serial numbers and the raw keyed record containing them are also redacted.

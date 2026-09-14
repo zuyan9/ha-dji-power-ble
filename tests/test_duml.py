@@ -44,6 +44,30 @@ def group(group_type: int, *interfaces: bytes) -> bytes:
     return record(0x3032, bytes((group_type,)) + wrapper)
 
 
+def expansion_battery(
+    sequence: int = 1,
+    *,
+    percentage: int = 6250,
+    capacity: int = 2048,
+    cycles: int = 23,
+    serial: bytes = b"SYNTHETIC-PACK01",
+    temperature: int | None = None,
+    temperature_status: int = 1,
+    firmware: bytes = b"01.00.00.00",
+) -> bytes:
+    """Build a synthetic pack record, independent of physical-device captures."""
+    assert len(serial) <= 16 and len(firmware) <= 16
+    value = bytes((sequence,)) + percentage.to_bytes(2, "little")
+    value += (999).to_bytes(4, "little")
+    value += capacity.to_bytes(4, "little") + cycles.to_bytes(4, "little")
+    value += serial.ljust(16, b"\x00")
+    if temperature is not None:
+        value += temperature.to_bytes(2, "little", signed=True)
+        value += bytes((temperature_status,))
+        value += firmware.ljust(16, b"\x00") + b"\x01"
+    return record(0x100F, value)
+
+
 CAPTURED_KEYED_CONFIG = bytes.fromhex(
     "02000000000010005bf2f2779e0100000000000000103500434e00000f010130312e3030"
     "2e313130300000000000000130332e30332e303030300000000000000004000000000084"
@@ -198,6 +222,202 @@ class KeyedConfigTests(unittest.TestCase):
             values[0x05].hex(),
             "6400000046000000460000000f000000000000000f000000",
         )
+
+
+class ExpansionBatteryTests(unittest.TestCase):
+    def parse_packs(self, value: bytes) -> dict[str, object]:
+        payload = duml.build_keyed_set_payload([(0x01, value)])
+        return duml.parse_telemetry(payload)
+
+    def test_legacy_record_decodes_per_pack_fields(self) -> None:
+        value = expansion_battery()
+        self.assertEqual(len(value), 4 + 31)
+
+        parsed = self.parse_packs(value)
+
+        self.assertEqual(
+            parsed["expansion_batteries"],
+            [
+                {
+                    "seq": 1,
+                    "serial_number": "SYNTHETIC-PACK01",
+                    "battery_percent": 62.5,
+                    "cycle_count": 23,
+                    "rated_capacity_wh": 2048,
+                    "temperature": None,
+                    "firmware": None,
+                }
+            ],
+        )
+        self.assertEqual(parsed["key_01"], value.hex())
+
+    def test_extended_record_decodes_temperature_and_firmware_with_tail(self) -> None:
+        original = expansion_battery(temperature=-1234)
+        self.assertEqual(len(original), 4 + 51)
+        for tail in (b"", b"\xaa\xbb\xcc"):
+            with self.subTest(tail=tail):
+                value = record(0x100F, original[4:] + tail)
+                pack = self.parse_packs(value)["expansion_batteries"][0]
+
+                self.assertEqual(pack["temperature"], -12.34)
+                self.assertEqual(pack["firmware"], "01.00.00.00")
+                self.assertEqual(pack["battery_percent"], 62.5)
+
+    def test_optional_fields_require_their_complete_prefix(self) -> None:
+        original = expansion_battery(temperature=2510)[4:]
+        for length in (31, 32, 33, 34, 35, 49, 50):
+            with self.subTest(length=length):
+                pack = self.parse_packs(record(0x100F, original[:length]))[
+                    "expansion_batteries"
+                ][0]
+
+                self.assertEqual(pack["battery_percent"], 62.5)
+                self.assertEqual(pack["temperature"], 25.1 if length >= 34 else None)
+                self.assertEqual(
+                    pack["firmware"], "01.00.00.00" if length >= 50 else None
+                )
+
+    def test_ten_packs_preserve_order_and_distinct_values(self) -> None:
+        value = b"".join(
+            expansion_battery(
+                sequence,
+                percentage=sequence * 1000,
+                cycles=sequence * 17,
+                serial=f"SYNTHETIC-PACK{sequence:02}".encode(),
+            )
+            for sequence in range(1, 11)
+        )
+
+        packs = self.parse_packs(value)["expansion_batteries"]
+
+        self.assertEqual([pack["seq"] for pack in packs], list(range(1, 11)))
+        self.assertEqual(
+            [pack["battery_percent"] for pack in packs], list(range(10, 101, 10))
+        )
+        self.assertEqual(
+            [pack["cycle_count"] for pack in packs], list(range(17, 171, 17))
+        )
+
+    def test_charge_percentage_bounds_do_not_invalidate_other_metrics(self) -> None:
+        for encoded, expected in ((0, 0), (10000, 100), (10001, None), (65535, None)):
+            with self.subTest(encoded=encoded):
+                pack = self.parse_packs(expansion_battery(percentage=encoded))[
+                    "expansion_batteries"
+                ][0]
+
+                self.assertEqual(pack["battery_percent"], expected)
+                self.assertEqual(pack["cycle_count"], 23)
+
+    def test_capacity_and_cycle_count_use_unsigned_32_bit_fields(self) -> None:
+        pack = self.parse_packs(
+            expansion_battery(capacity=2**32 - 1, cycles=2**32 - 1)
+        )["expansion_batteries"][0]
+
+        self.assertEqual(pack["rated_capacity_wh"], 2**32 - 1)
+        self.assertEqual(pack["cycle_count"], 2**32 - 1)
+
+    def test_temperature_status_does_not_hide_other_metrics(self) -> None:
+        for status in (0, 1, 2, 3, 4, 255):
+            with self.subTest(status=status):
+                pack = self.parse_packs(
+                    expansion_battery(temperature=3000, temperature_status=status)
+                )["expansion_batteries"][0]
+
+                self.assertEqual(
+                    pack["temperature"], 30 if status in (1, 2, 3) else None
+                )
+                self.assertEqual(pack["firmware"], "01.00.00.00")
+                self.assertEqual(pack["battery_percent"], 62.5)
+
+    def test_temperature_uses_signed_16_bit_hundredths(self) -> None:
+        for encoded in (-32768, -1, 0, 32767):
+            with self.subTest(encoded=encoded):
+                pack = self.parse_packs(expansion_battery(temperature=encoded))[
+                    "expansion_batteries"
+                ][0]
+                self.assertEqual(pack["temperature"], encoded / 100)
+
+    def test_empty_list_clears_and_missing_key_preserves_snapshot(self) -> None:
+        current = self.parse_packs(expansion_battery())
+        partial = duml.parse_telemetry(CAPTURED_KEYED_CONFIG)
+
+        self.assertNotIn("expansion_batteries", partial)
+        current.update(partial)
+        self.assertEqual(len(current["expansion_batteries"]), 1)
+        current.update(self.parse_packs(b""))
+        self.assertEqual(current["expansion_batteries"], [])
+
+    def test_inactive_slots_are_ignored_before_identity_checks(self) -> None:
+        inactive = expansion_battery(capacity=0, serial=b"")
+
+        self.assertEqual(self.parse_packs(inactive)["expansion_batteries"], [])
+        packs = self.parse_packs(inactive + expansion_battery())[
+            "expansion_batteries"
+        ]
+        self.assertEqual(len(packs), 1)
+
+    def test_malformed_list_invalidates_packs_and_keeps_other_keyed_data(self) -> None:
+        complete = expansion_battery()
+        malformed = (
+            complete[:-1],  # A child length exceeds the list boundary.
+            complete + b"\x01",  # Incomplete child TLV header.
+            complete + record(0x100F, b"\x00" * 30),  # Short second pack.
+            record(0x100F, b""),
+            record(0x1010, b"unknown list format"),
+        )
+        for index, value in enumerate(malformed):
+            with self.subTest(case=index):
+                payload = duml.build_keyed_set_payload([(0x01, value), (0x02, b"\x01")])
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertIsNone(parsed["expansion_batteries"])
+                self.assertTrue(parsed["cloud_connected"])
+                self.assertEqual(parsed["key_01"], value.hex())
+
+    def test_invalid_serial_invalidates_snapshot(self) -> None:
+        for serial in (b"", b" " * 16, b"bad\xffserial", b"bad\nserial"):
+            with self.subTest(serial=serial):
+                self.assertIsNone(
+                    self.parse_packs(expansion_battery(serial=serial))[
+                        "expansion_batteries"
+                    ]
+                )
+
+    def test_serial_accepts_null_padded_or_full_width_ascii(self) -> None:
+        for serial in (b"SYNTHETIC", b"SYNTHETIC-PACK01"):
+            with self.subTest(serial=serial):
+                pack = self.parse_packs(expansion_battery(serial=serial))[
+                    "expansion_batteries"
+                ][0]
+                self.assertEqual(pack["serial_number"], serial.decode())
+
+    def test_duplicate_serial_or_sequence_invalidates_snapshot(self) -> None:
+        for duplicate in (
+            expansion_battery(2),
+            expansion_battery(serial=b"SYNTHETIC-PACK02"),
+        ):
+            with self.subTest(duplicate=duplicate):
+                self.assertIsNone(
+                    self.parse_packs(expansion_battery() + duplicate)[
+                        "expansion_batteries"
+                    ]
+                )
+
+    def test_unknown_child_tag_is_skipped_alongside_known_pack_records(self) -> None:
+        value = record(0x1010, b"future metadata") + expansion_battery()
+
+        self.assertEqual(len(self.parse_packs(value)["expansion_batteries"]), 1)
+
+    def test_invalid_firmware_only_clears_optional_metadata(self) -> None:
+        for firmware in (b"", b"bad\xffversion", b"bad\nversion", b" " * 16):
+            with self.subTest(firmware=firmware):
+                pack = self.parse_packs(
+                    expansion_battery(temperature=2000, firmware=firmware)
+                )["expansion_batteries"][0]
+
+                self.assertIsNone(pack["firmware"])
+                self.assertEqual(pack["temperature"], 20)
+                self.assertEqual(pack["battery_percent"], 62.5)
 
 
 class DischargePowerTests(unittest.TestCase):

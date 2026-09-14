@@ -120,6 +120,7 @@ each encoded as a little-endian uint16. The integration retains its existing
 | Key | Meaning | Exposed values |
 | --- | --- | --- |
 | `0x00` | Base information | Primary and secondary firmware |
+| `0x01` | Expansion batteries | Per-pack battery percentage, cycles, rated capacity, optional temperature and firmware |
 | `0x02` | Network state | Cloud connected |
 | `0x05` | Charge limits | Recharge and discharge limits |
 | `0x06` | Energy storage | Energy reserve |
@@ -128,7 +129,40 @@ each encoded as a little-endian uint16. The integration retains its existing
 | `0x15` | Timezone | UTC offset in minutes |
 | `0x18` | Eco mode | Power adjustment mode, manual discharge watts and watt limits |
 
-Unmapped keyed values are retained as `key_XX` hexadecimal diagnostic state.
+Raw keyed values are retained internally as `key_XX` hexadecimal state. Downloaded
+diagnostics redact records containing known private identifiers, including `key_01`.
+
+### Expansion batteries
+
+The client requests key `0x01` with `00 01 10`. Its value contains repeated nested
+`0x100F` TLVs, one per slot, decoded with the same layout for Power 1000, Power 1000 V2,
+and Power 2000. The original Power 1000 retains its encrypted transport. Polling runs
+every 30 seconds on these models; keyed pushes can update the same state immediately,
+subject to the configured Home Assistant publication interval.
+
+| Row offset | Width | Field |
+| --- | --- | --- |
+| `0` | 1 | Slot sequence; gaps are preserved |
+| `1` | 2 | Battery percentage × 100 |
+| `3` | 4 | Reserved capacity-like field; not exposed |
+| `7` | 4 | Rated capacity in Wh; zero indicates an inactive slot |
+| `11` | 4 | Cycle count |
+| `15` | 16 | Pack serial number, ASCII |
+| `31` | 2 | Optional signed temperature × 100 °C |
+| `33` | 1 | Temperature status: 0 unknown, 1 normal, 2 high, 3 low |
+| `34` | 16 | Optional firmware version, ASCII |
+
+Rows require the 31-byte common prefix. Temperature requires its complete field and a
+recognized status of 1–3; firmware requires all 16 bytes. Additional tail bytes are
+accepted. An absent temperature field does not create a temperature entity. Rated
+capacity is nominal capacity, not remaining energy or battery health.
+
+An explicit empty list marks all packs absent. Unrelated keyed pushes preserve the
+last pack list. A failed targeted read, malformed list, or ambiguous pack identity
+makes pack sensors unavailable until a valid snapshot arrives. Pack identity uses
+serial numbers, so slot changes preserve entity history. The layout is supported by
+firmware/app analysis and synthetic tests; populated physical-pack captures remain
+needed to validate runtime behavior across models.
 
 ## Telemetry report
 
