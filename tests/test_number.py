@@ -27,6 +27,12 @@ class _DataUpdateCoordinator:
         return cls
 
 
+class _SelectEntity:
+    @property
+    def options(self) -> list[str]:
+        return self._attr_options
+
+
 class _DjiPowerError(Exception):
     pass
 
@@ -41,7 +47,7 @@ def _module(name: str, **attributes) -> types.ModuleType:
     return module
 
 
-def _load_modules() -> tuple[types.ModuleType, types.ModuleType]:
+def _load_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleType]:
     """Load the real control code with isolated Home Assistant interfaces."""
     modules = {
         PACKAGE: _module(PACKAGE, __path__=[str(COMPONENT)]),
@@ -59,6 +65,9 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType]:
             NumberEntity=type("NumberEntity", (), {}),
             NumberDeviceClass=types.SimpleNamespace(POWER="power"),
             NumberMode=types.SimpleNamespace(SLIDER="slider", BOX="box"),
+        ),
+        "homeassistant.components.select": _module(
+            "homeassistant.components.select", SelectEntity=_SelectEntity
         ),
         "homeassistant.config_entries": _module(
             "homeassistant.config_entries",
@@ -91,7 +100,7 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType]:
     }
     loaded = {}
     with patch.dict(sys.modules, modules):
-        for name in ("number", "coordinator"):
+        for name in ("number", "coordinator", "select"):
             spec = importlib.util.spec_from_file_location(
                 f"{PACKAGE}.{name}", COMPONENT / f"{name}.py"
             )
@@ -100,10 +109,10 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType]:
             sys.modules[spec.name] = module
             spec.loader.exec_module(module)
             loaded[name] = module
-    return loaded["number"], loaded["coordinator"]
+    return loaded["number"], loaded["coordinator"], loaded["select"]
 
 
-number, coordinator_module = _load_modules()
+number, coordinator_module, select = _load_modules()
 
 
 class DischargePowerNumberTests(unittest.IsolatedAsyncioTestCase):

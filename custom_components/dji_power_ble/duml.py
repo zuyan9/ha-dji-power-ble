@@ -6,6 +6,7 @@ testable protocol boundary used by both the integration and the research tools.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import time
 from collections.abc import Iterable
@@ -439,12 +440,21 @@ def _ascii_field(value: bytes) -> str | None:
     return decoded or None
 
 
-def _parse_manual_discharge_power(value: bytes | bytearray) -> tuple[int, int, int]:
-    """Read the app's complete eco-mode layout in manual grid discharge mode."""
+def _parse_power_adjustment(value: bytes | bytearray) -> str:
+    """Read power adjustment within an existing grid-tied Time of Use setup."""
     if len(value) < 86:
         raise ProtocolError("eco-mode state must contain at least 86 bytes")
-    if value[1] != 3 or value[16] != 3 or value[17] != 2:
-        raise ProtocolError("station is not in manual grid discharge mode")
+    if value[1] != 3 or value[16] != 3:
+        raise ProtocolError("station is not in grid-tied Time of Use mode")
+    if value[17] not in (1, 2):
+        raise ProtocolError("station reported an unknown power-adjustment mode")
+    return "Automatic" if value[17] == 1 else "Manual"
+
+
+def _parse_manual_discharge_power(value: bytes | bytearray) -> tuple[int, int, int]:
+    """Read discharge watts when Time of Use power adjustment is manual."""
+    if _parse_power_adjustment(value) != "Manual":
+        raise ProtocolError("station is not using manual power adjustment")
     maximum = int.from_bytes(value[30:34], "little")
     minimum = int.from_bytes(value[34:38], "little")
     watts = int.from_bytes(value[38:42], "little")
@@ -497,11 +507,14 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
         # An explicit invalid/disabled record must clear previously usable state.
         # Other module snapshots can omit this key and must not clear it.
         data.update(
+            power_adjustment=None,
             discharge_power_available=False,
             discharge_power_min_w=None,
             discharge_power_max_w=None,
             discharge_power_w=None,
         )
+        with contextlib.suppress(ProtocolError):
+            data["power_adjustment"] = _parse_power_adjustment(keyed[ECO_MODE_KEY])
         try:
             minimum, maximum, watts = _parse_manual_discharge_power(keyed[ECO_MODE_KEY])
         except ProtocolError:
@@ -579,6 +592,18 @@ def build_charge_limits_set_payload(
     )
 
 
+def _eco_mode_bytes(current_value: str | bytes) -> bytearray:
+    """Copy the complete readback for a single-field eco-mode edit."""
+    try:
+        return bytearray(
+            bytes.fromhex(current_value)
+            if isinstance(current_value, str)
+            else current_value
+        )
+    except ValueError as error:
+        raise ProtocolError("eco-mode state is not valid hex") from error
+
+
 def build_discharge_power_set_payload(
     current_value: str | bytes,
     watts: int,
@@ -588,20 +613,39 @@ def build_discharge_power_set_payload(
     """Change only manual discharge watts in the complete eco-mode readback."""
     if type(watts) is not int:
         raise ProtocolError("discharge power must be a whole number of watts")
-    try:
-        value = bytearray(
-            bytes.fromhex(current_value)
-            if isinstance(current_value, str)
-            else current_value
-        )
-    except ValueError as error:
-        raise ProtocolError("eco-mode state is not valid hex") from error
+    value = _eco_mode_bytes(current_value)
     minimum, maximum, _ = _parse_manual_discharge_power(value)
     if not minimum <= watts <= maximum:
         raise ProtocolError(
             f"discharge power must be between {minimum} and {maximum} watts"
         )
     value[38:42] = watts.to_bytes(4, "little")
+    return build_keyed_set_payload(
+        [(ECO_MODE_KEY, bytes(value))], timestamp_ms=timestamp_ms
+    )
+
+
+def build_power_adjustment_set_payload(
+    current_value: str | bytes,
+    mode: str,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Change only Automatic/Manual adjustment in an existing Time of Use setup."""
+    if mode not in ("Manual", "Automatic"):
+        raise ProtocolError("power adjustment must be Manual or Automatic")
+    value = _eco_mode_bytes(current_value)
+    _parse_power_adjustment(value)
+    if mode == "Automatic":
+        try:
+            meter_linked = bool(value[42:79].split(b"\x00", 1)[0].decode("utf-8"))
+        except UnicodeDecodeError:
+            meter_linked = False
+        if not meter_linked:
+            raise ProtocolError(
+                "link a smart meter in DJI Home before selecting Automatic"
+            )
+    value[17] = 1 if mode == "Automatic" else 2
     return build_keyed_set_payload(
         [(ECO_MODE_KEY, bytes(value))], timestamp_ms=timestamp_ms
     )

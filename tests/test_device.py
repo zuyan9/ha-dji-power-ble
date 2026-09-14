@@ -211,7 +211,7 @@ class DischargePowerClient(StationClient):
         self.send(request.command_id, reply, sequence=request.sequence, flags=0x80)
 
 
-class DischargePowerTests(unittest.IsolatedAsyncioTestCase):
+class EcoModeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.device = device_module.DjiPowerDevice(
             FakeBleDevice(), "ab" * 16, name="Test station", model="DJI Power 2000"
@@ -243,6 +243,7 @@ class DischargePowerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.device.data["discharge_power_available"])
         self.assertIsNone(self.device.data["discharge_power_w"])
         self.assertIsNone(self.device.data["key_18"])
+        self.assertIsNone(self.device.data["power_adjustment"])
 
     async def test_optional_read_failure_is_tolerated_but_disconnect_propagates(self):
         read_config = self.device._read_config
@@ -335,6 +336,8 @@ class DischargePowerTests(unittest.IsolatedAsyncioTestCase):
                 self.device.model = model
                 with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
                     await self.device.set_discharge_power(422)
+                with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+                    await self.device.set_power_adjustment("Automatic")
         self.assertEqual(self.client.requests, [])
 
     async def test_failed_or_missing_ack_never_confirms_requested_value(self) -> None:
@@ -364,6 +367,97 @@ class DischargePowerTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_discharge_power(93)
         self.assertFalse(self.device.data["discharge_power_available"])
         self.assertIsNone(self.device.data["discharge_power_w"])
+
+    async def test_adjustment_mode_readback_enables_and_disables_watt_control(self):
+        # Start in Automatic; Manual should restore the saved 93 W setpoint.
+        initial = bytearray(SYNTHETIC_ECO_MODE + b"extension")
+        initial[17] = 1
+        self.client.value = bytes(initial)
+        await self.device.refresh_config()
+        self.assertEqual(self.device.data["power_adjustment"], "Automatic")
+        self.assertFalse(self.device.data["discharge_power_available"])
+
+        for mode, encoded in (("Manual", 2), ("Automatic", 1)):
+            with self.subTest(mode=mode):
+                self.client.requests.clear()
+                await self.device.set_power_adjustment(mode)
+                self.assertEqual(
+                    [command for command, _ in self.client.requests],
+                    [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+                )
+                self.assertEqual(self.client.requests[0][1], b"\x00\x18\x10")
+                self.assertEqual(self.client.requests[-1][1], b"\x00\x18\x10")
+                sent = duml.parse_keyed_values(self.client.requests[1][1])[0x18]
+                self.assertEqual(sent[:17], initial[:17])
+                self.assertEqual(sent[17], encoded)
+                self.assertEqual(sent[18:], initial[18:])
+                self.assertEqual(self.device.data["power_adjustment"], mode)
+                self.assertEqual(
+                    self.device.data["discharge_power_available"], mode == "Manual"
+                )
+                self.assertEqual(
+                    self.device.data["discharge_power_w"],
+                    93 if mode == "Manual" else None,
+                )
+
+    async def test_automatic_rechecks_meter_in_fresh_config(self) -> None:
+        await self.device.refresh_config()
+        unlinked = bytearray(SYNTHETIC_ECO_MODE)
+        unlinked[42:79] = bytes(37)
+        self.client.value = bytes(unlinked)
+        self.client.requests.clear()
+
+        with self.assertRaisesRegex(device_module.DjiPowerError, "link a smart meter"):
+            await self.device.set_power_adjustment("Automatic")
+
+        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x18\x10")])
+        self.assertEqual(self.device.data["power_adjustment"], "Manual")
+        await self.device.set_power_adjustment("Manual")
+        self.assertEqual(self.client.value, unlinked)
+
+    async def test_invalid_adjustment_config_or_option_never_sends_set(self) -> None:
+        wrong_mode = bytearray(SYNTHETIC_ECO_MODE)
+        wrong_mode[16] = 2
+        for current, option in (
+            (None, "Manual"),
+            (SYNTHETIC_ECO_MODE[:42], "Manual"),
+            (bytes(wrong_mode), "Manual"),
+            (SYNTHETIC_ECO_MODE, "Off"),
+        ):
+            with self.subTest(option=option, length=len(current or b"")):
+                self.client.value = current
+                self.client.requests.clear()
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_power_adjustment(option)
+                self.assertEqual(
+                    self.client.requests, [(duml.GET_COMMAND, b"\x00\x18\x10")]
+                )
+
+    async def test_adjustment_ack_failure_does_not_change_reported_mode(self) -> None:
+        for ack in (None, bytes.fromhex("01000000")):
+            with self.subTest(ack=ack):
+                self.client.ack_value = ack
+                self.client.requests.clear()
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_power_adjustment("Automatic")
+                self.assertEqual(self.device.data["power_adjustment"], "Manual")
+                self.assertTrue(self.device.data["discharge_power_available"])
+                self.assertEqual(len(self.client.requests), 2)
+
+    async def test_adjustment_ack_without_changed_readback_times_out(self) -> None:
+        self.client.apply_set = False
+        with self.assertRaisesRegex(device_module.DjiPowerError, "did not report"):
+            await self.device.set_power_adjustment("Automatic")
+        self.assertEqual(self.device.data["power_adjustment"], "Manual")
+        self.assertTrue(self.device.data["discharge_power_available"])
+        self.assertEqual(len(self.client.requests), 10)
+
+    async def test_missing_adjustment_readback_clears_both_controls(self) -> None:
+        self.client.omit_after_set = True
+        with self.assertRaisesRegex(device_module.DjiPowerError, "omitted"):
+            await self.device.set_power_adjustment("Manual")
+        self.assertIsNone(self.device.data["power_adjustment"])
+        self.assertFalse(self.device.data["discharge_power_available"])
 
 
 class DeviceTests(unittest.IsolatedAsyncioTestCase):

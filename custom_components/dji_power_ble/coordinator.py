@@ -129,3 +129,11 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         except DjiPowerError as error:
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
+
+    async def async_set_power_adjustment(self, mode: str) -> None:
+        """Set power adjustment and publish its confirmed readback."""
+        try:
+            await self.device.set_power_adjustment(mode)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))

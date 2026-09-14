@@ -30,7 +30,13 @@ from .duml import ProtocolError, parse_manufacturer_data
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 _REAPPEAR_CALLBACKS_KEY = f"{DOMAIN}_reappear_callbacks"
 _MAX_ADVERTISEMENT_AGE = 60.0
