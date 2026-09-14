@@ -17,6 +17,7 @@ from .duml import (
     APP_SOURCE,
     AUTH_COMMAND,
     CHECK_SECRET_KEY,
+    ECO_MODE_KEY,
     GET_COMMAND,
     HMS_COMMAND,
     NOTIFY_UUID,
@@ -35,6 +36,8 @@ from .duml import (
     ProtocolError,
     build_ac_set_payload,
     build_charge_limits_set_payload,
+    build_discharge_power_set_payload,
+    build_power_adjustment_set_payload,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
     normalize_pair_key,
@@ -372,13 +375,58 @@ class DjiPowerDevice:
 
     async def refresh_config(self) -> None:
         """Fetch and publish a keyed configuration snapshot."""
-        for module in (0x01, 0x04):
-            response = await self._request(GET_COMMAND, bytes((0x00, module, 0x10)))
+        for key in (0x01, 0x04):
+            await self._read_config(key)
+        if self.model == "DJI Power 2000":
             try:
-                update = parse_telemetry(self._decode_payload(response))
-            except ProtocolError as error:
-                raise DjiPowerError("station returned malformed config data") from error
-            self._merge_data(update)
+                await self._read_eco_mode()
+            except DjiPowerDisconnectedError:
+                raise
+            except DjiPowerError as error:
+                # Older firmware may omit or reject this optional setting.
+                _LOGGER.debug("Eco-mode configuration unavailable: %s", error)
+
+    async def _read_config(self, key: int) -> dict[str, object]:
+        response = await self._request(GET_COMMAND, bytes((0x00, key, 0x10)))
+        try:
+            update = parse_telemetry(self._decode_payload(response))
+        except ProtocolError as error:
+            raise DjiPowerError("station returned malformed config data") from error
+        self._merge_data(update)
+        return update
+
+    async def _read_eco_mode(self) -> str:
+        """Require a fresh eco-mode record rather than reusing cached settings."""
+        try:
+            update = await self._read_config(ECO_MODE_KEY)
+            current = update.get("key_18")
+            if not isinstance(current, str):
+                raise DjiPowerError("station omitted eco-mode configuration")
+        except DjiPowerDisconnectedError:
+            # The disconnect callback already marks the coordinator unavailable.
+            # Publishing state here would mark its last update successful again.
+            raise
+        except DjiPowerError:
+            self._merge_data(
+                {
+                    "key_18": None,
+                    "power_adjustment": None,
+                    "discharge_power_available": False,
+                    "discharge_power_w": None,
+                    "discharge_power_min_w": None,
+                    "discharge_power_max_w": None,
+                }
+            )
+            raise
+        return current
+
+    async def _wait_for_eco_mode_values(self, expected: dict[str, object]) -> None:
+        for _ in range(8):
+            await asyncio.sleep(2)
+            await self._read_eco_mode()
+            if all(self.data.get(key) == value for key, value in expected.items()):
+                return
+        raise DjiPowerError("station did not report the requested eco-mode values")
 
     async def _set(self, payload: bytes, expected_keys: tuple[int, ...]) -> None:
         response = await self._request(SET_COMMAND, payload)
@@ -439,3 +487,35 @@ class DjiPowerDevice:
                     "recharge_limit": requested_recharge,
                 }
             )
+
+    async def set_discharge_power(self, watts: int) -> None:
+        """Set Power 2000 manual discharge watts and require matching readback."""
+        if self.model != "DJI Power 2000":
+            raise DjiPowerError(
+                "discharge-power control is only enabled for Power 2000"
+            )
+        async with self._operation_lock:
+            current = await self._read_eco_mode()
+            try:
+                payload = build_discharge_power_set_payload(current, watts)
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (ECO_MODE_KEY,))
+            await self._wait_for_eco_mode_values(
+                {"discharge_power_available": True, "discharge_power_w": watts}
+            )
+
+    async def set_power_adjustment(self, mode: str) -> None:
+        """Select Automatic/Manual power adjustment and confirm its readback."""
+        if self.model != "DJI Power 2000":
+            raise DjiPowerError(
+                "power-adjustment control is only enabled for Power 2000"
+            )
+        async with self._operation_lock:
+            current = await self._read_eco_mode()
+            try:
+                payload = build_power_adjustment_set_payload(current, mode)
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (ECO_MODE_KEY,))
+            await self._wait_for_eco_mode_values({"power_adjustment": mode})

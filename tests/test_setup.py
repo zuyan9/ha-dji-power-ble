@@ -40,6 +40,7 @@ _module(
     Platform=types.SimpleNamespace(
         BINARY_SENSOR="binary_sensor",
         NUMBER="number",
+        SELECT="select",
         SENSOR="sensor",
         SWITCH="switch",
     ),

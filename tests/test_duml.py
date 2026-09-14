@@ -1,4 +1,4 @@
-"""Capture-derived tests for the HA-independent DJI protocol codec."""
+"""Capture-derived and synthetic tests for the HA-independent protocol codec."""
 
 from __future__ import annotations
 
@@ -58,6 +58,21 @@ CAPTURED_REPORT = bytes.fromhex(
     "0000343931353037622d616435382d346164372d626539322d3264323138306430"
     "333862640020300c005c123417025c120000ce0901303025000100000031301d00"
     "3230190003333014003430100001040001000000003830000035300000"
+)
+
+# Synthetic app-schema eco-mode record, not a physical-station capture.
+# The available flag is deliberately zero: the app's manual-control gate uses
+# mode/grid_mode/chg_mode (3/3/2), not that flag. The discharge range is 10-800 W.
+SYNTHETIC_ECO_MODE = (
+    bytes.fromhex(
+        "00030100"  # available, mode, peak_out_sw, valley_in_sw
+        "640000001400000050000000"  # t_chg_up, t_chg_low, t_chg_v
+        "0302"  # grid_mode, chg_mode
+        "b004000064000000f4010000"  # m_chg_up, m_chg_low, m_chg_v
+        "200300000a0000005d000000"  # m_dchg_up, m_dchg_low, m_dchg_v
+    )
+    + b"synthetic".ljust(37, b"\x00")  # src_dev_id
+    + bytes.fromhex("0200fa00000001")  # tar_phase, ups_pwr_up, auto_sw
 )
 
 # Synthetic known-answer vectors: no device nonce, credentials, or capture data.
@@ -183,6 +198,246 @@ class KeyedConfigTests(unittest.TestCase):
             values[0x05].hex(),
             "6400000046000000460000000f000000000000000f000000",
         )
+
+
+class DischargePowerTests(unittest.TestCase):
+    def test_app_schema_decodes_93_and_422_watts_with_device_bounds(self) -> None:
+        self.assertEqual(len(SYNTHETIC_ECO_MODE), 86)
+        for encoded, watts in (("5d000000", 93), ("a6010000", 422)):
+            with self.subTest(watts=watts):
+                value = bytearray(SYNTHETIC_ECO_MODE)
+                value[38:42] = bytes.fromhex(encoded)
+                payload = duml.build_keyed_set_payload([(0x18, bytes(value))])
+
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertTrue(parsed["discharge_power_available"])
+                self.assertEqual(parsed["discharge_power_min_w"], 10)
+                self.assertEqual(parsed["discharge_power_max_w"], 800)
+                self.assertEqual(parsed["discharge_power_w"], watts)
+                self.assertEqual(parsed["key_18"], value.hex())
+
+    def test_available_flag_does_not_gate_manual_control(self) -> None:
+        for available in (0, 1):
+            with self.subTest(available=available):
+                value = bytearray(SYNTHETIC_ECO_MODE)
+                value[0] = available
+                self.assertEqual(
+                    duml._parse_manual_discharge_power(bytes(value)), (10, 800, 93)
+                )
+                payload = duml.build_discharge_power_set_payload(bytes(value), 422)
+                self.assertEqual(duml.parse_keyed_values(payload)[0x18][0], available)
+
+    def test_set_changes_only_watts_preserving_complete_record_and_tail(self) -> None:
+        current = SYNTHETIC_ECO_MODE + bytes.fromhex("aabbccddeeff")
+        for source in (current, current.hex()):
+            with self.subTest(source_type=type(source).__name__):
+                payload = duml.build_discharge_power_set_payload(
+                    source, 422, timestamp_ms=1000
+                )
+                entries = duml.parse_keyed_values(payload)
+
+                self.assertEqual(set(entries), {0x18})
+                self.assertEqual(
+                    entries[0x18],
+                    current[:38] + bytes.fromhex("a6010000") + current[42:],
+                )
+                self.assertEqual(payload[:16], duml.build_keyed_header(1000))
+
+    def test_set_accepts_both_device_reported_bounds(self) -> None:
+        for watts in (10, 800):
+            with self.subTest(watts=watts):
+                payload = duml.build_discharge_power_set_payload(
+                    SYNTHETIC_ECO_MODE, watts
+                )
+                self.assertEqual(
+                    duml.parse_telemetry(payload)["discharge_power_w"], watts
+                )
+
+    def test_discharge_fields_use_full_unsigned_32_bit_values(self) -> None:
+        value = bytearray(SYNTHETIC_ECO_MODE)
+        value[30:42] = bytes.fromhex("ffffffff0000010001000100")
+        self.assertEqual(
+            duml._parse_manual_discharge_power(bytes(value)),
+            (65536, 4294967295, 65537),
+        )
+        payload = duml.build_discharge_power_set_payload(bytes(value), 4294967295)
+        self.assertEqual(
+            duml.parse_keyed_values(payload)[0x18][38:42], bytes.fromhex("ffffffff")
+        )
+
+    def test_set_rejects_non_integer_or_out_of_range_watts(self) -> None:
+        for watts in (93.0, 93.5, True, False, "93", None, -1, 9, 801, 2**32):
+            with (
+                self.subTest(watts=watts),
+                self.assertRaises(duml.ProtocolError),
+            ):
+                duml.build_discharge_power_set_payload(SYNTHETIC_ECO_MODE, watts)
+
+    def test_set_rejects_invalid_hex(self) -> None:
+        for current in ("zz", "0"):
+            with (
+                self.subTest(current=current),
+                self.assertRaisesRegex(duml.ProtocolError, "valid hex"),
+            ):
+                duml.build_discharge_power_set_payload(current, 422)
+
+    def test_invalid_or_inactive_state_clears_telemetry_and_blocks_writes(self) -> None:
+        invalid = [SYNTHETIC_ECO_MODE[:length] for length in (0, 17, 42, 85)]
+        for offset, disabled in ((1, 0), (16, 2), (17, 1)):
+            value = bytearray(SYNTHETIC_ECO_MODE)
+            value[offset] = disabled
+            invalid.append(bytes(value))
+        for limits in (
+            "090000000a0000000a000000",  # Maximum below minimum.
+            "200300000a00000009000000",  # Current below minimum.
+            "200300000a00000021030000",  # Current above maximum.
+        ):
+            value = bytearray(SYNTHETIC_ECO_MODE)
+            value[30:42] = bytes.fromhex(limits)
+            invalid.append(bytes(value))
+
+        for index, value in enumerate(invalid):
+            with self.subTest(case=index):
+                payload = duml.build_keyed_set_payload([(0x18, value)])
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertFalse(parsed["discharge_power_available"])
+                self.assertIsNone(parsed["discharge_power_min_w"])
+                self.assertIsNone(parsed["discharge_power_max_w"])
+                self.assertIsNone(parsed["discharge_power_w"])
+                self.assertEqual(parsed["key_18"], value.hex())
+                with self.assertRaises(duml.ProtocolError):
+                    duml.build_discharge_power_set_payload(value, 422)
+
+    def test_partial_snapshot_without_eco_mode_keeps_existing_state(self) -> None:
+        payload = duml.build_keyed_set_payload([(0x18, SYNTHETIC_ECO_MODE)])
+        current = duml.parse_telemetry(payload)
+        partial = duml.parse_telemetry(CAPTURED_KEYED_CONFIG)
+
+        self.assertFalse(any(key.startswith("discharge_power_") for key in partial))
+        current.update(partial)
+        self.assertEqual(current["discharge_power_w"], 93)
+        self.assertTrue(current["discharge_power_available"])
+
+
+class PowerAdjustmentTests(unittest.TestCase):
+    def test_automatic_readback_clears_previous_manual_watts(self) -> None:
+        payload = duml.build_keyed_set_payload([(0x18, SYNTHETIC_ECO_MODE)])
+        current = duml.parse_telemetry(payload)
+        self.assertEqual(current["power_adjustment"], "Manual")
+        self.assertEqual(current["discharge_power_w"], 93)
+
+        value = bytearray(SYNTHETIC_ECO_MODE)
+        value[17] = 1
+        payload = duml.build_keyed_set_payload([(0x18, bytes(value))])
+        current.update(duml.parse_telemetry(payload))
+
+        self.assertEqual(current["power_adjustment"], "Automatic")
+        self.assertFalse(current["discharge_power_available"])
+        self.assertIsNone(current["discharge_power_w"])
+        self.assertIsNone(current["discharge_power_min_w"])
+        self.assertIsNone(current["discharge_power_max_w"])
+
+    def test_selector_does_not_require_valid_manual_watts(self) -> None:
+        value = bytearray(SYNTHETIC_ECO_MODE)
+        value[38:42] = bytes(4)  # Below the reported manual minimum of 10 W.
+        for encoded, mode in ((1, "Automatic"), (2, "Manual")):
+            with self.subTest(mode=mode):
+                value[17] = encoded
+                payload = duml.build_keyed_set_payload([(0x18, bytes(value))])
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertEqual(parsed["power_adjustment"], mode)
+                self.assertFalse(parsed["discharge_power_available"])
+                self.assertIsNone(parsed["discharge_power_w"])
+                for target in ("Automatic", "Manual"):
+                    updated = duml.build_power_adjustment_set_payload(
+                        bytes(value), target
+                    )
+                    self.assertEqual(
+                        duml.parse_telemetry(updated)["power_adjustment"], target
+                    )
+
+    def test_set_changes_only_adjustment_preserving_watts_and_tail(self) -> None:
+        original = SYNTHETIC_ECO_MODE + bytes.fromhex("aabbccddeeff")
+        for source_is_hex in (False, True):
+            current = original
+            for mode, encoded in (("Automatic", 1), ("Manual", 2)):
+                with self.subTest(source_is_hex=source_is_hex, mode=mode):
+                    source = current.hex() if source_is_hex else current
+                    payload = duml.build_power_adjustment_set_payload(
+                        source, mode, timestamp_ms=1000
+                    )
+                    entries = duml.parse_keyed_values(payload)
+
+                    self.assertEqual(set(entries), {0x18})
+                    self.assertEqual(
+                        entries[0x18], current[:17] + bytes((encoded,)) + current[18:]
+                    )
+                    self.assertEqual(payload[:16], duml.build_keyed_header(1000))
+                    current = entries[0x18]
+
+    def test_automatic_requires_meter_but_manual_does_not(self) -> None:
+        value = bytearray(SYNTHETIC_ECO_MODE)
+        value[42:79] = bytes(37)
+        value[17] = 1
+        with self.assertRaisesRegex(duml.ProtocolError, "smart meter"):
+            duml.build_power_adjustment_set_payload(bytes(value), "Automatic")
+
+        payload = duml.build_power_adjustment_set_payload(bytes(value), "Manual")
+        self.assertEqual(duml.parse_telemetry(payload)["power_adjustment"], "Manual")
+        self.assertEqual(duml.parse_keyed_values(payload)[0x18][42:79], bytes(37))
+
+    def test_meter_check_uses_valid_utf8_within_its_fixed_field(self) -> None:
+        value = bytearray(SYNTHETIC_ECO_MODE + b"nonempty-extension")
+        for meter_id in (bytes(37), b"\xff" + bytes(36)):
+            with self.subTest(meter_id=meter_id):
+                value[42:79] = meter_id
+                with self.assertRaisesRegex(duml.ProtocolError, "smart meter"):
+                    duml.build_power_adjustment_set_payload(bytes(value), "Automatic")
+        value[42:79] = "synthetic-é".encode().ljust(37, b"\x00")
+        payload = duml.build_power_adjustment_set_payload(bytes(value), "Automatic")
+        self.assertEqual(duml.parse_keyed_values(payload)[0x18][42:], value[42:])
+
+    def test_set_rejects_unknown_modes_and_malformed_hex(self) -> None:
+        for mode in ("manual", "automatic", "Scheduled", "", None, True, 2):
+            with self.subTest(mode=mode), self.assertRaises(duml.ProtocolError):
+                duml.build_power_adjustment_set_payload(SYNTHETIC_ECO_MODE, mode)
+        for current in ("zz", "0"):
+            with (
+                self.subTest(current=current),
+                self.assertRaisesRegex(duml.ProtocolError, "valid hex"),
+            ):
+                duml.build_power_adjustment_set_payload(current, "Manual")
+
+    def test_invalid_record_clears_selector_and_blocks_both_modes(self) -> None:
+        invalid = [SYNTHETIC_ECO_MODE[:length] for length in (0, 17, 42, 85)]
+        for offset, unsupported in ((1, 0), (16, 2), (17, 0), (17, 3)):
+            value = bytearray(SYNTHETIC_ECO_MODE)
+            value[offset] = unsupported
+            invalid.append(bytes(value))
+
+        for index, value in enumerate(invalid):
+            with self.subTest(case=index):
+                payload = duml.build_keyed_set_payload([(0x18, value)])
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertIsNone(parsed["power_adjustment"])
+                self.assertFalse(parsed["discharge_power_available"])
+                self.assertEqual(parsed["key_18"], value.hex())
+                for target in ("Automatic", "Manual"):
+                    with self.assertRaises(duml.ProtocolError):
+                        duml.build_power_adjustment_set_payload(value, target)
+
+    def test_partial_snapshot_without_eco_mode_keeps_adjustment(self) -> None:
+        payload = duml.build_keyed_set_payload([(0x18, SYNTHETIC_ECO_MODE)])
+        current = duml.parse_telemetry(payload)
+        partial = duml.parse_telemetry(CAPTURED_KEYED_CONFIG)
+
+        self.assertNotIn("power_adjustment", partial)
+        current.update(partial)
+        self.assertEqual(current["power_adjustment"], "Manual")
 
 
 class ReportTests(unittest.TestCase):

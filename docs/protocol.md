@@ -112,7 +112,10 @@ payloads begin with a 16-byte header:
 | `12` | 4 | Zero padding |
 
 Each following record is `key:u8`, marker `0x10`, `length:u16`, and `value[length]`.
-The integration reads module sweeps `0x01` and `0x04` and decodes these stable fields:
+GET requests contain operation `0x00` followed by requested key IDs plus `0x1000`,
+each encoded as a little-endian uint16. The integration retains its existing
+`0x01` and `0x04` reads and explicitly requests `0x18` on Power 2000 with
+`00 18 10`. It decodes these fields:
 
 | Key | Meaning | Exposed values |
 | --- | --- | --- |
@@ -123,6 +126,7 @@ The integration reads module sweeps `0x01` and `0x04` and decodes these stable f
 | `0x0C` | Display | Display timeout |
 | `0x0D` | Power switch | AC output state |
 | `0x15` | Timezone | UTC offset in minutes |
+| `0x18` | Eco mode | Power adjustment mode, manual discharge watts and watt limits |
 
 Unmapped keyed values are retained as `key_XX` hexadecimal diagnostic state.
 
@@ -150,10 +154,31 @@ AC output writes use keys `0x0D` and `0x0E`. Charge-limit writes use key `0x05`,
 six-value structure in which the integration changes only the recharge and discharge
 fields and preserves the other values from the latest read.
 
+Power 2000 manual discharge-power writes use key `0x18` (`eco_mode`). The
+app-derived layout stores maximum, minimum, and current discharge watts as
+little-endian uint32 values at byte offsets 30, 34, and 38. The control requires
+grid-tied Time of Use with manual power adjustment: `mode` (byte 1) = 3,
+`grid_mode` (byte 16) = 3, and `chg_mode` (byte 17) = 2. It accepts integer
+watts within the returned bounds.
+The client reads a fresh, complete record of at least 86 bytes and replaces only
+bytes 38–41, preserving every other byte, including any extended tail. Missing,
+incomplete, or incompatible records leave the number unavailable.
+
+The Power 2000 **Power adjustment** selector changes only `chg_mode` (byte 17):
+**Automatic** = 1, **Manual** = 2. It requires an existing grid-tied Time of Use
+configuration and preserves both watt setpoints and all other settings. Automatic
+also requires a linked smart meter (`src_dev_id`); link it in DJI Home first.
+The discharge-watts number is available only in Manual with valid reported limits.
+Initial grid installation, Time of Use selection, tariff configuration, and meter
+linking remain in DJI Home. These controls do not construct missing configuration.
+
 A `0x63` response contains a four-byte status for each requested key. Every key must be
 present with status zero. An acknowledgement means the command was accepted, not that
 the new state is already observable, so the client polls keyed configuration until the
 requested values appear or the operation times out.
+Both controls confirm writes with another explicit `0x18` GET. Their encoding and
+mode checks are verified against the app; acceptance by Power 2000 firmware and
+physical output remain untested.
 
 ## Known limits
 
