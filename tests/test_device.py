@@ -7,7 +7,9 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, call, patch
+
+from tests.test_duml import SYNTHETIC_ECO_MODE
 
 ROOT = Path(__file__).parents[1]
 COMPONENT = ROOT / "custom_components" / "dji_power_ble"
@@ -175,6 +177,193 @@ class StationClient:
         else:
             raise AssertionError(f"unexpected command {request.command_id}")
         self.send(request.command_id, reply, sequence=request.sequence, flags=0x80)
+
+
+class DischargePowerClient(StationClient):
+    """Emulate app-schema configuration, never physical output or real firmware."""
+
+    def __init__(self, device, value=SYNTHETIC_ECO_MODE):
+        super().__init__(device, encrypted=False)
+        self.value = value
+        self.apply_set = True
+        self.ack_value = bytes(4)
+        self.omit_after_set = False
+
+    async def write_gatt_char(self, uuid, value, *, response):  # noqa: ARG002
+        request = duml.DumlPacket.decode(value)
+        self.requests.append((request.command_id, request.payload))
+        if request.command_id == duml.GET_COMMAND:
+            entries = []
+            if request.payload == b"\x00\x18\x10" and self.value is not None:
+                entries = [(0x18, self.value)]
+            reply = bytes(4) + duml.build_keyed_set_payload(entries, timestamp_ms=1)
+        elif request.command_id == duml.SET_COMMAND:
+            entries = [] if self.ack_value is None else [(0x18, self.ack_value)]
+            reply = duml.build_keyed_set_payload(entries, timestamp_ms=1)
+            requested = duml.parse_keyed_values(request.payload)
+            assert set(requested) == {0x18}
+            if self.apply_set and self.ack_value == bytes(4):
+                self.value = requested[0x18]
+            if self.omit_after_set:
+                self.value = None
+        else:
+            raise AssertionError(f"unexpected command {request.command_id}")
+        self.send(request.command_id, reply, sequence=request.sequence, flags=0x80)
+
+
+class DischargePowerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.device = device_module.DjiPowerDevice(
+            FakeBleDevice(), "ab" * 16, name="Test station", model="DJI Power 2000"
+        )
+        self.client = DischargePowerClient(self.device)
+        self.device._client = self.client
+        self.sleep = patch.object(
+            device_module.asyncio, "sleep", new_callable=AsyncMock
+        )
+        self.sleep.start()
+        self.addCleanup(self.sleep.stop)
+
+    async def test_initial_config_explicitly_reads_eco_mode(self) -> None:
+        await self.device.refresh_config()
+
+        self.assertEqual(
+            self.client.requests,
+            [(duml.GET_COMMAND, bytes((0, key, 0x10))) for key in (1, 4, 0x18)],
+        )
+        self.assertEqual(self.device.data["discharge_power_w"], 93)
+        self.assertTrue(self.device.data["discharge_power_available"])
+
+    async def test_missing_optional_config_does_not_break_refresh(self) -> None:
+        await self.device.refresh_config()
+        self.client.value = None
+
+        await self.device.refresh_config()
+
+        self.assertFalse(self.device.data["discharge_power_available"])
+        self.assertIsNone(self.device.data["discharge_power_w"])
+        self.assertIsNone(self.device.data["key_18"])
+
+    async def test_optional_read_failure_is_tolerated_but_disconnect_propagates(self):
+        read_config = self.device._read_config
+        for error in (
+            device_module.DjiPowerError("timeout waiting for 0x60 response"),
+            device_module.DjiPowerError("station returned malformed config data"),
+            device_module.DjiPowerDisconnectedError("disconnected"),
+        ):
+            async def fail_eco_mode(key, error=error):
+                if key == 0x18:
+                    raise error
+                return await read_config(key)
+
+            with self.subTest(error=str(error)), patch.object(
+                self.device, "_read_config", side_effect=fail_eco_mode
+            ):
+                if isinstance(error, device_module.DjiPowerDisconnectedError):
+                    with self.assertRaises(device_module.DjiPowerDisconnectedError):
+                        await self.device.refresh_config()
+                else:
+                    await self.device.refresh_config()
+                self.assertFalse(self.device.data["discharge_power_available"])
+
+    async def test_set_uses_fresh_config_preserves_other_fields_and_reads_back(self):
+        await self.device.refresh_config()
+        # Simulate another controller changing unrelated settings after our cache.
+        fresh = bytearray(SYNTHETIC_ECO_MODE + b"future-extension")
+        fresh[2:4] = b"\x01\x01"
+        fresh[42:79] = b"x" * 37
+        self.client.value = bytes(fresh)
+        self.client.requests.clear()
+        updates = []
+        self.device.add_state_listener(updates.append)
+
+        await self.device.set_discharge_power(422)
+
+        self.assertEqual(
+            [command for command, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+        )
+        self.assertEqual(self.client.requests[0][1], b"\x00\x18\x10")
+        self.assertEqual(self.client.requests[-1][1], b"\x00\x18\x10")
+        sent = duml.parse_keyed_values(self.client.requests[1][1])[0x18]
+        self.assertEqual(sent[:38], fresh[:38])
+        self.assertEqual(sent[38:42], bytes.fromhex("a6010000"))
+        self.assertEqual(sent[42:], fresh[42:])
+        self.assertEqual(self.device.data["discharge_power_w"], 422)
+        self.assertEqual([update["discharge_power_w"] for update in updates], [93, 422])
+
+    async def test_disconnect_during_read_does_not_publish_after_disconnect(self):
+        await self.device.refresh_config()
+        events = []
+        self.device.add_state_listener(lambda _: events.append("state"))
+        self.device.add_disconnect_listener(lambda _: events.append("disconnected"))
+
+        async def disconnect(_key):
+            self.device._on_disconnect(self.client)
+            raise device_module.DjiPowerDisconnectedError("disconnected")
+
+        with (
+            patch.object(self.device, "_read_config", side_effect=disconnect),
+            self.assertRaises(device_module.DjiPowerDisconnectedError),
+        ):
+            await self.device.set_discharge_power(422)
+        self.assertEqual(events, ["disconnected"])
+        self.assertFalse(self.device.is_connected)
+
+    async def test_invalid_fresh_config_or_value_never_sends_set(self) -> None:
+        disabled = bytearray(SYNTHETIC_ECO_MODE)
+        disabled[17] = 1
+        for state, watts in (
+            (None, 422),
+            (SYNTHETIC_ECO_MODE[:42], 422),
+            (bytes(disabled), 422),
+            (SYNTHETIC_ECO_MODE, 801),
+            (SYNTHETIC_ECO_MODE, 422.5),
+        ):
+            with self.subTest(state_length=len(state or b""), watts=watts):
+                self.client.value = state
+                self.client.requests.clear()
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_discharge_power(watts)
+                self.assertEqual(
+                    self.client.requests, [(duml.GET_COMMAND, b"\x00\x18\x10")]
+                )
+
+    async def test_other_models_cannot_send_discharge_power(self) -> None:
+        for model in ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 1000 Mini"):
+            with self.subTest(model=model):
+                self.device.model = model
+                with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+                    await self.device.set_discharge_power(422)
+        self.assertEqual(self.client.requests, [])
+
+    async def test_failed_or_missing_ack_never_confirms_requested_value(self) -> None:
+        for ack, message in (
+            (b"\x01\x00\x00\x00", "failed with status 1"),
+            (None, "omitted key 0x18"),
+            (b"\x00", "malformed"),
+        ):
+            with self.subTest(ack=ack):
+                self.client.ack_value = ack
+                self.client.requests.clear()
+                with self.assertRaisesRegex(device_module.DjiPowerError, message):
+                    await self.device.set_discharge_power(422)
+                self.assertEqual(self.device.data["discharge_power_w"], 93)
+                self.assertEqual(len(self.client.requests), 2)
+
+    async def test_ack_without_matching_readback_times_out(self) -> None:
+        self.client.apply_set = False
+        with self.assertRaisesRegex(device_module.DjiPowerError, "did not report"):
+            await self.device.set_discharge_power(422)
+        self.assertEqual(self.device.data["discharge_power_w"], 93)
+        self.assertEqual(len(self.client.requests), 10)
+
+    async def test_missing_readback_cannot_confirm_even_an_unchanged_setpoint(self):
+        self.client.omit_after_set = True
+        with self.assertRaisesRegex(device_module.DjiPowerError, "omitted"):
+            await self.device.set_discharge_power(93)
+        self.assertFalse(self.device.data["discharge_power_available"])
+        self.assertIsNone(self.device.data["discharge_power_w"])
 
 
 class DeviceTests(unittest.IsolatedAsyncioTestCase):
@@ -421,7 +610,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.payload, b"right")
         self.assertEqual(self.device._pending, {})
 
-    async def test_refresh_uses_keyed_get_module_sweeps(self) -> None:
+    async def test_refresh_retains_existing_keyed_get_requests(self) -> None:
         client = GetClient(self.device)
         self.device._client = client
 
