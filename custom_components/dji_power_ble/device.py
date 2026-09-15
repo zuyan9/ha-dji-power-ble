@@ -16,6 +16,7 @@ from bleak_retry_connector import BleakClientWithServiceCache, establish_connect
 from .duml import (
     APP_SOURCE,
     AUTH_COMMAND,
+    CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
     ECO_MODE_KEY,
     EXPANSION_BATTERIES_KEY,
@@ -51,6 +52,8 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_REQUEST_TIMEOUT = 8.0
 DEFAULT_CONNECT_TIMEOUT = 30.0
+READBACK_RETRIES = 8
+READBACK_RETRY_INTERVAL = 2.0
 EXPANSION_REFRESH_INTERVAL = 30.0
 EXPANSION_MODELS = {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
 
@@ -461,8 +464,9 @@ class DjiPowerDevice:
         return current
 
     async def _wait_for_eco_mode_values(self, expected: dict[str, object]) -> None:
-        for _ in range(8):
-            await asyncio.sleep(2)
+        for attempt in range(READBACK_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(READBACK_RETRY_INTERVAL)
             await self._read_eco_mode()
             if all(self.data.get(key) == value for key, value in expected.items()):
                 return
@@ -475,11 +479,18 @@ class DjiPowerDevice:
         except ProtocolError as error:
             raise DjiPowerError(str(error)) from error
 
-    async def _wait_for_values(self, expected: dict[str, object]) -> None:
-        for _ in range(8):
-            await asyncio.sleep(2)
-            await self.refresh_config()
-            if all(self.data.get(key) == value for key, value in expected.items()):
+    async def _wait_for_values(
+        self, expected: dict[str, object], *, config_key: int
+    ) -> None:
+        """Confirm from a fresh targeted read, delaying only subsequent attempts."""
+        for attempt in range(READBACK_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(READBACK_RETRY_INTERVAL)
+            update = await self._read_config(config_key)
+            if all(
+                key in update and update[key] == value
+                for key, value in expected.items()
+            ):
                 return
         raise DjiPowerError("station did not report the requested values")
 
@@ -489,7 +500,9 @@ class DjiPowerDevice:
             await self._set(
                 build_ac_set_payload(enabled), (POWER_SWITCH_KEY, RULES_KEY)
             )
-            await self._wait_for_values({"ac_enabled": enabled})
+            await self._wait_for_values(
+                {"ac_enabled": enabled}, config_key=POWER_SWITCH_KEY
+            )
 
     async def set_charge_limits(
         self,
@@ -499,9 +512,10 @@ class DjiPowerDevice:
     ) -> None:
         """Set one or both energy-management limits."""
         async with self._operation_lock:
-            current = self.data.get("key_05")
-            old_discharge = self.data.get("discharge_limit")
-            old_recharge = self.data.get("recharge_limit")
+            update = await self._read_config(CHARGE_LIMIT_KEY)
+            current = update.get("key_05")
+            old_discharge = update.get("discharge_limit")
+            old_recharge = update.get("recharge_limit")
             if (
                 not isinstance(current, str)
                 or not isinstance(old_discharge, int)
@@ -520,12 +534,13 @@ class DjiPowerDevice:
                 )
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (0x05,))
+            await self._set(payload, (CHARGE_LIMIT_KEY,))
             await self._wait_for_values(
                 {
                     "discharge_limit": requested_discharge,
                     "recharge_limit": requested_recharge,
-                }
+                },
+                config_key=CHARGE_LIMIT_KEY,
             )
 
     async def set_discharge_power(self, watts: int) -> None:

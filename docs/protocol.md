@@ -186,7 +186,7 @@ Lite, 12 V, and XT60. The codec exposes both aggregate and per-port values.
 
 AC output writes use keys `0x0D` and `0x0E`. Charge-limit writes use key `0x05`, a
 six-value structure in which the integration changes only the recharge and discharge
-fields and preserves the other values from the latest read.
+fields and preserves the other values from a fresh `0x05` read before writing.
 
 Power 2000 manual discharge-power writes use key `0x18` (`eco_mode`). The
 app-derived layout stores maximum, minimum, and current discharge watts as
@@ -210,9 +210,18 @@ A `0x63` response contains a four-byte status for each requested key. Every key 
 present with status zero. An acknowledgement means the command was accepted, not that
 the new state is already observable, so the client polls keyed configuration until the
 requested values appear or the operation times out.
-Both controls confirm writes with another explicit `0x18` GET. Their encoding and
-mode checks are verified against the app; acceptance by Power 2000 firmware and
-physical output remain untested.
+
+The first confirmation read follows the acknowledgement immediately. If the reported
+values do not match, the client makes up to eight further attempts, waiting two
+seconds between attempts. Each read also has a transport timeout. AC output is
+confirmed with an explicit `0x0D` GET, percentage limits with `0x05`, and Power 2000
+controls with `0x18`; unrelated expansion-battery or configuration reads are excluded
+from write confirmation. Cached values cannot substitute for missing readback fields.
+Writes remain serialized until confirmation completes, and confirmed values are
+published immediately regardless of the Home Assistant update interval.
+
+The Power 2000 controls' encoding and mode checks are verified against the app;
+acceptance by Power 2000 firmware and physical output remain untested.
 
 ## Known limits
 

@@ -212,6 +212,199 @@ class DischargePowerClient(StationClient):
         self.send(request.command_id, reply, sequence=request.sequence, flags=0x80)
 
 
+class ConfigControlClient(StationClient):
+    """Emulate targeted config reads on plaintext and encrypted transports."""
+
+    def __init__(self, device, *, encrypted=False):
+        super().__init__(device, encrypted=encrypted)
+        self.values = {
+            duml.CHARGE_LIMIT_KEY: b"".join(
+                value.to_bytes(4, "little") for value in (100, 70, 100, 15, 0, 0)
+            ),
+            duml.POWER_SWITCH_KEY: bytes.fromhex("0d000300020102"),
+        }
+        self.ack_value = bytes(4)
+        self.apply_set = True
+        self.did_set = False
+        self.omit_after_set = False
+
+    async def write_gatt_char(self, uuid, value, *, response):  # noqa: ARG002
+        request = duml.DumlPacket.decode(value)
+        payload = (
+            duml.decrypt_power_1000_payload(request.payload)
+            if self.encrypted else request.payload
+        )
+        self.requests.append((request.command_id, payload))
+        if request.command_id == duml.GET_COMMAND:
+            assert len(payload) == 3 and payload[0] == 0 and payload[2] == 0x10
+            key = payload[1]
+            assert key in (duml.CHARGE_LIMIT_KEY, duml.POWER_SWITCH_KEY)
+            entries = [] if self.did_set and self.omit_after_set else [
+                (key, self.values[key])
+            ]
+            reply = bytes(4) + duml.build_keyed_set_payload(entries, timestamp_ms=1)
+        elif request.command_id == duml.SET_COMMAND:
+            requested = duml.parse_keyed_values(payload)
+            entries = [] if self.ack_value is None else [
+                (key, self.ack_value) for key in requested
+            ]
+            reply = duml.build_keyed_set_payload(entries, timestamp_ms=1)
+            if self.apply_set and self.ack_value == bytes(4):
+                self.values.update(requested)
+            self.did_set = True
+        else:
+            raise AssertionError(f"unexpected command {request.command_id}")
+        self.send(request.command_id, reply, sequence=request.sequence, flags=0x80)
+
+
+class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.device, self.client = self.make_station()
+        self.sleep = patch.object(
+            device_module.asyncio, "sleep", new_callable=AsyncMock
+        )
+        self.sleep_mock = self.sleep.start()
+        self.addCleanup(self.sleep.stop)
+
+    @staticmethod
+    def make_station(*, encrypted=False):
+        device = device_module.DjiPowerDevice(
+            FakeBleDevice(), "ab" * 16, name="Synthetic station",
+            model="DJI Power 1000" if encrypted else "DJI Power 2000",
+        )
+        client = ConfigControlClient(device, encrypted=encrypted)
+        device._client = client
+        device.data.update(duml.parse_telemetry(
+            duml.build_keyed_set_payload(list(client.values.items()), timestamp_ms=1)
+        ))
+        return device, client
+
+    async def test_all_standard_controls_confirm_immediately_with_targeted_reads(self):
+        for encrypted in (False, True):
+            for method, kwargs, key, expected in (
+                ("set_ac", {"enabled": True}, 0x0D, {"ac_enabled": True}),
+                ("set_charge_limits", {"discharge_limit": 5}, 0x05,
+                 {"discharge_limit": 5, "recharge_limit": 100}),
+                ("set_charge_limits", {"recharge_limit": 80}, 0x05,
+                 {"discharge_limit": 0, "recharge_limit": 80}),
+            ):
+                with self.subTest(encrypted=encrypted, control=kwargs):
+                    device, client = self.make_station(encrypted=encrypted)
+                    await getattr(device, method)(**kwargs)
+
+                    self.sleep_mock.assert_not_awaited()
+                    for field, value in expected.items():
+                        self.assertEqual(device.data[field], value)
+                    get = (duml.GET_COMMAND, bytes((0, key, 0x10)))
+                    reads = [item for item in client.requests
+                             if item[0] == duml.GET_COMMAND]
+                    self.assertEqual(reads, [get] * (1 if key == 0x0D else 2))
+                    self.assertEqual(client.requests[-1], get)
+
+    async def test_charge_limit_write_preserves_fresh_other_fields(self):
+        fresh = b"".join(
+            value.to_bytes(4, "little") for value in (99, 71, 90, 14, 1, 3)
+        )
+        self.client.values[0x05] = fresh
+
+        await self.device.set_charge_limits(discharge_limit=5)
+
+        self.assertEqual(self.client.values[0x05][:20], fresh[:20])
+        self.assertEqual(self.device.data["recharge_limit"], 90)
+        self.assertEqual(self.device.data["discharge_limit"], 5)
+
+    async def test_missing_fresh_limits_never_writes_cached_record(self):
+        self.client.values[0x05] = b""
+
+        with self.assertRaisesRegex(device_module.DjiPowerError, "unavailable"):
+            await self.device.set_charge_limits(recharge_limit=80)
+
+        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x05\x10")])
+
+    async def test_missing_readback_cannot_confirm_matching_cached_values(self):
+        for method, kwargs in (
+            ("set_ac", {"enabled": False}),
+            ("set_charge_limits", {"recharge_limit": 100}),
+        ):
+            with self.subTest(control=method):
+                device, client = self.make_station()
+                client.omit_after_set = True
+                self.sleep_mock.reset_mock()
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerError, "did not report"
+                ):
+                    await getattr(device, method)(**kwargs)
+                self.assertEqual(self.sleep_mock.await_args_list, [call(2)] * 8)
+
+    async def test_stale_readback_retries_then_confirms(self):
+        self.client.apply_set = False
+
+        async def apply_after_delay(_delay):
+            self.assertEqual(len(self.client.requests), 2)
+            self.client.values.update(
+                duml.parse_keyed_values(self.client.requests[0][1])
+            )
+
+        self.sleep_mock.side_effect = apply_after_delay
+        await self.device.set_ac(True)
+
+        self.assertTrue(self.device.data["ac_enabled"])
+        self.sleep_mock.assert_awaited_once_with(2)
+
+    async def test_unapplied_write_exhausts_retries_without_confirming(self):
+        self.client.apply_set = False
+
+        with self.assertRaisesRegex(device_module.DjiPowerError, "did not report"):
+            await self.device.set_ac(True)
+
+        self.assertFalse(self.device.data["ac_enabled"])
+        self.assertEqual(len(self.client.requests), 10)
+        self.assertEqual(self.sleep_mock.await_args_list, [call(2)] * 8)
+
+    async def test_rejected_ack_never_starts_readback(self):
+        for method, kwargs in (
+            ("set_ac", {"enabled": True}),
+            ("set_charge_limits", {"recharge_limit": 80}),
+        ):
+            for ack in (None, bytes.fromhex("01000000")):
+                with self.subTest(control=method, ack=ack):
+                    device, client = self.make_station()
+                    client.ack_value = ack
+                    with self.assertRaises(device_module.DjiPowerError):
+                        await getattr(device, method)(**kwargs)
+                    self.assertEqual(client.requests[-1][0], duml.SET_COMMAND)
+                    self.sleep_mock.assert_not_awaited()
+                    self.assertFalse(device.data["ac_enabled"])
+                    self.assertEqual(device.data["recharge_limit"], 100)
+
+    async def test_cancelled_confirmation_releases_lock_and_pending_request(self):
+        reading = asyncio.Event()
+        send = self.client.write_gatt_char
+
+        async def stall_readback(*args, **kwargs):
+            if self.client.did_set:
+                reading.set()
+                await asyncio.Event().wait()
+            await send(*args, **kwargs)
+
+        self.client.write_gatt_char = stall_readback
+        task = asyncio.create_task(self.device.set_ac(True))
+        await reading.wait()
+        self.assertTrue(self.device._operation_lock.locked())
+        self.assertTrue(self.device._pending)
+        self.assertFalse(self.device.data["ac_enabled"])
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertFalse(self.device._operation_lock.locked())
+        self.assertEqual(self.device._pending, {})
+        self.client.write_gatt_char = send
+        await self.device.set_ac(False)
+        self.assertFalse(self.device.data["ac_enabled"])
+
+
 class EcoModeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.device = device_module.DjiPowerDevice(
@@ -222,8 +415,99 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
         self.sleep = patch.object(
             device_module.asyncio, "sleep", new_callable=AsyncMock
         )
-        self.sleep.start()
+        self.sleep_mock = self.sleep.start()
         self.addCleanup(self.sleep.stop)
+
+    async def test_confirmed_eco_controls_do_not_wait_before_first_readback(self):
+        for method, value in (
+            (self.device.set_discharge_power, 422),
+            (self.device.set_power_adjustment, "Automatic"),
+        ):
+            with self.subTest(control=method.__name__):
+                await method(value)
+                self.sleep_mock.assert_not_awaited()
+
+    async def test_stale_first_readback_retries_until_station_applies_write(self):
+        self.client.apply_set = False
+
+        async def apply_after_delay(delay):
+            self.assertEqual(delay, 2)
+            # SET was followed by a fresh GET before any retry delay.
+            self.assertEqual(
+                [command for command, _ in self.client.requests],
+                [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+            )
+            requested = duml.parse_keyed_values(self.client.requests[1][1])
+            self.client.value = requested[0x18]
+
+        self.sleep_mock.side_effect = apply_after_delay
+        await self.device.set_discharge_power(422)
+
+        self.sleep_mock.assert_awaited_once_with(2)
+        self.assertEqual(self.device.data["discharge_power_w"], 422)
+
+    async def test_last_retry_retains_sixteen_seconds_of_settling_time(self):
+        self.client.apply_set = False
+
+        async def apply_on_last_retry(_delay):
+            if self.sleep_mock.await_count == 8:
+                requested = duml.parse_keyed_values(self.client.requests[1][1])
+                self.client.value = requested[0x18]
+
+        self.sleep_mock.side_effect = apply_on_last_retry
+        await self.device.set_discharge_power(422)
+
+        self.assertEqual(self.sleep_mock.await_args_list, [call(2)] * 8)
+        self.assertEqual(len(self.client.requests), 11)
+
+    async def test_rapid_watt_changes_confirm_in_order_without_fixed_delays(self):
+        await asyncio.gather(
+            *(self.device.set_discharge_power(watts) for watts in (94, 95, 96))
+        )
+
+        self.sleep_mock.assert_not_awaited()
+        self.assertEqual(self.device.data["discharge_power_w"], 96)
+        self.assertEqual(
+            [command for command, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND] * 3,
+        )
+
+    async def test_queued_mode_change_waits_for_watt_confirmation(self):
+        reading = asyncio.Event()
+        release = asyncio.Event()
+        queued = asyncio.Event()
+        send = self.client.write_gatt_char
+
+        async def hold_first_readback(*args, **kwargs):
+            if len(self.client.requests) == 2:
+                reading.set()
+                await release.wait()
+            await send(*args, **kwargs)
+
+        async def change_mode():
+            queued.set()
+            await self.device.set_power_adjustment("Automatic")
+
+        self.client.write_gatt_char = hold_first_readback
+        first = asyncio.create_task(self.device.set_discharge_power(422))
+        await reading.wait()
+        second = asyncio.create_task(change_mode())
+        await queued.wait()
+
+        self.assertFalse(first.done())
+        self.assertFalse(second.done())
+        self.assertEqual(len(self.client.requests), 2)
+        self.assertEqual(self.device.data["discharge_power_w"], 93)
+        release.set()
+        await asyncio.gather(first, second)
+
+        self.sleep_mock.assert_not_awaited()
+        self.assertEqual(self.device.data["power_adjustment"], "Automatic")
+        self.assertEqual(int.from_bytes(self.client.value[38:42], "little"), 422)
+        self.assertEqual(
+            [command for command, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND] * 2,
+        )
 
     async def test_initial_config_explicitly_reads_eco_mode(self) -> None:
         await self.device.refresh_config()
@@ -360,7 +644,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(device_module.DjiPowerError, "did not report"):
             await self.device.set_discharge_power(422)
         self.assertEqual(self.device.data["discharge_power_w"], 93)
-        self.assertEqual(len(self.client.requests), 10)
+        self.assertEqual(len(self.client.requests), 11)
 
     async def test_missing_readback_cannot_confirm_even_an_unchanged_setpoint(self):
         self.client.omit_after_set = True
@@ -451,7 +735,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_power_adjustment("Automatic")
         self.assertEqual(self.device.data["power_adjustment"], "Manual")
         self.assertTrue(self.device.data["discharge_power_available"])
-        self.assertEqual(len(self.client.requests), 10)
+        self.assertEqual(len(self.client.requests), 11)
 
     async def test_missing_adjustment_readback_clears_both_controls(self) -> None:
         self.client.omit_after_set = True

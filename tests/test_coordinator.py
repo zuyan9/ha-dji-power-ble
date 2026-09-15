@@ -1,4 +1,4 @@
-"""Offline checks for throttled state delivery across BLE disconnections."""
+"""Offline checks for throttled telemetry and immediate confirmed controls."""
 
 from __future__ import annotations
 
@@ -12,6 +12,30 @@ from unittest.mock import AsyncMock, Mock, patch
 COMPONENT = Path(__file__).parents[1] / "custom_components" / "dji_power_ble"
 PACKAGE = "_dji_power_coordinator_tests"
 LOADED = object()
+CONTROL_WRITES = (
+    ("set_ac", (True,), {}, {"ac_enabled": False}, {"ac_enabled": True}),
+    (
+        "set_charge_limits",
+        (),
+        {"discharge_limit": 10, "recharge_limit": 80},
+        {"discharge_limit": 5, "recharge_limit": 100},
+        {"discharge_limit": 10, "recharge_limit": 80},
+    ),
+    (
+        "set_discharge_power",
+        (422,),
+        {},
+        {"discharge_power_w": 93},
+        {"discharge_power_w": 422},
+    ),
+    (
+        "set_power_adjustment",
+        ("Manual",),
+        {},
+        {"power_adjustment": "Automatic"},
+        {"power_adjustment": "Manual"},
+    ),
+)
 
 
 class DjiPowerError(Exception):
@@ -164,6 +188,99 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             str(self.coordinator.last_exception), "Bluetooth connection lost"
         )
         self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    def _prepare_throttled_control(self, state: dict[str, object]) -> tuple:
+        self.loop.reset_mock()
+        self.loop.time.return_value = 100.0
+        self.entry.options["update_interval"] = 60
+        self.device.data = {"battery_percent": 60, **state}
+        self.coordinator = coordinator_module.DjiPowerCoordinator(
+            self.hass, self.entry, self.device
+        )
+        self.coordinator._handle_state(dict(self.device.data))
+        self.loop.time.return_value = 101.0
+        self.coordinator._handle_state({"battery_percent": 61, **state})
+        self.loop.call_later.assert_called_once()
+        delay, flush_pending = self.loop.call_later.call_args.args
+        self.assertEqual(delay, 59)
+        return self.loop.call_later.return_value, flush_pending
+
+    async def test_all_controls_publish_immediately_and_clear_pending_telemetry(
+        self,
+    ) -> None:
+        for method, args, kwargs, previous, requested in CONTROL_WRITES:
+            with self.subTest(control=method):
+                timer, flush_pending = self._prepare_throttled_control(previous)
+                confirmed = {"battery_percent": 62, **requested}
+                with patch.object(
+                    self.coordinator,
+                    "async_set_updated_data",
+                    wraps=self.coordinator.async_set_updated_data,
+                ) as publish:
+
+                    async def confirm(
+                        *args,
+                        confirmed=confirmed,
+                        publish=publish,
+                        **kwargs,
+                    ):
+                        publish.assert_not_called()
+                        self.device.data = dict(confirmed)
+
+                    setter = AsyncMock(side_effect=confirm)
+                    setattr(self.device, method, setter)
+
+                    await getattr(self.coordinator, f"async_{method}")(*args, **kwargs)
+
+                    setter.assert_awaited_once_with(*args, **kwargs)
+                    publish.assert_called_once_with(confirmed)
+                    self.assertEqual(self.coordinator.data, confirmed)
+                    self.assertIsNot(self.coordinator.data, self.device.data)
+                    self.assertEqual(self.loop.time(), 101.0)
+                    timer.cancel.assert_called_once_with()
+                    self.assertIsNone(self.coordinator._pending_data)
+                    self.assertIsNone(self.coordinator._push_timer)
+                    # A cancelled callback may already be queued by the event loop.
+                    self.loop.time.return_value = 160.0
+                    flush_pending()
+                    publish.assert_called_once_with(confirmed)
+                    self.assertEqual(self.coordinator.data, confirmed)
+
+    async def test_failed_controls_do_not_publish_requested_values(self) -> None:
+        for method, args, kwargs, previous, _requested in CONTROL_WRITES:
+            with self.subTest(control=method):
+                timer, flush_pending = self._prepare_throttled_control(previous)
+                error = DjiPowerError("station did not confirm the requested value")
+                setter = AsyncMock(side_effect=error)
+                setattr(self.device, method, setter)
+                with patch.object(
+                    self.coordinator,
+                    "async_set_updated_data",
+                    wraps=self.coordinator.async_set_updated_data,
+                ) as publish:
+                    with self.assertRaisesRegex(
+                        coordinator_module.HomeAssistantError,
+                        "station did not confirm the requested value",
+                    ) as raised:
+                        await getattr(self.coordinator, f"async_{method}")(
+                            *args, **kwargs
+                        )
+
+                    self.assertIs(raised.exception.__cause__, error)
+                    setter.assert_awaited_once_with(*args, **kwargs)
+                    publish.assert_not_called()
+                    self.assertEqual(
+                        self.coordinator.data, {"battery_percent": 60, **previous}
+                    )
+                    timer.cancel.assert_not_called()
+                    self.loop.time.return_value = 160.0
+                    flush_pending()
+                    publish.assert_called_once_with(
+                        {"battery_percent": 61, **previous}
+                    )
+                    self.assertEqual(
+                        self.coordinator.data, {"battery_percent": 61, **previous}
+                    )
 
     async def test_authentication_error_retains_the_actual_failure_reason(self) -> None:
         error = DjiPowerAuthenticationError(
