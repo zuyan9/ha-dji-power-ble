@@ -98,6 +98,7 @@ class ExpansionBatteryDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             entry_id="station",
             data={
                 "address": "AA:BB:CC:DD:EE:FF",
+                "name": "TEST-STATION-NAME",
                 "pair_key": "test-pair-key",
                 "serial_number": "TEST-STATION",
                 "model": "DJI Power 2000",
@@ -119,6 +120,7 @@ class ExpansionBatteryDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             result["config_entry"],
             {
                 "address": REDACTED,
+                "name": REDACTED,
                 "pair_key": REDACTED,
                 "serial_number": REDACTED,
                 "model": "DJI Power 2000",
