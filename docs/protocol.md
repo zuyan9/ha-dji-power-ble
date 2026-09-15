@@ -127,7 +127,7 @@ each encoded as a little-endian uint16. The integration retains its existing
 | `0x0C` | Display | Display timeout |
 | `0x0D` | Power switch | AC output state |
 | `0x15` | Timezone | UTC offset in minutes |
-| `0x18` | Eco mode | Power adjustment mode, manual discharge watts and watt limits |
+| `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
 
 Raw keyed values are retained internally as `key_XX` hexadecimal state. Downloaded
 diagnostics redact records containing known private identifiers, including `key_01`.
@@ -188,21 +188,32 @@ AC output writes use keys `0x0D` and `0x0E`. Charge-limit writes use key `0x05`,
 six-value structure in which the integration changes only the recharge and discharge
 fields and preserves the other values from a fresh `0x05` read before writing.
 
-Power 2000 manual discharge-power writes use key `0x18` (`eco_mode`). The
-app-derived layout stores maximum, minimum, and current discharge watts as
-little-endian uint32 values at byte offsets 30, 34, and 38. The control requires
-grid-tied Time of Use with manual power adjustment: `mode` (byte 1) = 3,
-`grid_mode` (byte 16) = 3, and `chg_mode` (byte 17) = 2. It accepts integer
-watts within the returned bounds.
+Power 2000 manual **Recharge power** and **Discharge power** writes use key `0x18`
+(`eco_mode`). The app-derived layout stores each setting as little-endian uint32
+values:
+
+| Setting | Maximum offset | Minimum offset | Setpoint offset |
+| --- | --- | --- | --- |
+| Recharge power (W) | 18 | 22 | 26 |
+| Discharge power (W) | 30 | 34 | 38 |
+
+Both controls require grid-tied Time of Use with manual power adjustment:
+`mode` (byte 1) = 3, `grid_mode` (byte 16) = 3, and `chg_mode` (byte 17) = 2.
+They accept integer watts within their own returned bounds. Recharge power is the
+manual Time of Use charging setpoint; it is distinct from the recharge limit (%)
+and does not configure a general AC charging-power cap.
+
 The client reads a fresh, complete record of at least 86 bytes and replaces only
-bytes 38–41, preserving every other byte, including any extended tail. Missing,
-incomplete, or incompatible records leave the number unavailable.
+bytes 26–29 for recharge or 38–41 for discharge, preserving every other byte,
+including the opposite setpoint and any extended tail. Missing, incomplete, or
+incompatible records leave both numbers unavailable. Invalid bounds or a current
+value outside the bounds disable only the affected number.
 
 The Power 2000 **Power adjustment** selector changes only `chg_mode` (byte 17):
 **Automatic** = 1, **Manual** = 2. It requires an existing grid-tied Time of Use
 configuration and preserves both watt setpoints and all other settings. Automatic
 also requires a linked smart meter (`src_dev_id`); link it in DJI Home first.
-The discharge-watts number is available only in Manual with valid reported limits.
+Both watt numbers are available only in Manual with valid reported limits.
 Initial grid installation, Time of Use selection, tariff configuration, and meter
 linking remain in DJI Home. These controls do not construct missing configuration.
 
@@ -220,8 +231,10 @@ from write confirmation. Cached values cannot substitute for missing readback fi
 Writes remain serialized until confirmation completes, and confirmed values are
 published immediately regardless of the Home Assistant update interval.
 
-The Power 2000 controls' encoding and mode checks are verified against the app;
-acceptance by Power 2000 firmware and physical output remain untested.
+The Power 2000 controls' encoding and mode checks are verified against the app.
+Manual discharge control has been reported working on hardware. Recharge power
+remains experimental pending confirmation of device acceptance and charging behavior
+on a physical Power 2000.
 
 ## Known limits
 

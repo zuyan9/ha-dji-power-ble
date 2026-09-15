@@ -421,6 +421,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_confirmed_eco_controls_do_not_wait_before_first_readback(self):
         for method, value in (
             (self.device.set_discharge_power, 422),
+            (self.device.set_charge_power, 700),
             (self.device.set_power_adjustment, "Automatic"),
         ):
             with self.subTest(control=method.__name__):
@@ -509,6 +510,42 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
             [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND] * 2,
         )
 
+    async def test_queued_charge_and_discharge_writes_preserve_both_setpoints(self):
+        reading = asyncio.Event()
+        release = asyncio.Event()
+        queued = asyncio.Event()
+        send = self.client.write_gatt_char
+
+        async def hold_first_readback(*args, **kwargs):
+            if len(self.client.requests) == 2:
+                reading.set()
+                await release.wait()
+            await send(*args, **kwargs)
+
+        async def discharge():
+            queued.set()
+            await self.device.set_discharge_power(422)
+
+        self.client.write_gatt_char = hold_first_readback
+        first = asyncio.create_task(self.device.set_charge_power(700))
+        await reading.wait()
+        second = asyncio.create_task(discharge())
+        await queued.wait()
+        self.assertFalse(second.done())
+        self.assertEqual(len(self.client.requests), 2)
+        self.assertEqual(self.device.data["charge_power_w"], 500)
+
+        release.set()
+        await asyncio.gather(first, second)
+
+        self.assertEqual(self.device.data["charge_power_w"], 700)
+        self.assertEqual(self.device.data["discharge_power_w"], 422)
+        self.sleep_mock.assert_not_awaited()
+        self.assertEqual(
+            [command for command, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND] * 2,
+        )
+
     async def test_initial_config_explicitly_reads_eco_mode(self) -> None:
         await self.device.refresh_config()
 
@@ -518,6 +555,8 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.device.data["discharge_power_w"], 93)
         self.assertTrue(self.device.data["discharge_power_available"])
+        self.assertEqual(self.device.data["charge_power_w"], 500)
+        self.assertTrue(self.device.data["charge_power_available"])
 
     async def test_missing_optional_config_does_not_break_refresh(self) -> None:
         await self.device.refresh_config()
@@ -527,6 +566,10 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(self.device.data["discharge_power_available"])
         self.assertIsNone(self.device.data["discharge_power_w"])
+        self.assertFalse(self.device.data["charge_power_available"])
+        self.assertIsNone(self.device.data["charge_power_w"])
+        self.assertIsNone(self.device.data["charge_power_min_w"])
+        self.assertIsNone(self.device.data["charge_power_max_w"])
         self.assertIsNone(self.device.data["key_18"])
         self.assertIsNone(self.device.data["power_adjustment"])
 
@@ -551,6 +594,86 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     await self.device.refresh_config()
                 self.assertFalse(self.device.data["discharge_power_available"])
+                self.assertFalse(self.device.data["charge_power_available"])
+
+    async def test_charge_write_uses_fresh_config_and_preserves_other_fields(self):
+        await self.device.refresh_config()
+        fresh = bytearray(SYNTHETIC_ECO_MODE + b"future-extension")
+        fresh[38:42] = (211).to_bytes(4, "little")
+        fresh[2:4] = b"\x01\x01"
+        self.client.value = bytes(fresh)
+        self.client.requests.clear()
+
+        await self.device.set_charge_power(700)
+
+        self.assertEqual(
+            [command for command, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+        )
+        sent = duml.parse_keyed_values(self.client.requests[1][1])[0x18]
+        self.assertEqual(sent[:26], fresh[:26])
+        self.assertEqual(sent[26:30], (700).to_bytes(4, "little"))
+        self.assertEqual(sent[30:], fresh[30:])
+        self.assertEqual(self.device.data["charge_power_w"], 700)
+        self.assertEqual(self.device.data["discharge_power_w"], 211)
+        self.sleep_mock.assert_not_awaited()
+
+    async def test_charge_write_rechecks_mode_and_bounds_before_sending(self):
+        await self.device.refresh_config()
+        automatic = bytearray(SYNTHETIC_ECO_MODE)
+        automatic[17] = 1
+        lower_max = bytearray(SYNTHETIC_ECO_MODE)
+        lower_max[18:22] = (600).to_bytes(4, "little")
+        for state, watts in (
+            (None, 700),
+            (SYNTHETIC_ECO_MODE[:85], 700),
+            (bytes(automatic), 700),
+            (bytes(lower_max), 700),
+            (SYNTHETIC_ECO_MODE, 99),
+            (SYNTHETIC_ECO_MODE, 1201),
+            (SYNTHETIC_ECO_MODE, 700.5),
+        ):
+            with self.subTest(state_length=len(state or b""), watts=watts):
+                self.client.value = state
+                self.client.requests.clear()
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_charge_power(watts)
+                self.assertEqual(
+                    self.client.requests, [(duml.GET_COMMAND, b"\x00\x18\x10")]
+                )
+
+    async def test_charge_write_requires_ack_and_matching_fresh_readback(self):
+        for failure in ("missing_ack", "rejected_ack", "malformed_ack", "unapplied"):
+            with self.subTest(failure=failure):
+                self.client = DischargePowerClient(self.device)
+                self.device._client = self.client
+                if failure == "missing_ack":
+                    self.client.ack_value = None
+                elif failure == "rejected_ack":
+                    self.client.ack_value = bytes.fromhex("01000000")
+                elif failure == "malformed_ack":
+                    self.client.ack_value = b"\x00"
+                else:
+                    self.client.apply_set = False
+
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_charge_power(700)
+
+                self.assertEqual(self.device.data["charge_power_w"], 500)
+                self.assertEqual(self.device.data["discharge_power_w"], 93)
+                self.assertEqual(
+                    len(self.client.requests), 11 if failure == "unapplied" else 2
+                )
+
+    async def test_missing_charge_readback_clears_even_unchanged_setpoint(self):
+        self.client.omit_after_set = True
+
+        with self.assertRaisesRegex(device_module.DjiPowerError, "omitted"):
+            await self.device.set_charge_power(500)
+
+        self.assertFalse(self.device.data["charge_power_available"])
+        self.assertIsNone(self.device.data["charge_power_w"])
+        self.assertFalse(self.device.data["discharge_power_available"])
 
     async def test_set_uses_fresh_config_preserves_other_fields_and_reads_back(self):
         await self.device.refresh_config()
@@ -622,6 +745,8 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
                     await self.device.set_discharge_power(422)
                 with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+                    await self.device.set_charge_power(700)
+                with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
                     await self.device.set_power_adjustment("Automatic")
         self.assertEqual(self.client.requests, [])
 
@@ -661,6 +786,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
         await self.device.refresh_config()
         self.assertEqual(self.device.data["power_adjustment"], "Automatic")
         self.assertFalse(self.device.data["discharge_power_available"])
+        self.assertFalse(self.device.data["charge_power_available"])
 
         for mode, encoded in (("Manual", 2), ("Automatic", 1)):
             with self.subTest(mode=mode):
@@ -683,6 +809,13 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     self.device.data["discharge_power_w"],
                     93 if mode == "Manual" else None,
+                )
+                self.assertEqual(
+                    self.device.data["charge_power_available"], mode == "Manual"
+                )
+                self.assertEqual(
+                    self.device.data["charge_power_w"],
+                    500 if mode == "Manual" else None,
                 )
 
     async def test_automatic_rechecks_meter_in_fresh_config(self) -> None:
@@ -743,6 +876,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_power_adjustment("Manual")
         self.assertIsNone(self.device.data["power_adjustment"])
         self.assertFalse(self.device.data["discharge_power_available"])
+        self.assertFalse(self.device.data["charge_power_available"])
 
 
 class DeviceTests(unittest.IsolatedAsyncioTestCase):

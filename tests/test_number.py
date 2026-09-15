@@ -1,4 +1,4 @@
-"""Offline checks for discharge-power entities and their coordinator bridge."""
+"""Offline checks for watt controls and their coordinator bridge."""
 
 from __future__ import annotations
 
@@ -115,28 +115,18 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleTyp
 number, coordinator_module, select = _load_modules()
 
 
-class DischargePowerNumberTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self.coordinator = types.SimpleNamespace(
+class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_power_2000_gets_both_controls_before_config_arrives(
+        self,
+    ) -> None:
+        coordinator = types.SimpleNamespace(
             entry=types.SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"}),
             device=types.SimpleNamespace(model="DJI Power 2000"),
             last_update_success=True,
-            data={
-                "discharge_power_available": True,
-                "discharge_power_w": 93,
-                "discharge_power_min_w": 0,
-                "discharge_power_max_w": 800,
-            },
-            async_set_discharge_power=AsyncMock(),
+            data={},
         )
-        self.entity = number.DjiPowerDischargePowerNumber(self.coordinator)
-
-    async def test_only_power_2000_gets_control_before_config_arrives(self) -> None:
-        self.coordinator.data = {}
         entry = types.SimpleNamespace(entry_id="station")
-        hass = types.SimpleNamespace(
-            data={"dji_power_ble": {"station": self.coordinator}}
-        )
+        hass = types.SimpleNamespace(data={"dji_power_ble": {"station": coordinator}})
         for model in (
             "DJI Power 2000",
             "DJI Power 1000",
@@ -144,30 +134,60 @@ class DischargePowerNumberTests(unittest.IsolatedAsyncioTestCase):
             "DJI Power 1000 Mini",
         ):
             with self.subTest(model=model):
-                self.coordinator.device.model = model
+                coordinator.device.model = model
                 add_entities = Mock()
                 await number.async_setup_entry(hass, entry, add_entities)
                 entities = add_entities.call_args.args[0]
-                controls = [
-                    entity
-                    for entity in entities
-                    if isinstance(entity, number.DjiPowerDischargePowerNumber)
-                ]
-                self.assertEqual(len(controls), int(model == "DJI Power 2000"))
-                self.assertEqual(len(entities) - len(controls), 2)
-                if controls:
-                    self.assertFalse(controls[0].available)
+                for entity_class in (
+                    number.DjiPowerDischargePowerNumber,
+                    number.DjiPowerChargePowerNumber,
+                ):
+                    controls = [
+                        entity
+                        for entity in entities
+                        if isinstance(entity, entity_class)
+                    ]
+                    self.assertEqual(len(controls), int(model == "DJI Power 2000"))
+                    if controls:
+                        self.assertFalse(controls[0].available)
+                self.assertEqual(len(entities), 4 if model == "DJI Power 2000" else 2)
+
+
+class _PowerNumberTests:
+    _key: str
+    _name: str
+    _entity_class: type
+
+    def _data(self, **values: object) -> dict[str, object]:
+        return {f"{self._key}_{key}": value for key, value in values.items()}
+
+    def setUp(self) -> None:
+        self.coordinator = types.SimpleNamespace(
+            entry=types.SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"}),
+            device=types.SimpleNamespace(model="DJI Power 2000"),
+            last_update_success=True,
+            data=self._data(available=True, w=93, min_w=0, max_w=800),
+        )
+        self.setter = AsyncMock()
+        setattr(self.coordinator, f"async_set_{self._key}", self.setter)
+        self.entity = self._entity_class(self.coordinator)
+
+    def test_entity_metadata_and_unique_id(self) -> None:
+        self.assertEqual(self.entity._attr_name, self._name)
+        self.assertEqual(
+            self.entity._attr_unique_id, f"AA:BB:CC:DD:EE:FF_{self._key}_w"
+        )
+        self.assertEqual(self.entity._attr_native_unit_of_measurement, "W")
+        self.assertEqual(self.entity._attr_native_step, 1)
+        self.assertEqual(self.entity._attr_device_class, "power")
+        self.assertEqual(self.entity._attr_mode, "box")
 
     def test_value_and_limits_follow_reported_config(self) -> None:
         self.assertTrue(self.entity.available)
         self.assertEqual(self.entity.native_value, 93)
         self.assertEqual(self.entity.native_min_value, 0)
         self.assertEqual(self.entity.native_max_value, 800)
-        self.coordinator.data.update(
-            discharge_power_w=422,
-            discharge_power_min_w=50,
-            discharge_power_max_w=600,
-        )
+        self.coordinator.data.update(self._data(w=422, min_w=50, max_w=600))
         self.assertTrue(self.entity.available)
         self.assertEqual(self.entity.native_value, 422)
         self.assertEqual(self.entity.native_min_value, 50)
@@ -182,9 +202,13 @@ class DischargePowerNumberTests(unittest.IsolatedAsyncioTestCase):
                 }
                 self.assertFalse(self.entity.available)
         for invalid in (
-            {"discharge_power_available": False},
-            {"discharge_power_min_w": 100},
-            {"discharge_power_max_w": 90},
+            self._data(available=False),
+            self._data(min_w=100),
+            self._data(max_w=90),
+            self._data(min_w=-1),
+            self._data(w="93"),
+            self._data(min_w="0"),
+            self._data(max_w="800"),
         ):
             with self.subTest(invalid=invalid):
                 self.coordinator.data = original | invalid
@@ -199,10 +223,7 @@ class DischargePowerNumberTests(unittest.IsolatedAsyncioTestCase):
 
     def test_cleared_config_has_numeric_bounds_while_unavailable(self) -> None:
         self.coordinator.data.update(
-            discharge_power_available=False,
-            discharge_power_w=None,
-            discharge_power_min_w=None,
-            discharge_power_max_w=None,
+            self._data(available=False, w=None, min_w=None, max_w=None)
         )
         self.assertFalse(self.entity.available)
         self.assertIsNone(self.entity.native_value)
@@ -211,20 +232,34 @@ class DischargePowerNumberTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_integer_watts_without_optimistic_state(self) -> None:
         await self.entity.async_set_native_value(422.0)
-        self.coordinator.async_set_discharge_power.assert_awaited_once_with(422)
+        self.setter.assert_awaited_once_with(422)
         self.assertEqual(self.entity.native_value, 93)
 
     async def test_rejects_fractional_watts(self) -> None:
         with self.assertRaisesRegex(ValueError, "whole number of watts"):
             await self.entity.async_set_native_value(422.5)
-        self.coordinator.async_set_discharge_power.assert_not_awaited()
+        self.setter.assert_not_awaited()
 
 
-class DischargePowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+class DischargePowerNumberTests(_PowerNumberTests, unittest.IsolatedAsyncioTestCase):
+    _key = "discharge_power"
+    _name = "Discharge power"
+    _entity_class = number.DjiPowerDischargePowerNumber
+
+
+class ChargePowerNumberTests(_PowerNumberTests, unittest.IsolatedAsyncioTestCase):
+    _key = "charge_power"
+    _name = "Recharge power"
+    _entity_class = number.DjiPowerChargePowerNumber
+
+
+class _PowerCoordinatorTests:
+    _key: str
+
     def setUp(self) -> None:
-        self.device = types.SimpleNamespace(
-            data={"discharge_power_w": 93}, set_discharge_power=AsyncMock()
-        )
+        self.device = types.SimpleNamespace(data={f"{self._key}_w": 93})
+        self.setter = AsyncMock()
+        setattr(self.device, f"set_{self._key}", self.setter)
         self.coordinator = coordinator_module.DjiPowerCoordinator.__new__(
             coordinator_module.DjiPowerCoordinator
         )
@@ -234,18 +269,28 @@ class DischargePowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_publishes_confirmed_device_state_after_write(self) -> None:
         async def confirmed_write(watts: int) -> None:
             self.coordinator._publish.assert_not_called()
-            self.device.data["discharge_power_w"] = watts
+            self.device.data[f"{self._key}_w"] = watts
 
-        self.device.set_discharge_power.side_effect = confirmed_write
-        await self.coordinator.async_set_discharge_power(422)
-        self.device.set_discharge_power.assert_awaited_once_with(422)
-        self.coordinator._publish.assert_called_once_with({"discharge_power_w": 422})
+        self.setter.side_effect = confirmed_write
+        await getattr(self.coordinator, f"async_set_{self._key}")(422)
+        self.setter.assert_awaited_once_with(422)
+        self.coordinator._publish.assert_called_once_with({f"{self._key}_w": 422})
         self.assertIsNot(self.coordinator._publish.call_args.args[0], self.device.data)
 
     async def test_failed_write_is_service_error_without_publishing(self) -> None:
-        self.device.set_discharge_power.side_effect = _DjiPowerError(
-            "readback timed out"
-        )
+        self.setter.side_effect = _DjiPowerError("readback timed out")
         with self.assertRaisesRegex(_HomeAssistantError, "readback timed out"):
-            await self.coordinator.async_set_discharge_power(422)
+            await getattr(self.coordinator, f"async_set_{self._key}")(422)
         self.coordinator._publish.assert_not_called()
+
+
+class DischargePowerCoordinatorTests(
+    _PowerCoordinatorTests, unittest.IsolatedAsyncioTestCase
+):
+    _key = "discharge_power"
+
+
+class ChargePowerCoordinatorTests(
+    _PowerCoordinatorTests, unittest.IsolatedAsyncioTestCase
+):
+    _key = "charge_power"

@@ -516,6 +516,18 @@ def _parse_manual_discharge_power(value: bytes | bytearray) -> tuple[int, int, i
     return minimum, maximum, watts
 
 
+def _parse_manual_charge_power(value: bytes | bytearray) -> tuple[int, int, int]:
+    """Read charge watts when Time of Use power adjustment is manual."""
+    if _parse_power_adjustment(value) != "Manual":
+        raise ProtocolError("station is not using manual power adjustment")
+    maximum = int.from_bytes(value[18:22], "little")
+    minimum = int.from_bytes(value[22:26], "little")
+    watts = int.from_bytes(value[26:30], "little")
+    if not minimum <= watts <= maximum:
+        raise ProtocolError("station reported invalid charge-power bounds or value")
+    return minimum, maximum, watts
+
+
 def parse_telemetry(payload: bytes) -> dict[str, object]:
     """Decode the known fields of a keyed config snapshot/readback."""
     keyed = parse_keyed_values(payload)
@@ -570,6 +582,10 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
         # Other module snapshots can omit this key and must not clear it.
         data.update(
             power_adjustment=None,
+            charge_power_available=False,
+            charge_power_min_w=None,
+            charge_power_max_w=None,
+            charge_power_w=None,
             discharge_power_available=False,
             discharge_power_min_w=None,
             discharge_power_max_w=None,
@@ -577,6 +593,17 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
         )
         with contextlib.suppress(ProtocolError):
             data["power_adjustment"] = _parse_power_adjustment(keyed[ECO_MODE_KEY])
+        try:
+            minimum, maximum, watts = _parse_manual_charge_power(keyed[ECO_MODE_KEY])
+        except ProtocolError:
+            pass
+        else:
+            data.update(
+                charge_power_available=True,
+                charge_power_min_w=minimum,
+                charge_power_max_w=maximum,
+                charge_power_w=watts,
+            )
         try:
             minimum, maximum, watts = _parse_manual_discharge_power(keyed[ECO_MODE_KEY])
         except ProtocolError:
@@ -682,6 +709,27 @@ def build_discharge_power_set_payload(
             f"discharge power must be between {minimum} and {maximum} watts"
         )
     value[38:42] = watts.to_bytes(4, "little")
+    return build_keyed_set_payload(
+        [(ECO_MODE_KEY, bytes(value))], timestamp_ms=timestamp_ms
+    )
+
+
+def build_charge_power_set_payload(
+    current_value: str | bytes,
+    watts: int,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Change only manual charge watts in the complete eco-mode readback."""
+    if type(watts) is not int:
+        raise ProtocolError("charge power must be a whole number of watts")
+    value = _eco_mode_bytes(current_value)
+    minimum, maximum, _ = _parse_manual_charge_power(value)
+    if not minimum <= watts <= maximum:
+        raise ProtocolError(
+            f"charge power must be between {minimum} and {maximum} watts"
+        )
+    value[26:30] = watts.to_bytes(4, "little")
     return build_keyed_set_payload(
         [(ECO_MODE_KEY, bytes(value))], timestamp_ms=timestamp_ms
     )
