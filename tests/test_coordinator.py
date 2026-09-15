@@ -29,6 +29,13 @@ CONTROL_WRITES = (
         {"discharge_power_w": 422},
     ),
     (
+        "set_charge_power",
+        (1000,),
+        {},
+        {"charge_power_w": 600},
+        {"charge_power_w": 1000},
+    ),
+    (
         "set_power_adjustment",
         ("Manual",),
         {},

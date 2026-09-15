@@ -17,15 +17,15 @@ used only during setup to retrieve the device's local credential.
 
 ## Features
 
-- Live battery level, remaining time, temperature, and charging state
-- Total input/output and AC, USB-A, USB-C, SDC, SDC Lite, 12 V, and XT60 power
-- Individual USB-A and USB-C port power
 - AC output control
+- Live battery level, remaining time, temperature, and charging state
+- Input, output, AC, USB-A, USB-C, SDC, SDC Lite, 12 V, and XT60 power
+- Connected expansion-battery devices with battery level and pack diagnostics
 - Discharge and recharge limit controls
+- Power 2000 discharge/recharge watts control
 - Firmware, timezone, display, reserve, and cloud-status diagnostics
 - Automatic discovery, reconnect-on-advertisement, and sanitized HA diagnostics
 - Persistent authenticated BLE connection with live telemetry pushes
-- Connected expansion-battery devices with battery level and pack diagnostics
 
 ## Requirements
 

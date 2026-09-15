@@ -87,6 +87,7 @@ CAPTURED_REPORT = bytes.fromhex(
 # Synthetic app-schema eco-mode record, not a physical-station capture.
 # The available flag is deliberately zero: the app's manual-control gate uses
 # mode/grid_mode/chg_mode (3/3/2), not that flag. The discharge range is 10-800 W.
+# The charge range is 100-1200 W, with an initial 500 W setpoint.
 SYNTHETIC_ECO_MODE = (
     bytes.fromhex(
         "00030100"  # available, mode, peak_out_sw, valley_in_sw
@@ -550,11 +551,147 @@ class DischargePowerTests(unittest.TestCase):
         self.assertTrue(current["discharge_power_available"])
 
 
+class ChargePowerTests(unittest.TestCase):
+    def test_app_schema_decodes_charge_watts_and_device_bounds(self) -> None:
+        for available in (0, 1):
+            with self.subTest(available=available):
+                value = bytearray(SYNTHETIC_ECO_MODE)
+                value[0] = available
+                payload = duml.build_keyed_set_payload([(0x18, bytes(value))])
+
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertTrue(parsed["charge_power_available"])
+                self.assertEqual(parsed["charge_power_min_w"], 100)
+                self.assertEqual(parsed["charge_power_max_w"], 1200)
+                self.assertEqual(parsed["charge_power_w"], 500)
+                self.assertEqual(parsed["discharge_power_w"], 93)
+
+    def test_set_preserves_discharge_and_complete_record_except_charge_watts(self):
+        current = SYNTHETIC_ECO_MODE + bytes.fromhex("aabbccddeeff")
+        for source in (current, current.hex()):
+            with self.subTest(source_type=type(source).__name__):
+                payload = duml.build_charge_power_set_payload(
+                    source, 750, timestamp_ms=1000
+                )
+                entries = duml.parse_keyed_values(payload)
+
+                self.assertEqual(set(entries), {0x18})
+                self.assertEqual(
+                    entries[0x18],
+                    current[:26] + bytes.fromhex("ee020000") + current[30:],
+                )
+                self.assertEqual(payload[:16], duml.build_keyed_header(1000))
+
+    def test_charge_set_accepts_reported_bounds_zero_and_full_uint32(self) -> None:
+        for minimum, maximum, current in (
+            (100, 1200, 500),
+            (0, 0, 0),
+            (0, 4294967295, 65537),
+            (65536, 4294967295, 65537),
+        ):
+            value = bytearray(SYNTHETIC_ECO_MODE)
+            value[18:30] = b"".join(
+                watts.to_bytes(4, "little") for watts in (maximum, minimum, current)
+            )
+            self.assertEqual(
+                duml._parse_manual_charge_power(value), (minimum, maximum, current)
+            )
+            for watts in (minimum, maximum):
+                with self.subTest(minimum=minimum, maximum=maximum, watts=watts):
+                    payload = duml.build_charge_power_set_payload(bytes(value), watts)
+                    self.assertEqual(
+                        duml.parse_telemetry(payload)["charge_power_w"], watts
+                    )
+
+    def test_charge_set_rejects_non_integer_and_out_of_range_watts(self) -> None:
+        for watts in (500.0, 500.5, True, False, "500", None, -1, 99, 1201, 2**32):
+            with self.subTest(watts=watts), self.assertRaises(duml.ProtocolError):
+                duml.build_charge_power_set_payload(SYNTHETIC_ECO_MODE, watts)
+
+    def test_charge_set_rejects_invalid_hex(self) -> None:
+        for current in ("zz", "0"):
+            with (
+                self.subTest(current=current),
+                self.assertRaisesRegex(duml.ProtocolError, "valid hex"),
+            ):
+                duml.build_charge_power_set_payload(current, 750)
+
+    def test_invalid_or_inactive_eco_mode_clears_charge_and_blocks_write(self) -> None:
+        invalid = [SYNTHETIC_ECO_MODE[:length] for length in (0, 17, 30, 85)]
+        for offset, disabled in ((1, 0), (16, 2), (17, 0), (17, 1), (17, 3)):
+            value = bytearray(SYNTHETIC_ECO_MODE)
+            value[offset] = disabled
+            invalid.append(bytes(value))
+
+        for index, value in enumerate(invalid):
+            with self.subTest(case=index):
+                payload = duml.build_keyed_set_payload([(0x18, value)])
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertFalse(parsed["charge_power_available"])
+                self.assertIsNone(parsed["charge_power_min_w"])
+                self.assertIsNone(parsed["charge_power_max_w"])
+                self.assertIsNone(parsed["charge_power_w"])
+                with self.assertRaises(duml.ProtocolError):
+                    duml.build_charge_power_set_payload(value, 750)
+
+    def test_invalid_charge_bounds_do_not_disable_discharge(self) -> None:
+        for maximum, minimum, current in (
+            (99, 100, 100),
+            (1200, 100, 99),
+            (1200, 100, 1201),
+        ):
+            with self.subTest(maximum=maximum, minimum=minimum, current=current):
+                value = bytearray(SYNTHETIC_ECO_MODE)
+                value[18:30] = b"".join(
+                    watts.to_bytes(4, "little") for watts in (maximum, minimum, current)
+                )
+                payload = duml.build_keyed_set_payload([(0x18, bytes(value))])
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertFalse(parsed["charge_power_available"])
+                self.assertIsNone(parsed["charge_power_min_w"])
+                self.assertIsNone(parsed["charge_power_max_w"])
+                self.assertIsNone(parsed["charge_power_w"])
+                self.assertTrue(parsed["discharge_power_available"])
+                self.assertEqual(parsed["discharge_power_w"], 93)
+                with self.assertRaises(duml.ProtocolError):
+                    duml.build_charge_power_set_payload(bytes(value), 750)
+                changed = duml.build_discharge_power_set_payload(bytes(value), 422)
+                self.assertEqual(
+                    duml.parse_keyed_values(changed)[0x18][:38], value[:38]
+                )
+
+    def test_invalid_discharge_bounds_do_not_disable_charge(self) -> None:
+        value = bytearray(SYNTHETIC_ECO_MODE)
+        value[38:42] = bytes(4)  # Below the discharge minimum of 10 W.
+        payload = duml.build_keyed_set_payload([(0x18, bytes(value))])
+        parsed = duml.parse_telemetry(payload)
+
+        self.assertTrue(parsed["charge_power_available"])
+        self.assertEqual(parsed["charge_power_w"], 500)
+        self.assertFalse(parsed["discharge_power_available"])
+        changed = duml.build_charge_power_set_payload(bytes(value), 750)
+        self.assertEqual(duml.parse_keyed_values(changed)[0x18][30:], value[30:])
+
+    def test_partial_snapshot_without_eco_mode_preserves_charge_state(self) -> None:
+        payload = duml.build_keyed_set_payload([(0x18, SYNTHETIC_ECO_MODE)])
+        current = duml.parse_telemetry(payload)
+        partial = duml.parse_telemetry(CAPTURED_KEYED_CONFIG)
+
+        self.assertFalse(any(key.startswith("charge_power_") for key in partial))
+        current.update(partial)
+        self.assertEqual(current["charge_power_w"], 500)
+        self.assertTrue(current["charge_power_available"])
+
+
 class PowerAdjustmentTests(unittest.TestCase):
     def test_automatic_readback_clears_previous_manual_watts(self) -> None:
         payload = duml.build_keyed_set_payload([(0x18, SYNTHETIC_ECO_MODE)])
         current = duml.parse_telemetry(payload)
         self.assertEqual(current["power_adjustment"], "Manual")
+        self.assertEqual(current["charge_power_w"], 500)
         self.assertEqual(current["discharge_power_w"], 93)
 
         value = bytearray(SYNTHETIC_ECO_MODE)
@@ -563,6 +700,10 @@ class PowerAdjustmentTests(unittest.TestCase):
         current.update(duml.parse_telemetry(payload))
 
         self.assertEqual(current["power_adjustment"], "Automatic")
+        self.assertFalse(current["charge_power_available"])
+        self.assertIsNone(current["charge_power_w"])
+        self.assertIsNone(current["charge_power_min_w"])
+        self.assertIsNone(current["charge_power_max_w"])
         self.assertFalse(current["discharge_power_available"])
         self.assertIsNone(current["discharge_power_w"])
         self.assertIsNone(current["discharge_power_min_w"])

@@ -38,6 +38,7 @@ from .duml import (
     ProtocolError,
     build_ac_set_payload,
     build_charge_limits_set_payload,
+    build_charge_power_set_payload,
     build_discharge_power_set_payload,
     build_power_adjustment_set_payload,
     decrypt_power_1000_payload,
@@ -454,6 +455,10 @@ class DjiPowerDevice:
                 {
                     "key_18": None,
                     "power_adjustment": None,
+                    "charge_power_available": False,
+                    "charge_power_w": None,
+                    "charge_power_min_w": None,
+                    "charge_power_max_w": None,
                     "discharge_power_available": False,
                     "discharge_power_w": None,
                     "discharge_power_min_w": None,
@@ -541,6 +546,23 @@ class DjiPowerDevice:
                     "recharge_limit": requested_recharge,
                 },
                 config_key=CHARGE_LIMIT_KEY,
+            )
+
+    async def set_charge_power(self, watts: int) -> None:
+        """Set Power 2000 manual recharge watts and require matching readback."""
+        if self.model != "DJI Power 2000":
+            raise DjiPowerError(
+                "charge-power control is only enabled for Power 2000"
+            )
+        async with self._operation_lock:
+            current = await self._read_eco_mode()
+            try:
+                payload = build_charge_power_set_payload(current, watts)
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (ECO_MODE_KEY,))
+            await self._wait_for_eco_mode_values(
+                {"charge_power_available": True, "charge_power_w": watts}
             )
 
     async def set_discharge_power(self, watts: int) -> None:
