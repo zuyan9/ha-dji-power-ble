@@ -64,6 +64,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_REQUEST_TIMEOUT = 8.0
 DEFAULT_CONNECT_TIMEOUT = 30.0
+AUTHENTICATION_ATTEMPTS = 2
 READBACK_RETRIES = 8
 READBACK_RETRY_INTERVAL = 2.0
 EXPANSION_REFRESH_INTERVAL = 30.0
@@ -75,7 +76,7 @@ class DjiPowerError(Exception):
 
 
 class DjiPowerAuthenticationError(DjiPowerError):
-    """The station rejected the challenge or local pair key."""
+    """The station did not complete local authentication."""
 
 
 class DjiPowerDisconnectedError(DjiPowerError):
@@ -416,19 +417,35 @@ class DjiPowerDevice:
         return payload
 
     async def _authenticate(self) -> None:
-        challenge = await self._request(AUTH_COMMAND, bytes((START_BIND,)))
-        challenge_payload = self._auth_payload("start_bind", challenge)
-        if challenge_payload[:1] != b"\x00" or len(challenge_payload) < 5:
-            raise DjiPowerAuthenticationError(
-                "station returned an invalid auth challenge"
+        """Authenticate, retrying status 03 once with a fresh challenge."""
+        for attempt in range(AUTHENTICATION_ATTEMPTS):
+            challenge = await self._request(AUTH_COMMAND, bytes((START_BIND,)))
+            challenge_payload = self._auth_payload("start_bind", challenge)
+            if challenge_payload[:1] != b"\x00" or len(challenge_payload) < 5:
+                raise DjiPowerAuthenticationError(
+                    "station returned an invalid auth challenge"
+                )
+            material = challenge_payload[1:5] + self._pair_key + b"\x00"
+            result = await self._request(
+                AUTH_COMMAND, bytes((CHECK_SECRET_KEY,)) + material
             )
-        material = challenge_payload[1:5] + self._pair_key + b"\x00"
-        result = await self._request(
-            AUTH_COMMAND, bytes((CHECK_SECRET_KEY,)) + material
-        )
-        result_payload = self._auth_payload("check_secret_key", result)
-        if result_payload[:1] != b"\x00":
-            raise DjiPowerAuthenticationError("station rejected the pair key")
+            result_payload = self._auth_payload("check_secret_key", result)
+            if result_payload[:1] == b"\x00":
+                return
+            if (
+                result_payload[:1] == b"\x03"
+                and len(result_payload) >= 5
+                and attempt + 1 < AUTHENTICATION_ATTEMPTS
+            ):
+                _LOGGER.debug(
+                    "DJI Power authentication status=03; "
+                    "retrying with a fresh challenge"
+                )
+                continue
+            status = result_payload[:1].hex() or "missing"
+            raise DjiPowerAuthenticationError(
+                f"station rejected authentication (status={status})"
+            )
 
     async def refresh_config(self) -> None:
         """Fetch and publish a keyed configuration snapshot."""

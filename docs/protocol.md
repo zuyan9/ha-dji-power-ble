@@ -86,6 +86,13 @@ connection. These steps describe the decoded payloads:
 4. Send operation `0x01`, echoing the challenge with the 32-character `pair_key`.
 5. Continue only after a zero status response.
 
+If a complete, decoded operation `0x01` response has status `03`, the client
+retries the full handshake once on the same connection: it requests a fresh
+challenge and echoes that challenge with the existing key. A second rejection,
+other status, malformed challenge, or transport error fails setup. The retry
+remains within the existing overall connection deadline. Authentication errors
+report the returned status without assuming every rejection means a wrong key.
+
 On the original Power 1000, the five-byte challenge becomes a 16-byte encrypted
 payload with attributes `0x86`. Its first wire byte is ciphertext, so it is not an
 authentication status. This transport behavior is verified in firmware `01.00.15.00`
