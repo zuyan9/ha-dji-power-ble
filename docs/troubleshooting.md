@@ -80,7 +80,7 @@ and authentication process with the DJI Home app. Make sure to use a station alr
 8. Extract the zip file and search for `btsnoop_hci.log`, often under `FS/data/misc/bluetooth/logs/`. 
    Attach this log file to the Github issue, or share it privately with the maintainer
    (since this may contain sensitive information such as pair_key and device identity).
-9. Reset Power Station and set it up again in DJI Home app, to refresh the pair key.
+9. To refresh the bluetooth pair key, reset the power station, set it up in DJI Home app and HA agian.
 
 ## Inspect and share
 
