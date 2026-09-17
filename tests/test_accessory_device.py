@@ -76,6 +76,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = AccessoryClient(self.device)
         self.device._client = self.client
+        self.device._write_characteristic = object()
 
     def car_row(self):
         return self.device.data["car_chargers"][0]

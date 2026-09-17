@@ -323,18 +323,28 @@ class DebugCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(models, ["DJI Power 1000"])
 
     async def test_capture_reuses_real_session_auth_gets_and_cleanup(self):
-        from .test_device import device_module
+        from .test_device import (
+            ALTERNATE_GATT_LAYOUT,
+            FakeGattService,
+            FakeGattServices,
+            device_module,
+        )
 
         requests = []
         closed = []
+        service = FakeGattService(*ALTERNATE_GATT_LAYOUT)
+        notify = service.get_characteristic(ALTERNATE_GATT_LAYOUT[1])
+        write = service.get_characteristic(ALTERNATE_GATT_LAYOUT[2])
 
         class Client:
             is_connected = True
 
             def __init__(self, device):
                 self.device = device
+                self.services = FakeGattServices(service)
 
             async def start_notify(self, uuid, callback):
+                assert uuid is notify
                 self.callback = callback
 
             async def stop_notify(self, uuid):
@@ -345,6 +355,8 @@ class DebugCaptureTests(unittest.IsolatedAsyncioTestCase):
                 closed.append(True)
 
             async def write_gatt_char(self, uuid, data, *, response):
+                assert uuid is write
+                assert response is True
                 request = debug.duml.DumlPacket.decode(data)
                 requests.append(request)
                 if request.command_id == 0x6A:

@@ -61,6 +61,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = TimePeriodsClient(self.device)
         self.device._client = self.client
+        self.device._write_characteristic = object()
         sleeper = patch.object(device_module.asyncio, "sleep", new_callable=AsyncMock)
         self.sleep = sleeper.start()
         self.addCleanup(sleeper.stop)
