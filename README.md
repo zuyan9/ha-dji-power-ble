@@ -17,25 +17,18 @@ used only during setup to retrieve the device's local credential.
 
 ## Features
 
-- AC output control
-- Live battery level, remaining time, temperature, and charging state
-- Input, output, AC, USB-A, USB-C, SDC, SDC Lite, 12 V, and XT60 power
-- Connected expansion-battery devices with battery level and pack diagnostics
-- Discharge and recharge limit controls
-- Power 2000 discharge/recharge watts control, and [electricity price periods](docs/time-periods.md) for Scheduled Periods and TOU
+- AC output control; discharge and recharge limit controls
+- Battery level, remaining time, temperature, and charging status
+- Input, output, AC, USB, SDC, etc. power readings
+- Expansion battery devices with battery level and pack diagnostics
+- Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
 - Firmware, timezone, display, reserve, and cloud-status diagnostics
-- Automatic discovery, reconnect-on-advertisement, and sanitized HA diagnostics
-- Persistent authenticated BLE connection with live telemetry pushes
 
 ## Requirements
 
 - DJI Power Station set up and linked to the DJI account in the DJI Home app
-- Home Assistant 2025.8 or newer with Bluetooth, through a local adapter or Bluetooth proxy
+- Home Assistant 2025.8 or newer with Bluetooth, local adapter or Bluetooth proxy
 - [HACS](https://hacs.xyz/) installed (recommended method)
-
-A DJI Power station accepts only one BLE central at a time. While this integration is
-loaded, DJI Home cannot connect to the same station via Bluetooth. Temporarily disable
-or unload the HA config entry when you need to use the DJI Home app.
 
 ## Installation
 
@@ -65,6 +58,10 @@ discovered automatically. The setup flow offers three credential paths:
 3. **Manual pair key** — enter the BLE address and 32-character key directly.
 
 Only the pair key and device metadata are stored. Normal operation is local BLE.
+
+A DJI Power station accepts only one BLE central at a time. Temporarily disable
+or unload the HA config entry when you need to use the DJI Home app via BLE in
+offline mode. The app still works via WiFi for cloud access.
 
 ## Technical documentation
 
