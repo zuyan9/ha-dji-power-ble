@@ -71,6 +71,42 @@ class FakeBleDevice:
     address = "AA:BB:CC:DD:EE:FF"
 
 
+DEFAULT_GATT_LAYOUT = (
+    "0000a002-0000-1000-8000-00805f9b34fb",
+    "0000c305-0000-1000-8000-00805f9b34fb",
+    "0000c304-0000-1000-8000-00805f9b34fb",
+)
+ALTERNATE_GATT_LAYOUT = (
+    "0000fff0-0000-1000-8000-00805f9b34fb",
+    "0000fff4-0000-1000-8000-00805f9b34fb",
+    "0000fff5-0000-1000-8000-00805f9b34fb",
+)
+
+
+class FakeGattService:
+    """Keep characteristic lookup scoped to one discovered service."""
+
+    def __init__(self, uuid, *characteristic_uuids, handle=1):
+        self.uuid = uuid
+        self.characteristics = [
+            types.SimpleNamespace(uuid=value, handle=handle + offset)
+            for offset, value in enumerate(characteristic_uuids)
+        ]
+
+    def get_characteristic(self, uuid):
+        return next((c for c in self.characteristics if c.uuid == uuid), None)
+
+
+class FakeGattServices:
+    """Expose the service lookup used by Bleak's service collection."""
+
+    def __init__(self, *services):
+        self.services = services
+
+    def get_service(self, uuid):
+        return next((s for s in self.services if s.uuid == uuid), None)
+
+
 class RespondingClient:
     """Return one wrong-sequence push before the matching response."""
 
@@ -274,6 +310,7 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
         )
         client = ConfigControlClient(device, encrypted=encrypted)
         device._client = client
+        device._write_characteristic = object()
         device.data.update(duml.parse_telemetry(
             duml.build_keyed_set_payload(list(client.values.items()), timestamp_ms=1)
         ))
@@ -419,6 +456,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = DischargePowerClient(self.device)
         self.device._client = self.client
+        self.device._write_characteristic = object()
         self.sleep = patch.object(
             device_module.asyncio, "sleep", new_callable=AsyncMock
         )
@@ -654,6 +692,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(failure=failure):
                 self.client = DischargePowerClient(self.device)
                 self.device._client = self.client
+                self.device._write_characteristic = object()
                 if failure == "missing_ack":
                     self.client.ack_value = None
                 elif failure == "rejected_ack":
@@ -904,6 +943,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         client = StationClient(device, **kwargs)
         device._client = client
+        device._write_characteristic = object()
         return device, client
 
     async def test_power_1000_auth_config_set_and_fragmented_pushes(self):
@@ -1039,6 +1079,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
 
                     client = types.SimpleNamespace(
                         is_connected=True, start_notify=AsyncMock(),
+                        services=FakeGattServices(FakeGattService(*DEFAULT_GATT_LAYOUT)),
                         disconnect=AsyncMock(),
                     )
                     self.device._establish = AsyncMock(return_value=client)
@@ -1059,12 +1100,14 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
                         await task
                     client.disconnect.assert_awaited_once()
                     self.assertIsNone(self.device._client)
+                    self.assertIsNone(self.device._write_characteristic)
 
     async def test_cache_retry_closes_failed_clients(self):
         for retry_fails in (False, True):
             with self.subTest(retry_fails=retry_fails):
                 first = types.SimpleNamespace(
                     is_connected=True,
+                    services=FakeGattServices(FakeGattService(*DEFAULT_GATT_LAYOUT)),
                     start_notify=AsyncMock(side_effect=BleakError("bad cache")),
                     clear_cache=AsyncMock(), disconnect=AsyncMock(),
                 )
@@ -1075,7 +1118,8 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
                     self.device._report_event.set()
 
                 second = types.SimpleNamespace(
-                    is_connected=True, start_notify=subscribe, disconnect=AsyncMock()
+                    is_connected=True, start_notify=subscribe, disconnect=AsyncMock(),
+                    services=FakeGattServices(FakeGattService(*ALTERNATE_GATT_LAYOUT)),
                 )
                 self.device._establish = AsyncMock(side_effect=[first, second])
                 self.device._authenticate = AsyncMock()
@@ -1084,10 +1128,16 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaisesRegex(BleakError, "retry failed"):
                         await self.device.connect()
                     self.assertIsNone(self.device._client)
+                    self.assertIsNone(self.device._write_characteristic)
                     self.device._authenticate.assert_not_awaited()
                 else:
                     await self.device.connect()
                     self.assertIs(self.device._client, second)
+                    self.assertIs(
+                        self.device._write_characteristic,
+                        second.services.get_service(ALTERNATE_GATT_LAYOUT[0])
+                        .get_characteristic(ALTERNATE_GATT_LAYOUT[2]),
+                    )
                     second.disconnect.assert_not_awaited()
                     self.device._authenticate.assert_awaited_once()
                     await self.device.disconnect()
@@ -1102,6 +1152,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.device._client = types.SimpleNamespace(
             is_connected=True, write_gatt_char=stalled_write
         )
+        self.device._write_characteristic = object()
         with self.assertRaisesRegex(device_module.DjiPowerError, "timeout waiting"):
             await asyncio.wait_for(
                 self.device._request(duml.AUTH_COMMAND, b"\x00", timeout=0.01), 1
@@ -1207,6 +1258,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_requests_are_matched_by_sequence(self) -> None:
         self.device._client = RespondingClient(self.device)
+        self.device._write_characteristic = object()
 
         response = await self.device._request(duml.AUTH_COMMAND, b"\x00")
 
@@ -1216,6 +1268,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_refresh_retains_existing_keyed_get_requests(self) -> None:
         client = GetClient(self.device)
         self.device._client = client
+        self.device._write_characteristic = object()
 
         await self.device.refresh_config()
 
@@ -1264,6 +1317,7 @@ class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):
             disconnect=AsyncMock(),
         )
         self.device._client = self.client
+        self.device._write_characteristic = object()
         self.payload = duml.build_keyed_set_payload(
             [(0x01, expansion_battery(temperature=2512))], timestamp_ms=1
         )
@@ -1314,6 +1368,7 @@ class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):
                 device._client = types.SimpleNamespace(
                     is_connected=True, write_gatt_char=write
                 )
+                device._write_characteristic = object()
                 await device._read_expansion_batteries()
 
                 self.assertEqual(requests[0].command_id, duml.GET_COMMAND)
@@ -1392,6 +1447,7 @@ class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):
 
         async def initialize():
             self.device._client = self.client
+            self.device._write_characteristic = object()
 
         with patch.object(self.device, "_connect_and_initialize", initialize):
             await self.device.connect()
@@ -1431,6 +1487,7 @@ class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):
         for unexpected in (False, True):
             with self.subTest(unexpected=unexpected):
                 self.device._client = self.client
+                self.device._write_characteristic = object()
                 started = asyncio.Event()
 
                 async def write(*_args, started=started, **_kwargs):

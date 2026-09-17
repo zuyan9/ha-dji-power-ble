@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
@@ -21,9 +21,9 @@ from .duml import (
     CHECK_SECRET_KEY,
     ECO_MODE_KEY,
     EXPANSION_BATTERIES_KEY,
+    GATT_LAYOUTS,
     GET_COMMAND,
     HMS_COMMAND,
-    NOTIFY_UUID,
     POWER_1000_ENCRYPTION_TYPE,
     POWER_COMMAND_SET,
     POWER_DESTINATION,
@@ -34,7 +34,6 @@ from .duml import (
     START_BIND,
     TELEMETRY_COMMAND,
     TIME_PERIODS_KEY,
-    WRITE_UUID,
     DumlPacket,
     DumlStream,
     ProtocolError,
@@ -57,6 +56,9 @@ from .duml import (
     validate_time_periods_mode,
 )
 from .features import ModelFeature, supports_feature
+
+if TYPE_CHECKING:
+    from bleak.backends.characteristic import BleakGATTCharacteristic
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,6 +105,7 @@ class DjiPowerDevice:
         self._encrypted_transport = model == "DJI Power 1000"
         self.serial_number = serial_number
         self._client: BleakClient | None = None
+        self._write_characteristic: BleakGATTCharacteristic | None = None
         self._stream = DumlStream()
         self._sequence = 0x1000
         self._pending: dict[int, tuple[int, int, asyncio.Future[DumlPacket]]] = {}
@@ -222,6 +225,7 @@ class DjiPowerDevice:
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         self._client = None
+        self._write_characteristic = None
         if self._expansion_refresh_task is not None:
             self._expansion_refresh_task.cancel()
         error = DjiPowerDisconnectedError(f"{self.address} disconnected")
@@ -241,6 +245,31 @@ class DjiPowerDevice:
             self._name,
             disconnected_callback=self._on_disconnect,
             max_attempts=3,
+        )
+
+    async def _subscribe(self, client: BleakClient) -> None:
+        """Select a complete GATT layout from this connection's services."""
+        self._write_characteristic = None
+        for service_uuid, notify_uuid, write_uuid in GATT_LAYOUTS:
+            service = client.services.get_service(service_uuid)
+            if service is None:
+                continue
+            notify = service.get_characteristic(notify_uuid)
+            write = service.get_characteristic(write_uuid)
+            if notify is None or write is None:
+                continue
+            self._write_characteristic = write
+            _LOGGER.debug(
+                "DJI Power GATT layout: service=%s notify=%s write=%s",
+                service_uuid,
+                notify_uuid,
+                write_uuid,
+            )
+            await client.start_notify(notify, self._on_notify)
+            return
+        raise BleakError(
+            "No complete supported DJI Power GATT layout found "
+            "(a002/c305/c304 or fff0/fff4/fff5)"
         )
 
     async def connect(self) -> None:
@@ -268,17 +297,17 @@ class DjiPowerDevice:
         client = await self._establish()
         self._client = client
         try:
-            await client.start_notify(NOTIFY_UUID, self._on_notify)
+            await self._subscribe(client)
         except BleakError:
-            # Partial service discovery can poison BlueZ's cache. This mirrors
-            # the recovery used by the DJI app and by mature HA BLE integrations.
+            # Partial service discovery can poison BlueZ's cache. Rediscover and
+            # select the characteristics again on the replacement connection.
             _LOGGER.debug("%s: clearing incomplete GATT cache", self.address)
             with contextlib.suppress(AttributeError, BleakError):
                 await client.clear_cache()
             await self.disconnect()
             client = await self._establish()
             self._client = client
-            await client.start_notify(NOTIFY_UUID, self._on_notify)
+            await self._subscribe(client)
         await self._authenticate()
         await self.refresh_config()
         try:
@@ -291,6 +320,7 @@ class DjiPowerDevice:
 
     async def disconnect(self) -> None:
         """Cleanly close the persistent link."""
+        self._write_characteristic = None
         task = self._expansion_refresh_task
         self._expansion_refresh_task = None
         if task is not None:
@@ -319,6 +349,9 @@ class DjiPowerDevice:
         client = self._client
         if client is None or not client.is_connected:
             raise DjiPowerDisconnectedError(f"{self.address} is not connected")
+        write_characteristic = self._write_characteristic
+        if write_characteristic is None:
+            raise DjiPowerError("DJI Power GATT layout has not been selected")
 
         sequence = self._next_sequence()
         flags = 0x20
@@ -338,7 +371,9 @@ class DjiPowerDevice:
         self._pending[sequence] = (POWER_COMMAND_SET, command_id, future)
         try:
             async with asyncio.timeout(timeout):
-                await client.write_gatt_char(WRITE_UUID, packet.encode(), response=True)
+                await client.write_gatt_char(
+                    write_characteristic, packet.encode(), response=True
+                )
                 return await future
         except TimeoutError as error:
             raise DjiPowerError(

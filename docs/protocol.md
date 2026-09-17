@@ -19,11 +19,18 @@ MAC address.
 | `0x98` | DJI Power 1000 Mini |
 | `0x94` | DJI Power 2000 |
 
-| Purpose | UUID |
-| --- | --- |
-| Service | `0000a002-0000-1000-8000-00805f9b34fb` |
-| Write | `0000c304-0000-1000-8000-00805f9b34fb` |
-| Notify | `0000c305-0000-1000-8000-00805f9b34fb` |
+The client selects one complete layout from the discovered services on each
+connection, preferring `a002` when both are present. Notify and write
+characteristics must belong to the same service; selection is independent of model.
+
+| Service | Notify | Write |
+| --- | --- | --- |
+| `a002` | `c305` | `c304` |
+| `fff0` | `fff4` | `fff5` |
+
+Each value expands to `0000xxxx-0000-1000-8000-00805f9b34fb`. Both layouts use
+the same DUML framing and write-with-response behavior. Missing layouts or failed
+notification setup trigger one cache-clear/reconnect attempt before setup fails.
 
 The station accepts one BLE central at a time. Notifications can split frames at any
 byte boundary; `DumlStream` buffers chunks and resynchronizes on a valid `0x55` frame.
