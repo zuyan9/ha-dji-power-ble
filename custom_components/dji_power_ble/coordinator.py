@@ -105,6 +105,32 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
+    async def async_set_sdc(
+        self, interface_type: int, seq: int, enabled: bool
+    ) -> None:
+        """Set an SDC switch and publish its confirmed state immediately."""
+        try:
+            await self.device.set_sdc(interface_type, seq, enabled)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
+    async def async_set_car_charger(
+        self,
+        interface_type: int,
+        seq: int,
+        accessory_type: int,
+        **changes: bool | int | float,
+    ) -> None:
+        """Set one charger control and publish the confirmed device state."""
+        try:
+            await self.device.set_car_charger(
+                interface_type, seq, accessory_type, **changes
+            )
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
     async def async_set_charge_limits(
         self,
         *,

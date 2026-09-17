@@ -63,7 +63,7 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleTyp
         "homeassistant.components.number": _module(
             "homeassistant.components.number",
             NumberEntity=type("NumberEntity", (), {}),
-            NumberDeviceClass=types.SimpleNamespace(POWER="power"),
+            NumberDeviceClass=types.SimpleNamespace(POWER="power", VOLTAGE="voltage"),
             NumberMode=types.SimpleNamespace(SLIDER="slider", BOX="box"),
         ),
         "homeassistant.components.select": _module(
@@ -80,6 +80,7 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleTyp
             PERCENTAGE="%",
             EntityCategory=types.SimpleNamespace(CONFIG="config"),
             UnitOfPower=types.SimpleNamespace(WATT="W"),
+            UnitOfElectricPotential=types.SimpleNamespace(VOLT="V"),
         ),
         "homeassistant.core": _module(
             "homeassistant.core", HomeAssistant=object, callback=lambda method: method
@@ -124,8 +125,9 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
             device=types.SimpleNamespace(model="DJI Power 2000"),
             last_update_success=True,
             data={},
+            async_add_listener=Mock(return_value=Mock()),
         )
-        entry = types.SimpleNamespace(entry_id="station")
+        entry = types.SimpleNamespace(entry_id="station", async_on_unload=Mock())
         hass = types.SimpleNamespace(data={"dji_power_ble": {"station": coordinator}})
         for model in (
             "DJI Power 2000",

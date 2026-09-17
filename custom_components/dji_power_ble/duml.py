@@ -10,6 +10,7 @@ import contextlib
 import dataclasses
 import time
 from collections.abc import Iterable
+from decimal import Decimal, InvalidOperation
 
 SERVICE_UUID = "0000a002-0000-1000-8000-00805f9b34fb"
 WRITE_UUID = "0000c304-0000-1000-8000-00805f9b34fb"
@@ -41,6 +42,7 @@ CHECK_SECRET_KEY = 0x01
 EXPANSION_BATTERIES_KEY = 0x01
 CHARGE_LIMIT_KEY = 0x05
 ENERGY_STORAGE_KEY = 0x06
+CAR_CHARGERS_KEY = 0x0A
 POWER_SWITCH_KEY = 0x0D
 RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
@@ -646,6 +648,56 @@ def parse_time_periods(value: bytes) -> list[dict[str, object]]:
     return normalize_time_periods(periods)
 
 
+_CAR_CHARGER_FIELDS = (
+    "p_from_car",
+    "p_to_car",
+    "v_from_car",
+    "v_to_car",
+    "v_auto",
+)
+
+
+def parse_car_chargers(value: bytes) -> list[dict[str, int]]:
+    """Decode complete accessory rows, retaining unknown enum values."""
+    chargers: list[dict[str, int]] = []
+    identities: set[tuple[int, int]] = set()
+    for record in parse_tlvs(value, strict=True):
+        row = record.value
+        if len(row) < 65:
+            raise ProtocolError("car-charger records must contain at least 65 bytes")
+        identity = (row[0], row[1])
+        if identity in identities:
+            raise ProtocolError("duplicate car-charger interface and sequence")
+        identities.add(identity)
+        charger = dict(
+            zip(("interface_type", "seq", "type", "sw", "mode"), row[:5], strict=True)
+        )
+        for index, field in enumerate(_CAR_CHARGER_FIELDS):
+            for part_index, part in enumerate(("up", "low", "v")):
+                offset = 5 + index * 12 + part_index * 4
+                charger[f"{field}_{part}"] = int.from_bytes(
+                    row[offset : offset + 4], "little"
+                )
+        chargers.append(charger)
+    return chargers
+
+
+def parse_power_switches(value: bytes) -> list[dict[str, int]]:
+    """Decode the reported port switches without assuming their row order."""
+    switches: list[dict[str, int]] = []
+    identities: set[tuple[int, int]] = set()
+    for record in parse_tlvs(value, strict=True):
+        row = record.value
+        if len(row) < 3:
+            raise ProtocolError("power-switch record must contain at least three bytes")
+        identity = (row[0], row[1])
+        if identity in identities:
+            raise ProtocolError("duplicate power-switch type and sequence")
+        identities.add(identity)
+        switches.append({"type": row[0], "seq": row[1], "sw": row[2]})
+    return switches
+
+
 def parse_telemetry(payload: bytes) -> dict[str, object]:
     """Decode the known fields of a keyed config snapshot/readback."""
     keyed = parse_keyed_values(payload)
@@ -684,13 +736,23 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
     if len(display := keyed.get(0x0C, b"")) >= 10:
         data["display_timeout_s"] = int.from_bytes(display[0:2], "little")
 
-    if (
-        len(power_switch := keyed.get(POWER_SWITCH_KEY, b"")) >= 7
-        and power_switch[2:4] == b"\x03\x00"
-        and power_switch[4:6] == b"\x02\x01"
-        and power_switch[6] in (1, 2)
-    ):
-        data["ac_enabled"] = power_switch[6] == 1
+    if CAR_CHARGERS_KEY in keyed:
+        data["car_chargers"] = None
+        with contextlib.suppress(ProtocolError):
+            data["car_chargers"] = parse_car_chargers(keyed[CAR_CHARGERS_KEY])
+
+    if POWER_SWITCH_KEY in keyed:
+        data.update(power_switches=None, ac_enabled=None)
+        with contextlib.suppress(ProtocolError):
+            switches = parse_power_switches(keyed[POWER_SWITCH_KEY])
+            data["power_switches"] = switches
+            for switch in switches:
+                if (
+                    switch["type"] == 2
+                    and switch["seq"] == 1
+                    and switch["sw"] in (1, 2)
+                ):
+                    data["ac_enabled"] = switch["sw"] == 1
 
     if len(timezone := keyed.get(0x15, b"")) == 2:
         data["timezone_offset_min"] = int.from_bytes(timezone, "little", signed=True)
@@ -785,12 +847,187 @@ def build_time_periods_set_payload(
     )
 
 
-def build_ac_set_payload(enabled: bool, *, timestamp_ms: int | None = None) -> bytes:
-    """Build the live-verified AC main-output SET."""
+def build_ac_set_payload(
+    enabled: bool,
+    *,
+    current_value: str | bytes | None = None,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Build the AC SET, preserving other reported switches when supplied."""
+    if type(enabled) is not bool:
+        raise ProtocolError("AC enabled state must be a boolean")
     state = 0x01 if enabled else 0x02
-    value = bytes((0x0D, 0x00, 0x03, 0x00, 0x02, 0x01, state))
+    if current_value is None:
+        value = bytes((0x0D, 0x00, 0x03, 0x00, 0x02, 0x01, state))
+    else:
+        value = _accessory_snapshot(current_value)
+        rows = parse_power_switches(value)
+        index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if (row["type"], row["seq"]) == (2, 1)
+            ),
+            None,
+        )
+        if index is None or rows[index]["sw"] not in (1, 2):
+            raise ProtocolError("current snapshot has no valid AC main-output switch")
+        value = _replace_accessory_row(
+            value, POWER_SWITCH_KEY, index, 2, bytes((state,))
+        )
     return build_keyed_set_payload(
         [(POWER_SWITCH_KEY, value), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+def _accessory_snapshot(current_value: str | bytes) -> bytes:
+    """Read a complete snapshot without replacing unavailable state with defaults."""
+    try:
+        if isinstance(current_value, str):
+            return bytes.fromhex(current_value)
+        if isinstance(current_value, bytes):
+            return current_value
+    except ValueError as error:
+        raise ProtocolError("accessory state is not valid hex") from error
+    raise ProtocolError("accessory state must be bytes or a hex string")
+
+
+def _validate_sdc_identity(interface_type: int, seq: int) -> None:
+    if type(interface_type) is not int or interface_type not in (5, 6):
+        raise ProtocolError("accessory controls require an SDC or SDC Lite interface")
+    if type(seq) is not int or not 0 <= seq <= 255:
+        raise ProtocolError("accessory sequence must be a reported byte")
+
+
+def _replace_accessory_row(
+    value: bytes, key: int, index: int, offset: int, replacement: bytes
+) -> bytes:
+    """Use app SET tags while preserving every row body and its extended tail."""
+    output = bytearray()
+    for row_index, record in enumerate(parse_tlvs(value, strict=True)):
+        row = bytearray(record.value)
+        if row_index == index:
+            row[offset : offset + len(replacement)] = replacement
+        output += key.to_bytes(2, "little") + len(row).to_bytes(2, "little") + row
+    return bytes(output)
+
+
+def _car_charger_number(row: dict[str, int], field: str, value: int) -> None:
+    if row["sw"] != 1 or row["mode"] != 2:
+        raise ProtocolError("enable the car charger in Recharge mode before editing it")
+    minimum, maximum, current = (row[f"{field}_{part}"] for part in ("low", "up", "v"))
+    if maximum == 0 or not minimum <= current <= maximum:
+        raise ProtocolError("car charger reported invalid control bounds or setpoint")
+    if not minimum <= value <= maximum:
+        raise ProtocolError("value is outside the car charger's reported bounds")
+
+
+def build_car_charger_set_payload(
+    current_value: str | bytes,
+    interface_type: int,
+    seq: int,
+    accessory_type: int,
+    *,
+    enabled: bool | None = None,
+    mode: int | None = None,
+    recharge_power_w: int | None = None,
+    minimum_voltage_v: float | None = None,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Edit one reported car-charger setting and preserve the complete list."""
+    _validate_sdc_identity(interface_type, seq)
+    if type(accessory_type) is not int or accessory_type not in (3, 4):
+        raise ProtocolError("car-charger controls require a 1 kW or 1.8 kW accessory")
+    if (
+        sum(
+            setting is not None
+            for setting in (enabled, mode, recharge_power_w, minimum_voltage_v)
+        )
+        != 1
+    ):
+        raise ProtocolError("change exactly one car-charger setting at a time")
+    value = _accessory_snapshot(current_value)
+    rows = parse_car_chargers(value)
+    index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if (row["interface_type"], row["seq"], row["type"])
+            == (interface_type, seq, accessory_type)
+        ),
+        None,
+    )
+    if index is None:
+        raise ProtocolError("car charger is absent from the current snapshot")
+    row = rows[index]
+    if row["sw"] not in (1, 2) or row["mode"] not in (1, 2, 3):
+        raise ProtocolError("car charger reported an unknown switch state or mode")
+    if enabled is not None:
+        if type(enabled) is not bool:
+            raise ProtocolError("car-charger enabled state must be a boolean")
+        offset, replacement = 3, bytes((1 if enabled else 2,))
+    elif mode is not None:
+        if type(mode) is not int or mode not in (1, 2, 3):
+            raise ProtocolError("car-charger mode must be Auto, Recharge, or Charge")
+        if row["sw"] != 1:
+            raise ProtocolError("enable the car charger before changing its mode")
+        offset, replacement = 4, bytes((mode,))
+    elif recharge_power_w is not None:
+        if type(recharge_power_w) is not int:
+            raise ProtocolError("car-recharging power must be a whole number of watts")
+        _car_charger_number(row, "p_from_car", recharge_power_w)
+        offset, replacement = 13, recharge_power_w.to_bytes(4, "little")
+    else:
+        if type(minimum_voltage_v) not in (int, float):
+            raise ProtocolError("car-recharging voltage must be a finite number")
+        try:
+            scaled = Decimal(str(minimum_voltage_v)) * 100
+            if not scaled.is_finite() or scaled != scaled.to_integral_value():
+                raise ProtocolError("car-recharging voltage must use 0.01 V increments")
+            voltage = int(scaled)
+        except InvalidOperation as error:
+            raise ProtocolError("car-recharging voltage is invalid") from error
+        _car_charger_number(row, "v_from_car", voltage)
+        offset, replacement = 37, voltage.to_bytes(4, "little")
+    updated = _replace_accessory_row(
+        value, CAR_CHARGERS_KEY, index, offset, replacement
+    )
+    return build_keyed_set_payload(
+        [(CAR_CHARGERS_KEY, updated), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+def build_sdc_switch_set_payload(
+    current_value: str | bytes,
+    interface_type: int,
+    seq: int,
+    enabled: bool,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Edit an explicitly reported SDC switch without inventing a port row."""
+    _validate_sdc_identity(interface_type, seq)
+    if type(enabled) is not bool:
+        raise ProtocolError("SDC enabled state must be a boolean")
+    value = _accessory_snapshot(current_value)
+    rows = parse_power_switches(value)
+    index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if (row["type"], row["seq"]) == (interface_type, seq)
+        ),
+        None,
+    )
+    if index is None:
+        raise ProtocolError("SDC switch is absent from the current snapshot")
+    if rows[index]["sw"] not in (1, 2):
+        raise ProtocolError("SDC port reported an unknown switch state")
+    updated = _replace_accessory_row(
+        value, POWER_SWITCH_KEY, index, 2, bytes((1 if enabled else 2,))
+    )
+    return build_keyed_set_payload(
+        [(POWER_SWITCH_KEY, updated), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )
 
 

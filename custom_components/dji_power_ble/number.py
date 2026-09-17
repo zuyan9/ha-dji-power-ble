@@ -4,10 +4,21 @@ from __future__ import annotations
 
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS, PERCENTAGE, EntityCategory, UnitOfPower
+from homeassistant.const import (
+    CONF_ADDRESS,
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfElectricPotential,
+    UnitOfPower,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .accessory import (
+    AccessoryIdentity,
+    DjiPowerCarChargerEntity,
+    async_discover_accessories,
+)
 from .const import DOMAIN
 from .entity import DjiPowerEntity
 from .features import ModelFeature, supports_feature
@@ -29,6 +40,17 @@ async def async_setup_entry(
             )
         )
     async_add_entities(entities)
+    async_discover_accessories(
+        coordinator,
+        entry,
+        async_add_entities,
+        {
+            "car_chargers": lambda identity: [
+                DjiPowerCarRechargePowerNumber(coordinator, identity),
+                DjiPowerCarMinimumVoltageNumber(coordinator, identity),
+            ]
+        },
+    )
 
 
 class DjiPowerLimitNumber(DjiPowerEntity, NumberEntity):
@@ -131,3 +153,90 @@ class DjiPowerChargePowerNumber(_DjiPowerWattNumber):
         if watts != value:
             raise ValueError("recharge power must be a whole number of watts")
         await self.coordinator.async_set_charge_power(watts)
+
+
+class _DjiPowerCarNumber(DjiPowerCarChargerEntity, NumberEntity):
+    """A car recharger value with independent, device-reported bounds."""
+
+    _field: str
+    _scale = 1
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_mode = NumberMode.BOX
+
+    def _bounds(self) -> tuple[int, int, int] | None:
+        row = self.row or {}
+        values = tuple(
+            row.get(f"{self._field}_{suffix}") for suffix in ("low", "v", "up")
+        )
+        if all(type(value) is int for value in values):
+            minimum, value, maximum = values
+            if 0 <= minimum <= value <= maximum and maximum > 0:
+                return minimum, value, maximum
+        return None
+
+    @property
+    def available(self) -> bool:
+        mode = (self.row or {}).get("mode")
+        return (
+            super().available
+            and self.charger_enabled
+            and type(mode) is int
+            and mode == 2
+            and self._bounds() is not None
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        bounds = self._bounds()
+        return bounds[1] / self._scale if bounds is not None else None
+
+    @property
+    def native_min_value(self) -> float:
+        bounds = self._bounds()
+        return bounds[0] / self._scale if bounds is not None else 0
+
+    @property
+    def native_max_value(self) -> float:
+        bounds = self._bounds()
+        return bounds[2] / self._scale if bounds is not None else 0
+
+
+class DjiPowerCarRechargePowerNumber(_DjiPowerCarNumber):
+    """Set power transferred from the car into the station."""
+
+    _field = "p_from_car"
+    _attr_device_class = NumberDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_native_step = 1
+
+    def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
+        super().__init__(
+            coordinator, identity, "car_recharge_power", "car recharge power"
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        watts = int(value)
+        if watts != value:
+            raise ValueError("car recharge power must be a whole number of watts")
+        await self.async_set_charger(recharge_power_w=watts)
+
+
+class DjiPowerCarMinimumVoltageNumber(_DjiPowerCarNumber):
+    """Set the minimum vehicle voltage for recharging the station."""
+
+    _field = "v_from_car"
+    _scale = 100
+    _attr_device_class = NumberDeviceClass.VOLTAGE
+    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+    _attr_native_step = 0.01
+
+    def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
+        super().__init__(
+            coordinator,
+            identity,
+            "car_minimum_voltage",
+            "minimum car recharging voltage",
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.async_set_charger(minimum_voltage_v=value)

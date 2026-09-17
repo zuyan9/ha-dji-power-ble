@@ -21,6 +21,7 @@ used only during setup to retrieve the device's local credential.
 - Battery level, remaining time, temperature, and charging status
 - Input, output, AC, USB, SDC, etc. power readings
 - Expansion battery devices with battery level and pack diagnostics
+- [SDC and car-charger controls](docs/accessory-controls.md) reported by the station
 - Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
 - Firmware, timezone, display, reserve, and cloud-status diagnostics
 

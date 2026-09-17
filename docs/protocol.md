@@ -255,6 +255,51 @@ Manual discharge control has been reported working on hardware. Recharge power
 remains experimental pending confirmation of device acceptance and charging behavior
 on a physical Power 2000.
 
+## SDC and car-charger configuration
+
+Optional SDC controls are enabled for Power 1000, Power 1000 V2, and Power 2000
+when their configuration reports supported rows. A telemetry interface alone is
+insufficient to create a switch. These controls remain experimental pending
+accessory-specific hardware validation.
+
+Key `0x0A` (`car_charges`) contains nested charger rows with a 65-byte fixed prefix:
+
+| Byte offset | Field | Encoding |
+| --- | --- | --- |
+| 0 / 1 / 2 | Interface type / sequence / accessory type | u8 each |
+| 3 / 4 | Switch / operation mode | u8 each |
+| 5 / 9 / 13 | Car-to-station power maximum / minimum / setting | u32 LE, W |
+| 17 / 21 / 25 | Station-to-car power maximum / minimum / setting | u32 LE, W |
+| 29 / 33 / 37 | Car-to-station voltage maximum / minimum / setting | u32 LE, 0.01 V |
+| 41 / 45 / 49 | Station-to-car voltage maximum / minimum / setting | u32 LE, 0.01 V |
+| 53 / 57 / 61 | Auto voltage maximum / minimum / setting | u32 LE, 0.01 V |
+
+Switch values are `1` enabled and `2` disabled. Modes are `1` Auto, `2` Recharge
+(car to station), and `3` Charge (station to car). Supported charger types are
+`3` (1 kW) and `4` (1.8 kW Solar/Car); supported interfaces are `5` (SDC) and
+`6` (SDC Lite). The sequence is taken from the reported row, including zero.
+The implementation exposes the switch, mode, car-to-station watts, and minimum
+car-to-station voltage. Numeric writes require enabled Recharge mode and valid
+bounds for that particular field.
+
+Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
+`type, sequence, switch`. AC is type `2`, sequence `1`; SDC and SDC Lite use
+types `5` and `6` with their reported sequence. All switch writes retain other
+rows, including AC, and modify only the addressed switch byte.
+
+SET uses child tags `0x000A` and `0x000D` inside outer properties `0x100A` and
+`0x100D`. Readback child tags can differ; parsing follows the enclosing property's
+schema while validating every nested length. Row bodies and unknown extended tails
+are retained during edits. Truncated rows or duplicate port identities invalidate
+the snapshot rather than selecting an ambiguous target.
+
+Both accessory SET paths include the same rules key `0x0E` used for AC output.
+Each written key must return zero status. Confirmation uses a fresh targeted GET
+(`00 0a 10` or `00 0d 10`) and matches the addressed row, with immediate first
+read and the existing retry policy. A successful ACK can precede or accompany an
+ineffective setting, so it cannot substitute for matching readback. Readback itself
+does not prove physical charging or switching behavior.
+
 ## Known limits
 
 - HMS `0x66` contents are not decoded because non-empty records have not been validated.

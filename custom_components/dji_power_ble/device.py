@@ -16,6 +16,7 @@ from bleak_retry_connector import BleakClientWithServiceCache, establish_connect
 from .duml import (
     APP_SOURCE,
     AUTH_COMMAND,
+    CAR_CHARGERS_KEY,
     CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
     ECO_MODE_KEY,
@@ -38,15 +39,18 @@ from .duml import (
     DumlStream,
     ProtocolError,
     build_ac_set_payload,
+    build_car_charger_set_payload,
     build_charge_limits_set_payload,
     build_charge_power_set_payload,
     build_discharge_power_set_payload,
     build_power_adjustment_set_payload,
+    build_sdc_switch_set_payload,
     build_time_periods_set_payload,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
     normalize_pair_key,
     normalize_time_periods,
+    parse_keyed_values,
     parse_report,
     parse_set_ack,
     parse_telemetry,
@@ -184,6 +188,14 @@ class DjiPowerDevice:
         except ProtocolError as error:
             if packet.command_id == TELEMETRY_COMMAND:
                 invalidated = {"expansion_batteries": None}
+                if supports_feature(self.model, ModelFeature.SDC_CONTROLS):
+                    invalidated.update(
+                        car_chargers=None,
+                        key_0a=None,
+                        power_switches=None,
+                        key_0d=None,
+                        ac_enabled=None,
+                    )
                 if supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
                     invalidated.update(time_periods=None, key_16=None)
                 self._merge_data(invalidated)
@@ -404,7 +416,7 @@ class DjiPowerDevice:
                 _LOGGER.debug("Time-period configuration unavailable: %s", error)
 
     def _start_expansion_refresh(self) -> None:
-        """Refresh optional pack telemetry using the station's existing session."""
+        """Refresh optional packs and accessories over the existing session."""
         if self.model not in EXPANSION_MODELS or not self.is_connected:
             return
         if (
@@ -417,12 +429,59 @@ class DjiPowerDevice:
 
     async def _refresh_expansion_loop(self) -> None:
         try:
+            # Discover optional controls after setup, so an unsupported request
+            # cannot consume the connection's initialization deadline.
+            async with self._operation_lock:
+                await self._refresh_accessory_config()
             while self.is_connected:
                 await asyncio.sleep(EXPANSION_REFRESH_INTERVAL)
                 async with self._operation_lock:
                     await self._read_expansion_batteries()
+                    await self._refresh_accessory_config()
         except DjiPowerDisconnectedError:
             return
+
+    async def _refresh_accessory_config(self) -> None:
+        """Discover attached controls without making optional failures fatal."""
+        if not supports_feature(self.model, ModelFeature.SDC_CONTROLS):
+            return
+        for key, state_key in (
+            (CAR_CHARGERS_KEY, "car_chargers"),
+            (POWER_SWITCH_KEY, "power_switches"),
+        ):
+            try:
+                await self._read_accessory_config(key, state_key)
+            except DjiPowerDisconnectedError:
+                raise
+            except DjiPowerError as error:
+                _LOGGER.debug("Accessory configuration unavailable: %s", error)
+
+    async def _read_accessory_config(
+        self, key: int, state_key: str
+    ) -> dict[str, object]:
+        """Require a fresh complete list and invalidate failed snapshots."""
+        raw_key = f"key_{key:02x}"
+        try:
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                update = await self._read_config(key)
+            if not isinstance(update.get(raw_key), str) or not isinstance(
+                update.get(state_key), list
+            ):
+                raise DjiPowerError(f"station omitted valid {state_key} configuration")
+        except DjiPowerDisconnectedError:
+            # The disconnect callback owns availability; do not republish here.
+            raise
+        except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            invalidated = {raw_key: None, state_key: None}
+            if key == POWER_SWITCH_KEY:
+                invalidated["ac_enabled"] = None
+            self._merge_data(invalidated)
+            raise DjiPowerError(
+                f"cannot read {state_key} configuration: {str(error) or 'timed out'}"
+            ) from error
+        return update
 
     async def _read_expansion_batteries(self) -> None:
         """Read a fresh pack list; optional failures invalidate only pack state."""
@@ -561,11 +620,115 @@ class DjiPowerDevice:
     async def set_ac(self, enabled: bool) -> None:
         """Set AC output and wait for a matching readback."""
         async with self._operation_lock:
-            await self._set(
-                build_ac_set_payload(enabled), (POWER_SWITCH_KEY, RULES_KEY)
+            update = await self._read_accessory_config(
+                POWER_SWITCH_KEY, "power_switches"
             )
-            await self._wait_for_values(
-                {"ac_enabled": enabled}, config_key=POWER_SWITCH_KEY
+            try:
+                payload = build_ac_set_payload(
+                    enabled, current_value=update["key_0d"]
+                )
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (POWER_SWITCH_KEY, RULES_KEY))
+            await self._wait_for_accessory_values(
+                POWER_SWITCH_KEY, "power_switches",
+                {"type": 2, "seq": 1}, {"sw": 1 if enabled else 2},
+            )
+
+    @staticmethod
+    def _accessory_row(
+        update: dict[str, object], state_key: str, identity: dict[str, int]
+    ) -> dict[str, int]:
+        rows = update.get(state_key)
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict) and all(
+                    row.get(key) == value for key, value in identity.items()
+                ):
+                    return row
+        raise DjiPowerError("the requested accessory is no longer available")
+
+    async def _wait_for_accessory_values(
+        self,
+        config_key: int,
+        state_key: str,
+        identity: dict[str, int],
+        expected: dict[str, int],
+    ) -> None:
+        """Confirm the addressed accessory from fresh reads, never cached rows."""
+        for attempt in range(READBACK_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(READBACK_RETRY_INTERVAL)
+            update = await self._read_accessory_config(config_key, state_key)
+            row = self._accessory_row(update, state_key, identity)
+            if all(row.get(key) == value for key, value in expected.items()):
+                return
+        raise DjiPowerError("accessory did not report the requested values")
+
+    async def set_sdc(self, interface_type: int, seq: int, enabled: bool) -> None:
+        """Set a reported SDC switch while retaining all other switch rows."""
+        if not supports_feature(self.model, ModelFeature.SDC_CONTROLS):
+            raise DjiPowerError("SDC controls are not supported on this model")
+        async with self._operation_lock:
+            update = await self._read_accessory_config(
+                POWER_SWITCH_KEY, "power_switches"
+            )
+            try:
+                payload = build_sdc_switch_set_payload(
+                    update["key_0d"], interface_type, seq, enabled
+                )
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, tuple(parse_keyed_values(payload)))
+            await self._wait_for_accessory_values(
+                POWER_SWITCH_KEY, "power_switches",
+                {"type": interface_type, "seq": seq},
+                {"sw": 1 if enabled else 2},
+            )
+
+    async def set_car_charger(
+        self,
+        interface_type: int,
+        seq: int,
+        accessory_type: int,
+        *,
+        enabled: bool | None = None,
+        mode: int | None = None,
+        recharge_power_w: int | None = None,
+        minimum_voltage_v: float | None = None,
+    ) -> None:
+        """Edit one reported charger setting and confirm its addressed row."""
+        if not supports_feature(self.model, ModelFeature.SDC_CONTROLS):
+            raise DjiPowerError("car-charger controls are not supported on this model")
+        identity = {
+            "interface_type": interface_type, "seq": seq, "type": accessory_type
+        }
+        async with self._operation_lock:
+            update = await self._read_accessory_config(CAR_CHARGERS_KEY, "car_chargers")
+            try:
+                payload = build_car_charger_set_payload(
+                    update["key_0a"], interface_type, seq, accessory_type,
+                    enabled=enabled, mode=mode, recharge_power_w=recharge_power_w,
+                    minimum_voltage_v=minimum_voltage_v,
+                )
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            requested = self._accessory_row(
+                parse_telemetry(payload), "car_chargers", identity
+            )
+            fields = [
+                field for field, value in (
+                    ("sw", enabled), ("mode", mode),
+                    ("p_from_car_v", recharge_power_w),
+                    ("v_from_car_v", minimum_voltage_v),
+                ) if value is not None
+            ]
+            if recharge_power_w is not None or minimum_voltage_v is not None:
+                fields.extend(("sw", "mode"))
+            expected = {field: requested[field] for field in fields}
+            await self._set(payload, tuple(parse_keyed_values(payload)))
+            await self._wait_for_accessory_values(
+                CAR_CHARGERS_KEY, "car_chargers", identity, expected
             )
 
     async def set_charge_limits(

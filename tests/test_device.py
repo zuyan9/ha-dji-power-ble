@@ -298,7 +298,7 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
                     get = (duml.GET_COMMAND, bytes((0, key, 0x10)))
                     reads = [item for item in client.requests
                              if item[0] == duml.GET_COMMAND]
-                    self.assertEqual(reads, [get] * (1 if key == 0x0D else 2))
+                    self.assertEqual(reads, [get] * 2)
                     self.assertEqual(client.requests[-1], get)
 
     async def test_charge_limit_write_preserves_fresh_other_fields(self):
@@ -331,18 +331,25 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
                 client.omit_after_set = True
                 self.sleep_mock.reset_mock()
                 with self.assertRaisesRegex(
-                    device_module.DjiPowerError, "did not report"
+                    device_module.DjiPowerError,
+                    "cannot read" if method == "set_ac" else "did not report",
                 ):
                     await getattr(device, method)(**kwargs)
-                self.assertEqual(self.sleep_mock.await_args_list, [call(2)] * 8)
+                self.assertEqual(
+                    self.sleep_mock.await_args_list,
+                    [] if method == "set_ac" else [call(2)] * 8,
+                )
+                if method == "set_ac":
+                    self.assertIsNone(device.data["power_switches"])
+                    self.assertIsNone(device.data["ac_enabled"])
 
     async def test_stale_readback_retries_then_confirms(self):
         self.client.apply_set = False
 
         async def apply_after_delay(_delay):
-            self.assertEqual(len(self.client.requests), 2)
+            self.assertEqual(len(self.client.requests), 3)
             self.client.values.update(
-                duml.parse_keyed_values(self.client.requests[0][1])
+                duml.parse_keyed_values(self.client.requests[1][1])
             )
 
         self.sleep_mock.side_effect = apply_after_delay
@@ -358,7 +365,7 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_ac(True)
 
         self.assertFalse(self.device.data["ac_enabled"])
-        self.assertEqual(len(self.client.requests), 10)
+        self.assertEqual(len(self.client.requests), 11)
         self.assertEqual(self.sleep_mock.await_args_list, [call(2)] * 8)
 
     async def test_rejected_ack_never_starts_readback(self):
@@ -1411,6 +1418,7 @@ class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(device_module.asyncio, "sleep", AsyncMock()) as sleep,
+            patch.object(self.device, "_refresh_accessory_config", AsyncMock()),
             patch.object(
                 self.device, "_read_expansion_batteries", AsyncMock(side_effect=read)
             ) as refresh,
