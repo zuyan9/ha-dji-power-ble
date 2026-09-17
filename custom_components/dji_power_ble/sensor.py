@@ -28,6 +28,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import DjiPowerCoordinator
 from .entity import DjiPowerEntity
+from .features import ModelFeature, supports_feature
 
 DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -269,6 +270,8 @@ async def async_setup_entry(
     async_add_entities(
         DjiPowerSensor(coordinator, description) for description in DESCRIPTIONS
     )
+    if supports_feature(coordinator.device.model, ModelFeature.TARIFF_SCHEDULE):
+        async_add_entities([DjiPowerTimePeriodsSensor(coordinator)])
     device_registry = dr.async_get(hass)
     known: set[tuple[str, str]] = set()
     restored = []
@@ -333,6 +336,36 @@ class DjiPowerSensor(DjiPowerEntity, SensorEntity):
         if isinstance(value, str) and len(value) > 255:
             return value[:255]
         return value
+
+
+class DjiPowerTimePeriodsSensor(DjiPowerEntity, SensorEntity):
+    """Station tariff periods, with a count suitable for the sensor state."""
+
+    _attr_translation_key = "time_periods"
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, coordinator: DjiPowerCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_time_periods"
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.native_value is not None
+
+    @property
+    def native_value(self) -> int | None:
+        periods = (self.coordinator.data or {}).get("time_periods")
+        return len(periods) if isinstance(periods, list) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        data = self.coordinator.data or {}
+        attributes = {"periods": data.get("time_periods")}
+        if (offset := data.get("timezone_offset_min")) is not None:
+            attributes["timezone_offset_min"] = offset
+        return attributes
 
 
 class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEntity):

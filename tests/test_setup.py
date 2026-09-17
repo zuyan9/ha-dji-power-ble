@@ -104,6 +104,18 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_actions_registered_without_loaded_entries(self):
+        register = Mock()
+        with patch.dict(sys.modules, {
+            PACKAGE: integration,
+            f"{PACKAGE}.services": _module(
+                f"{PACKAGE}.services", async_setup_services=register
+            ),
+        }):
+            self.assertTrue(await integration.async_setup(self.hass, {}))
+        register.assert_called_once_with(self.hass)
+        self.assertEqual(self.hass.data, {})
+
     async def test_lowercase_config_address_uses_uppercase_bluetooth_address(self):
         expected = self.entry.data["address"].upper()
 

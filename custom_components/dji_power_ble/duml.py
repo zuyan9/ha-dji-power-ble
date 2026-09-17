@@ -43,7 +43,10 @@ CHARGE_LIMIT_KEY = 0x05
 ENERGY_STORAGE_KEY = 0x06
 POWER_SWITCH_KEY = 0x0D
 RULES_KEY = 0x0E
+TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
+
+TIME_PERIOD_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 _SET_STATE_RULES = (RULES_KEY, bytes.fromhex("0a00") + b"1800efffff")
 
@@ -528,6 +531,121 @@ def _parse_manual_charge_power(value: bytes | bytearray) -> tuple[int, int, int]
     return minimum, maximum, watts
 
 
+def _time_period_minutes(value: object) -> int:
+    """Validate a wall-clock time with minute precision."""
+    if (
+        not isinstance(value, str)
+        or len(value) != 5
+        or not value.isascii()
+        or value[2] != ":"
+        or not value[:2].isdigit()
+        or not value[3:].isdigit()
+    ):
+        raise ProtocolError("period times must use HH:MM")
+    hour, minute = int(value[:2]), int(value[3:])
+    if hour > 23 or minute > 59:
+        raise ProtocolError("period times must be between 00:00 and 23:59")
+    return hour * 60 + minute
+
+
+def normalize_time_periods(periods: object) -> list[dict[str, object]]:
+    """Validate and canonically order recurring peak and off-peak periods.
+
+    Days refer to each period's start day. An end earlier than its start extends
+    into the following day, including the Sunday-to-Monday boundary.
+    """
+    if not isinstance(periods, list):
+        raise ProtocolError("periods must be a list")
+
+    canonical: list[tuple[tuple[int, int, int, int], dict[str, object]]] = []
+    counts = {"peak": 0, "off_peak": 0}
+    intervals: list[tuple[int, int]] = []
+    week_minutes = 7 * 24 * 60
+    for period in periods:
+        if not isinstance(period, dict):
+            raise ProtocolError("each period must be an object")
+        if set(period) - {"type", "days", "start", "end"}:
+            raise ProtocolError("period contains unknown fields")
+        kind = period.get("type")
+        if kind not in ("peak", "off_peak"):
+            raise ProtocolError("period type must be peak or off_peak")
+        counts[kind] += 1
+        if counts[kind] > 8:
+            raise ProtocolError("at most eight periods of each type are allowed")
+        days = period.get("days", list(TIME_PERIOD_DAYS))
+        if not isinstance(days, list) or not days:
+            raise ProtocolError("period days must be a nonempty list")
+        if any(day not in TIME_PERIOD_DAYS for day in days):
+            raise ProtocolError(
+                "period days must use mon, tue, wed, thu, fri, sat, sun"
+            )
+        if len(set(days)) != len(days):
+            raise ProtocolError("period days must not contain duplicates")
+        start = _time_period_minutes(period.get("start"))
+        end = _time_period_minutes(period.get("end"))
+        if start == end:
+            raise ProtocolError("period start and end must differ")
+        canonical_days = [day for day in TIME_PERIOD_DAYS if day in days]
+        mask = sum(1 << TIME_PERIOD_DAYS.index(day) for day in canonical_days)
+        canonical.append(
+            (
+                (1 if kind == "peak" else 2, start, end, mask),
+                {
+                    "type": kind,
+                    "days": canonical_days,
+                    "start": period["start"],
+                    "end": period["end"],
+                },
+            )
+        )
+        for day in canonical_days:
+            base = TIME_PERIOD_DAYS.index(day) * 24 * 60
+            stop = base + end + (24 * 60 if end < start else 0)
+            if stop > week_minutes:
+                intervals.append((base + start, week_minutes))
+                intervals.append((0, stop - week_minutes))
+            else:
+                intervals.append((base + start, stop))
+
+    intervals.sort()
+    for previous, current in zip(intervals, intervals[1:], strict=False):
+        if current[0] < previous[1]:
+            raise ProtocolError("periods must not overlap")
+    return [period for _, period in sorted(canonical, key=lambda item: item[0])]
+
+
+def parse_time_periods(value: bytes) -> list[dict[str, object]]:
+    """Decode the tariff list with the app's nested-record framing."""
+    periods: list[dict[str, object]] = []
+    for record in parse_tlvs(value, strict=True):
+        # The app binds the row schema through the outer key and ignores the
+        # nested tag on reads. Writes use 0x0016; readback tags can differ.
+        row = record.value
+        if len(row) != 10:
+            raise ProtocolError("time-period records must contain exactly ten bytes")
+        if row[0] not in (1, 2) or row[1] not in (1, 2):
+            raise ProtocolError("time-period record has an unknown type or repetition")
+        mask = int.from_bytes(row[2:6], "little")
+        if row[1] == 1:
+            # Everyday repetition does not consult the weekday mask in the app.
+            days = list(TIME_PERIOD_DAYS)
+        else:
+            if not 1 <= mask <= 0x7F:
+                raise ProtocolError("time-period record has an invalid weekday mask")
+            days = [
+                day for index, day in enumerate(TIME_PERIOD_DAYS) if mask >> index & 1
+            ]
+        periods.append(
+            {
+                "type": "peak" if row[0] == 1 else "off_peak",
+                "days": days,
+                "start": f"{row[6]:02d}:{row[7]:02d}",
+                "end": f"{row[8]:02d}:{row[9]:02d}",
+            }
+        )
+    return normalize_time_periods(periods)
+
+
 def parse_telemetry(payload: bytes) -> dict[str, object]:
     """Decode the known fields of a keyed config snapshot/readback."""
     keyed = parse_keyed_values(payload)
@@ -576,6 +694,11 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
 
     if len(timezone := keyed.get(0x15, b"")) == 2:
         data["timezone_offset_min"] = int.from_bytes(timezone, "little", signed=True)
+
+    if TIME_PERIODS_KEY in keyed:
+        data["time_periods"] = None
+        with contextlib.suppress(ProtocolError):
+            data["time_periods"] = parse_time_periods(keyed[TIME_PERIODS_KEY])
 
     if ECO_MODE_KEY in keyed:
         # An explicit invalid/disabled record must clear previously usable state.
@@ -641,6 +764,27 @@ def build_keyed_set_payload(
     return payload
 
 
+def build_time_periods_set_payload(
+    periods: object, *, timestamp_ms: int | None = None
+) -> bytes:
+    """Replace the complete tariff list using the app's SET row format."""
+    value = bytearray()
+    for period in normalize_time_periods(periods):
+        days = period["days"]
+        mask = sum(
+            1 << index for index, day in enumerate(TIME_PERIOD_DAYS) if day in days
+        )
+        start = _time_period_minutes(period["start"])
+        end = _time_period_minutes(period["end"])
+        row = bytes((1 if period["type"] == "peak" else 2, 1 if mask == 0x7F else 2))
+        row += mask.to_bytes(4, "little")
+        row += bytes((*divmod(start, 60), *divmod(end, 60)))
+        value += bytes((TIME_PERIODS_KEY, 0, 10, 0)) + row
+    return build_keyed_set_payload(
+        [(TIME_PERIODS_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
 def build_ac_set_payload(enabled: bool, *, timestamp_ms: int | None = None) -> bytes:
     """Build the live-verified AC main-output SET."""
     state = 0x01 if enabled else 0x02
@@ -691,6 +835,22 @@ def _eco_mode_bytes(current_value: str | bytes) -> bytearray:
         )
     except ValueError as error:
         raise ProtocolError("eco-mode state is not valid hex") from error
+
+
+def validate_time_periods_mode(
+    current_value: str | bytes, *, clearing: bool = False
+) -> None:
+    """Require known Eco settings and retain periods while scheduling is active."""
+    value = _eco_mode_bytes(current_value)
+    if len(value) < 86:
+        raise ProtocolError("eco-mode state must contain at least 86 bytes")
+    if value[1] not in (0, 1, 2, 3):
+        raise ProtocolError("station reported an unknown energy-optimization mode")
+    if clearing and value[1] not in (0, 1):
+        raise ProtocolError(
+            "turn off Scheduled Periods or grid-tied operation in DJI Home "
+            "before clearing all periods"
+        )
 
 
 def build_discharge_power_set_payload(

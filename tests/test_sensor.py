@@ -255,7 +255,7 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=23.5, firmware="01.02.03.04")
         await self.setup([pack])
         self.assertEqual(
-            len(self.entities) - len(self.packs()), len(sensor.DESCRIPTIONS)
+            len(self.entities) - len(self.packs()), len(sensor.DESCRIPTIONS) + 1
         )
         self.assertEqual(len(self.packs()), 4)
         self.assertEqual(len(self.hass.device_registry.devices), 2)
@@ -404,3 +404,57 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(
                 strings["entity"]["sensor"][description.translation_key]["name"]
             )
+        self.assertEqual(
+            strings["entity"]["sensor"]["time_periods"]["name"],
+            "Electricity price time periods",
+        )
+
+    async def test_time_period_sensor_created_only_for_power_2000(self) -> None:
+        for model in (
+            "DJI Power 2000", "DJI Power 1000 V2", "DJI Power 1000 Mini",
+            "DJI Power 1000", "DJI Power",
+        ):
+            with self.subTest(model=model):
+                self.entities.clear()
+                self.coordinator.device.model = model
+                await self.setup([])
+                schedules = [
+                    item for item in self.entities
+                    if isinstance(item, sensor.DjiPowerTimePeriodsSensor)
+                ]
+                self.assertEqual(len(schedules), int(model == "DJI Power 2000"))
+                if schedules:
+                    self.assertEqual(
+                        schedules[0]._attr_unique_id, f"{ADDRESS}_time_periods"
+                    )
+                    self.assertFalse(schedules[0].available)
+
+    async def test_schedule_count_attributes_and_availability(self) -> None:
+        await self.setup([])
+        entity = next(
+            item for item in self.entities
+            if isinstance(item, sensor.DjiPowerTimePeriodsSensor)
+        )
+        period = {
+            "type": "off_peak", "days": ["mon"], "start": "22:00", "end": "06:00"
+        }
+        for periods in ([], [period]):
+            self.coordinator.data = {
+                "time_periods": periods, "timezone_offset_min": 0
+            }
+            self.assertTrue(entity.available)
+            self.assertEqual(entity.native_value, len(periods))
+            self.assertEqual(
+                entity.extra_state_attributes,
+                {"periods": periods, "timezone_offset_min": 0},
+            )
+        self.coordinator.last_update_success = False
+        self.assertFalse(entity.available)
+        self.coordinator.last_update_success = True
+        for invalid in (None, "invalid"):
+            self.coordinator.data = {"time_periods": invalid}
+            self.assertFalse(entity.available)
+            self.assertIsNone(entity.native_value)
+        self.coordinator.data = {}
+        self.assertFalse(entity.available)
+        self.assertNotIn("timezone_offset_min", entity.extra_state_attributes)

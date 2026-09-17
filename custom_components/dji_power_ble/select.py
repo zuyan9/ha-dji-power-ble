@@ -10,13 +10,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .entity import DjiPowerEntity
+from .features import ModelFeature, supports_feature
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    if coordinator.device.model == "DJI Power 2000":
+    if supports_feature(coordinator.device.model, ModelFeature.TOU_POWER_CONTROL):
         async_add_entities([DjiPowerAdjustmentSelect(coordinator)])
 
 

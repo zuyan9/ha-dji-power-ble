@@ -42,6 +42,15 @@ CONTROL_WRITES = (
         {"power_adjustment": "Automatic"},
         {"power_adjustment": "Manual"},
     ),
+    (
+        "set_time_periods",
+        ([{"type": "off_peak", "start": "01:00", "end": "05:00"}],),
+        {},
+        {"time_periods": []},
+        {"time_periods": [
+            {"type": "off_peak", "start": "01:00", "end": "05:00"}
+        ]},
+    ),
 )
 
 

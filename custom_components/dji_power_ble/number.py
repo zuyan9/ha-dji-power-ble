@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .entity import DjiPowerEntity
+from .features import ModelFeature, supports_feature
 
 
 async def async_setup_entry(
@@ -20,7 +21,7 @@ async def async_setup_entry(
         DjiPowerLimitNumber(coordinator, "discharge_limit", "Discharge limit", 0, 15),
         DjiPowerLimitNumber(coordinator, "recharge_limit", "Recharge limit", 70, 100),
     ]
-    if coordinator.device.model == "DJI Power 2000":
+    if supports_feature(coordinator.device.model, ModelFeature.TOU_POWER_CONTROL):
         entities.extend(
             (
                 DjiPowerDischargePowerNumber(coordinator),

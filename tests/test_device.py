@@ -551,7 +551,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             self.client.requests,
-            [(duml.GET_COMMAND, bytes((0, key, 0x10))) for key in (1, 4, 0x18)],
+            [(duml.GET_COMMAND, bytes((0, key, 0x10))) for key in (1, 4, 0x18, 0x16)],
         )
         self.assertEqual(self.device.data["discharge_power_w"], 93)
         self.assertTrue(self.device.data["discharge_power_available"])
