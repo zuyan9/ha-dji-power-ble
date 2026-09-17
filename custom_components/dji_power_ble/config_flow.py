@@ -22,7 +22,7 @@ from homeassistant.components.bluetooth import (
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
-    OptionsFlowWithReload,
+    OptionsFlow,
 )
 from homeassistant.const import CONF_ADDRESS, CONF_EMAIL, CONF_NAME, CONF_PASSWORD
 from homeassistant.core import callback
@@ -40,10 +40,13 @@ from .cloud import (
     DjiTwoFactorRequired,
 )
 from .const import (
+    CONF_CONNECTION_SOURCE,
+    CONF_KEEP_CONNECTION,
     CONF_MODEL,
     CONF_PAIR_KEY,
     CONF_SERIAL_NUMBER,
     CONF_UPDATE_INTERVAL,
+    CONNECTION_SOURCE_AUTOMATIC,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MANUFACTURER_ID,
@@ -51,6 +54,7 @@ from .const import (
     MIN_UPDATE_INTERVAL,
 )
 from .duml import ProtocolError, normalize_pair_key, parse_manufacturer_data
+from .local_ble import async_local_adapters
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -393,22 +397,94 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
-class DjiPowerOptionsFlow(OptionsFlowWithReload):
+class DjiPowerOptionsFlow(OptionsFlow):
     """Configure runtime behavior for a DJI Power station."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._options: dict[str, Any] | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage integration options."""
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
-
+        self._options = None
+        errors: dict[str, str] = {}
         current = {
             CONF_UPDATE_INTERVAL: self.config_entry.options.get(
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+            ),
+            CONF_CONNECTION_SOURCE: self.config_entry.options.get(
+                CONF_CONNECTION_SOURCE, CONNECTION_SOURCE_AUTOMATIC
+            ),
+        }
+        sources = {CONNECTION_SOURCE_AUTOMATIC: "Automatic (local or proxy)"}
+        try:
+            sources.update(await async_local_adapters())
+        except Exception:
+            _LOGGER.warning("Could not enumerate local Bluetooth adapters")
+            errors["base"] = "adapters_unavailable"
+        selected = current[CONF_CONNECTION_SOURCE]
+        if selected not in sources:
+            sources[selected] = f"{selected} (unavailable)"
+
+        schema = OPTIONS_SCHEMA.extend(
+            {vol.Required(CONF_CONNECTION_SOURCE): vol.In(sources)}
+        )
+        if user_input is not None:
+            try:
+                validated = schema(user_input)
+            except vol.Invalid as err:
+                field = err.path[0] if err.path else "base"
+                if field == CONF_UPDATE_INTERVAL:
+                    errors[field] = "invalid_update_interval"
+                elif field == CONF_CONNECTION_SOURCE:
+                    errors[field] = "invalid_connection_source"
+                else:
+                    errors["base"] = "invalid_connection_options"
+            else:
+                self._options = {**self.config_entry.options, **validated}
+                self._options[CONF_KEEP_CONNECTION] = False
+                if validated[CONF_CONNECTION_SOURCE] != CONNECTION_SOURCE_AUTOMATIC:
+                    return await self.async_step_retention()
+                return self.async_create_entry(data=self._options)
+            current.update(
+                {key: value for key, value in user_input.items() if key in current}
+            )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(schema, current),
+            errors=errors,
+        )
+
+    async def async_step_retention(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Offer connection retention when a local adapter is selected."""
+        if (
+            self._options is None
+            or self._options[CONF_CONNECTION_SOURCE] == CONNECTION_SOURCE_AUTOMATIC
+        ):
+            return self.async_abort(reason="retention_unavailable")
+
+        errors: dict[str, str] = {}
+        schema = vol.Schema({vol.Required(CONF_KEEP_CONNECTION): bool})
+        if user_input is not None:
+            try:
+                validated = schema(user_input)
+            except vol.Invalid:
+                errors[CONF_KEEP_CONNECTION] = "invalid_keep_connection"
+            else:
+                return self.async_create_entry(data={**self._options, **validated})
+
+        current = {
+            CONF_KEEP_CONNECTION: self.config_entry.options.get(
+                CONF_KEEP_CONNECTION, False
             )
         }
         return self.async_show_form(
-            step_id="init",
-            data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, current),
+            step_id="retention",
+            data_schema=self.add_suggested_values_to_schema(schema, current),
+            errors=errors,
         )

@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_PAIR_KEY, CONF_SERIAL_NUMBER, DOMAIN
+from .const import CONF_CONNECTION_SOURCE, CONF_PAIR_KEY, CONF_SERIAL_NUMBER, DOMAIN
 
 CONFIG_TO_REDACT = {CONF_ADDRESS, CONF_NAME, CONF_PAIR_KEY, CONF_SERIAL_NUMBER}
 STATE_TO_REDACT = {"key_01", "key_0e", CONF_SERIAL_NUMBER}
@@ -20,7 +20,7 @@ async def async_get_config_entry_diagnostics(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     return {
         "config_entry": async_redact_data(dict(entry.data), CONFIG_TO_REDACT),
-        "options": dict(entry.options),
+        "options": async_redact_data(dict(entry.options), {CONF_CONNECTION_SOURCE}),
         "connected": coordinator.device.is_connected,
         "state": async_redact_data(dict(coordinator.data or {}), STATE_TO_REDACT),
     }

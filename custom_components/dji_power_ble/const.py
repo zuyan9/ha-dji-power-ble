@@ -8,6 +8,10 @@ CONF_NAME = "name"
 CONF_MODEL = "model"
 CONF_SERIAL_NUMBER = "serial_number"
 CONF_UPDATE_INTERVAL = "update_interval"
+CONF_CONNECTION_SOURCE = "connection_source"
+CONF_KEEP_CONNECTION = "keep_connection"
+
+CONNECTION_SOURCE_AUTOMATIC = "automatic"
 
 DEFAULT_UPDATE_INTERVAL = 5
 MIN_UPDATE_INTERVAL = 1

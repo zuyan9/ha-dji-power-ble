@@ -79,11 +79,29 @@
     "step": {
       "init": {
         "title": "DJI Power options",
-        "description": "Choose how often the latest BLE telemetry is published to Home Assistant. The station is still sampled roughly once per second.",
+        "description": "Choose how often readings are published to Home Assistant and which Bluetooth adapter connects to this station. Automatic allows local adapters and Bluetooth proxies. Selecting a local adapter prevents fallback to other adapters or proxies. Update interval and retention changes apply without reconnecting. Changing the adapter disconnects the station and requires fresh authentication.",
         "data": {
-          "update_interval": "Home Assistant update interval (seconds)"
+          "update_interval": "Home Assistant update interval (seconds)",
+          "connection_source": "Bluetooth connection source"
+        }
+      },
+      "retention": {
+        "title": "Keep the local Bluetooth connection",
+        "description": "Keep this station connected through Home Assistant Core restarts and integration reloads using the same local adapter. BlueZ and the adapter must stay running. Changing this option does not disconnect the station; turning it off restores normal disconnection on later restarts and reloads. Host reboots, Bluetooth resets, loss of range, disabling or removing the entry still disconnect it.",
+        "data": {
+          "keep_connection": "Keep connection during HA restarts and reloads"
         }
       }
+    },
+    "error": {
+      "adapters_unavailable": "Could not list local Bluetooth adapters. You can keep the current selection or use Automatic.",
+      "invalid_update_interval": "Enter an update interval from 1 to 60 seconds.",
+      "invalid_connection_source": "Select Automatic or one of the listed local Bluetooth adapters.",
+      "invalid_keep_connection": "Select whether to keep the Bluetooth connection.",
+      "invalid_connection_options": "Choose the connection source first, then configure retention if it is supported."
+    },
+    "abort": {
+      "retention_unavailable": "Connection retention requires a selected local Bluetooth adapter."
     }
   },
   "entity": {
