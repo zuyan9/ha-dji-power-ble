@@ -168,11 +168,17 @@ class StationClient:
 
     is_connected = True
 
-    def __init__(self, device, *, encrypted=True, challenge=None, result=b"\x00" * 5):
+    def __init__(
+        self, device, *, encrypted=True, challenge=None, result=b"\x00" * 5,
+        auth_responses=None,
+    ):
         self.device = device
         self.encrypted = encrypted
         self.challenge = challenge if challenge is not None else b"\x00\x11\x22\x33\x44"
         self.result = result
+        self.auth_responses = (
+            iter(auth_responses) if auth_responses is not None else None
+        )
         self.requests = []
         self.wire_requests = []
 
@@ -197,7 +203,9 @@ class StationClient:
         )
         self.requests.append((request.command_id, payload))
         if request.command_id == duml.AUTH_COMMAND:
-            if payload == b"\x00":
+            if self.auth_responses is not None:
+                reply = next(self.auth_responses)
+            elif payload == b"\x00":
                 reply = self.challenge
             else:
                 assert payload == b"\x01\x11\x22\x33\x44" + b"ab" * 16 + b"\x00"
@@ -946,6 +954,17 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         device._write_characteristic = object()
         return device, client
 
+    def _connecting_station(self, *args, **kwargs):
+        device, client = self._station(*args, **kwargs)
+        device._client = None
+        device._write_characteristic = None
+        client.services = FakeGattServices(FakeGattService(*DEFAULT_GATT_LAYOUT))
+        client.start_notify = AsyncMock()
+        client.disconnect = AsyncMock()
+        device._establish = AsyncMock(return_value=client)
+        device.refresh_config = AsyncMock()
+        return device, client
+
     async def test_power_1000_auth_config_set_and_fragmented_pushes(self):
         device, client = self._station()
         with self.assertLogs(device_module.__name__, level="DEBUG") as logs:
@@ -1011,10 +1030,177 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_encrypted_key_rejection_remains_an_authentication_error(self):
         device, client = self._station(result=b"\x02" + b"\x00" * 4)
         with self.assertRaisesRegex(
-            device_module.DjiPowerAuthenticationError, "rejected the pair key"
+            device_module.DjiPowerAuthenticationError,
+            r"station rejected authentication \(status=02\)",
         ):
             await device._authenticate()
         self.assertEqual(len(client.requests), 2)
+
+    async def test_status_03_restarts_handshake_with_fresh_nonce_and_sequence(self):
+        old_nonce, new_nonce = bytes.fromhex("11223344"), bytes.fromhex("55667788")
+        for model in (
+            "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 1000 Mini",
+            "DJI Power 2000",
+        ):
+            with self.subTest(model=model):
+                device, client = self._station(
+                    model, encrypted=model == "DJI Power 1000",
+                    auth_responses=[
+                        b"\x00" + old_nonce, b"\x03" + bytes(4) + b"extension",
+                        b"\x00" + new_nonce, bytes(5),
+                    ],
+                )
+                send = client.send
+
+                def send_with_stale_reply(
+                    command, payload, *, sequence=0, flags=0, send=send, client=client,
+                ):
+                    if len(client.wire_requests) == 3:
+                        send(
+                            duml.AUTH_COMMAND, bytes(5),
+                            sequence=client.wire_requests[1].sequence, flags=0x80,
+                        )
+                    send(command, payload, sequence=sequence, flags=flags)
+
+                client.send = send_with_stale_reply
+                with self.assertLogs(device_module.__name__, level="DEBUG") as logs:
+                    await device._authenticate()
+
+                self.assertEqual(
+                    client.requests,
+                    [
+                        (duml.AUTH_COMMAND, b"\x00"),
+                        (duml.AUTH_COMMAND, b"\x01" + old_nonce + b"ab" * 16 + b"\x00"),
+                        (duml.AUTH_COMMAND, b"\x00"),
+                        (duml.AUTH_COMMAND, b"\x01" + new_nonce + b"ab" * 16 + b"\x00"),
+                    ],
+                )
+                self.assertEqual(len({p.sequence for p in client.wire_requests}), 4)
+                self.assertIs(device._client, client)
+                self.assertEqual(device._pending, {})
+                output = "\n".join(logs.output)
+                for secret in (old_nonce.hex(), new_nonce.hex(), "ab" * 16):
+                    self.assertNotIn(secret, output)
+
+    async def test_persistent_status_03_stops_after_one_fresh_handshake(self):
+        for encrypted in (False, True):
+            with self.subTest(encrypted=encrypted):
+                device, client = self._connecting_station(
+                    "DJI Power 1000" if encrypted else "DJI Power 2000",
+                    encrypted=encrypted, result=b"\x03" + bytes(4),
+                )
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerAuthenticationError,
+                    r"station rejected authentication \(status=03\)",
+                ):
+                    await device.connect()
+                self.assertEqual(len(client.requests), 4)
+                self.assertIsNone(device._client)
+                self.assertEqual(device._pending, {})
+                client.disconnect.assert_awaited_once()
+                device._establish.assert_awaited_once()
+                device.refresh_config.assert_not_awaited()
+
+    async def test_other_or_incomplete_check_status_does_not_retry(self):
+        for result in (
+            b"", b"\x01" + bytes(4), b"\x02" + bytes(4), b"\xff" + bytes(4),
+            *(b"\x03" + bytes(length) for length in range(4)),
+        ):
+            with self.subTest(result=result):
+                device, client = self._station(
+                    "DJI Power 2000", encrypted=False, result=result
+                )
+                status = result[:1].hex() or "missing"
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerAuthenticationError,
+                    rf"station rejected authentication \(status={status}\)",
+                ):
+                    await device._authenticate()
+                self.assertEqual(len(client.requests), 2)
+
+    async def test_retry_rejects_invalid_new_challenge_before_sending_key(self):
+        for challenge in (b"", b"\x00" * 4, b"\x03" + bytes(4)):
+            with self.subTest(challenge=challenge):
+                device, client = self._station(
+                    "DJI Power 2000", encrypted=False, auth_responses=[
+                        b"\x00\x11\x22\x33\x44", b"\x03" + bytes(4), challenge,
+                    ],
+                )
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerAuthenticationError, "invalid auth challenge"
+                ):
+                    await device._authenticate()
+                self.assertEqual(len(client.requests), 3)
+                self.assertEqual(client.requests[-1], (duml.AUTH_COMMAND, b"\x00"))
+
+    async def test_undecodable_key_check_does_not_retry(self):
+        self.device._request = AsyncMock(side_effect=[
+            self._auth_response(b"\x00\x11\x22\x33\x44"),
+            duml.DumlPacket(
+                0xAB, 0x02, 2, 0x86, duml.POWER_COMMAND_SET, duml.AUTH_COMMAND,
+                b"\x03" + bytes(15),
+            ),
+        ])
+        with self.assertRaisesRegex(device_module.DjiPowerError, "cannot decode"):
+            await self.device._authenticate()
+        self.assertEqual(self.device._request.await_count, 2)
+
+    async def test_short_successful_key_check_remains_accepted(self):
+        device, client = self._station(result=b"\x00")
+        await device._authenticate()
+        self.assertEqual(len(client.requests), 2)
+
+    async def test_interrupted_handshake_retry_cleans_up_connection(self):
+        for request_number in (3, 4):
+            for failure in ("cancel", "deadline", "disconnect"):
+                with self.subTest(request_number=request_number, failure=failure):
+                    device, client = self._connecting_station(auth_responses=[
+                        b"\x00\x11\x22\x33\x44", b"\x03" + bytes(4),
+                        b"\x00\x55\x66\x77\x88", bytes(5),
+                    ])
+                    started = asyncio.Event()
+                    write = client.write_gatt_char
+                    requests = []
+
+                    async def interrupt(
+                        uuid, value, *, response, requests=requests,
+                        request_number=request_number, started=started,
+                        failure=failure, device=device, client=client, write=write,
+                    ):
+                        requests.append(duml.DumlPacket.decode(value))
+                        if len(requests) == request_number:
+                            started.set()
+                            if failure == "disconnect":
+                                device._on_disconnect(client)
+                                return
+                            await asyncio.Event().wait()
+                        await write(uuid, value, response=response)
+
+                    client.write_gatt_char = interrupt
+                    with patch.object(
+                        device_module, "DEFAULT_CONNECT_TIMEOUT",
+                        0.05 if failure == "deadline" else 1,
+                    ):
+                        task = asyncio.create_task(device.connect())
+                        await asyncio.wait_for(started.wait(), 1)
+                        if failure == "cancel":
+                            task.cancel()
+                        error = (
+                            asyncio.CancelledError if failure == "cancel"
+                            else device_module.DjiPowerError
+                        )
+                        with self.assertRaises(error):
+                            await task
+
+                    self.assertEqual(len(requests), request_number)
+                    self.assertIsNone(device._client)
+                    self.assertIsNone(device._write_characteristic)
+                    self.assertEqual(device._pending, {})
+                    self.assertIsNone(device._expansion_refresh_task)
+                    device.refresh_config.assert_not_awaited()
+                    device._establish.assert_awaited_once()
+                    if failure != "disconnect":
+                        client.disconnect.assert_awaited_once()
 
     async def test_undecodable_auth_is_not_interpreted_as_status(self):
         challenge = duml.encrypt_power_1000_payload(b"\x00\x11\x22\x33\x44")
