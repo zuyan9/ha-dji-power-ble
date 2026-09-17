@@ -67,6 +67,13 @@ separate Home Assistant device linked to the station. Pack serial numbers identi
 devices and entities independently of connection order. Missing packs retain their
 registry entries and history with unavailable sensors, including after a reload.
 
+On these same models, optional SDC switch and car-charger configuration is first read
+in the background after setup, then refreshed with the packs every 30 seconds. The
+entity platforms discover controls from supported reported rows, identified by
+interface, port sequence, and charger type. Missing or invalid snapshots invalidate
+the affected controls without removing their entities. These controls remain on the
+station's device and use its existing connection.
+
 ## Writes and consistency
 
 AC output uses keyed SET entries `0x0D` and `0x0E`. Charge limits use key `0x05`; the
@@ -74,6 +81,12 @@ builder changes only the requested limit fields and preserves the station's othe
 values. Every SET must return a zero status for every requested key. The client then
 polls configuration until the requested state is observed, preventing a successful GATT
 write from being mistaken for an applied setting.
+
+AC and SDC switches read and preserve the complete switch list before editing their
+own row. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
+chargers, and validate the selected setting against fresh reported bounds. All three
+paths require a fresh matching row after the keyed acknowledgement. Optional reads
+and writes share the operation lock, including the confirmation period.
 
 Writes are serialized with an operation lock. They remain experimental on models that
 do not yet have model-specific hardware validation; see the support table in the

@@ -22,12 +22,13 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
             last_update_success=True,
             data={"power_adjustment": "Manual"},
             async_set_power_adjustment=AsyncMock(),
+            async_add_listener=Mock(return_value=Mock()),
         )
         self.entity = select.DjiPowerAdjustmentSelect(self.coordinator)
 
     async def test_only_power_2000_gets_selector_before_config_arrives(self) -> None:
         self.coordinator.data = {}
-        entry = types.SimpleNamespace(entry_id="station")
+        entry = types.SimpleNamespace(entry_id="station", async_on_unload=Mock())
         hass = types.SimpleNamespace(
             data={"dji_power_ble": {"station": self.coordinator}}
         )

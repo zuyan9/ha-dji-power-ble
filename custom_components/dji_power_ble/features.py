@@ -8,11 +8,15 @@ class ModelFeature(StrEnum):
 
     TARIFF_SCHEDULE = "tariff_schedule"
     TOU_POWER_CONTROL = "tou_power_control"
+    SDC_CONTROLS = "sdc_controls"
 
 
 _FEATURE_MODELS = {
     ModelFeature.TARIFF_SCHEDULE: frozenset({"DJI Power 2000"}),
     ModelFeature.TOU_POWER_CONTROL: frozenset({"DJI Power 2000"}),
+    ModelFeature.SDC_CONTROLS: frozenset(
+        {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
+    ),
 }
 
 

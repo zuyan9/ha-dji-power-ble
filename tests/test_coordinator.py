@@ -15,6 +15,18 @@ LOADED = object()
 CONTROL_WRITES = (
     ("set_ac", (True,), {}, {"ac_enabled": False}, {"ac_enabled": True}),
     (
+        "set_sdc", (5, 1, False), {},
+        {"power_switches": [{"type": 5, "seq": 1, "sw": 1}]},
+        {"power_switches": [{"type": 5, "seq": 1, "sw": 2}]},
+    ),
+    (
+        "set_car_charger", (5, 1, 4), {"recharge_power_w": 450},
+        {"car_chargers": [{"interface_type": 5, "seq": 1, "type": 4,
+                            "p_from_car_v": 400}]},
+        {"car_chargers": [{"interface_type": 5, "seq": 1, "type": 4,
+                            "p_from_car_v": 450}]},
+    ),
+    (
         "set_charge_limits",
         (),
         {"discharge_limit": 10, "recharge_limit": 80},
