@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Use the same workflow across models for discovery, authentication, missing readings,
+The same workflow should work across hardware models for discovery, authentication, missing readings,
 and control problems. Start with HA logs; collect BLE traffic when logs are insufficient.
 
 | Where the problem occurs | Use |
@@ -11,7 +11,7 @@ and control problems. Start with HA logs; collect BLE traffic when logs are insu
 
 ## Home Assistant logs
 
-Close DJI Home. In **Settings → Devices & services → DJI Power**, enable debug logging,
+Close DJI Home app. In HA **Settings → Devices & services → DJI Power**, enable debug logging,
 reproduce once, then disable logging and download the log. Temporarily disable the
 entry if it keeps reloading. See [HA's logging instructions](https://www.home-assistant.io/docs/configuration/troubleshooting/#debug-logs-and-diagnostics).
 
@@ -24,11 +24,7 @@ logger:
     custom_components.dji_power_ble: debug
 ```
 
-For authentication, `DJI Power auth response` lines include the stage, status byte,
-and payload length without credentials or identifiers. `start_bind` precedes sending
-the key; `check_secret_key` checks it. These observations do not establish the cause
-of failure across all firmware versions. Restart HA after updating integration files
-to get newly added logging.
+Restart HA after updating integration files to get newly added logging.
 
 ## Local BLE tools
 
@@ -41,10 +37,9 @@ python3 -m venv .venv
 .venv/bin/python -m pip install "bleak>=3.0" "bleak-retry-connector>=3.5" "cryptography>=44.0.0"
 ```
 
-On Windows, use `.venv\Scripts\python.exe`. The CLI needs a local Bluetooth adapter;
-it cannot use ESPHome proxies or inspect HA's discovery cache.
+The CLI needs a local Bluetooth adapter; it cannot use ESPHome proxies or inspect HA's discovery cache.
 
-Disable the station's HA entry, close DJI Home, and keep the station nearby:
+Disable the station's HA entry, close DJI Home app, and keep the station nearby:
 
 ```bash
 .venv/bin/python scripts/dji_power_debug.py scan --output artifacts/scan.jsonl
@@ -54,31 +49,42 @@ python3 scripts/dji_power_debug.py decode artifacts/station.jsonl \
   --output artifacts/report.jsonl
 ```
 
-Use the identifier printed by `scan` (a UUID on macOS). `capture` prompts for an
-existing pair key, authenticates, reads configuration, and listens for 30 seconds.
-It does not change settings, link accounts, or update firmware. Failures retain partial
-captures. Re-enable HA afterward. Run any command with `--help` for options.
+Use the identifier returned by `scan` (a UUID on macOS). The `capture` command prompts 
+for an existing pairing key, authenticates, reads the device configuration, and listens 
+for 30 seconds. It will not modify settings, link accounts, or update firmware. If it 
+fails, partial captures are retained. Remember to re-enable HA afterward. Run any 
+command with `--help` to view available options.
 
-Capture is not filtered by known model or command IDs; unknown payloads remain
-available for inspection. Live sessions still depend on the currently implemented
-protocol. The decoder reports checksum-valid DUML frames, not every Bluetooth packet.
+Captures are not filtered by known model or command IDs, so unknown payloads remain 
+available for inspection. However, live sessions still depend on the currently implemented 
+protocol. The decoder only reports checksum-valid DUML frames, not raw Bluetooth packets.
 
-## DJI Home captures
+## DJI Home app captures
 
-On Android, disable the HA entry, enable **Bluetooth HCI snoop log** in Developer
-options, restart Bluetooth, and reproduce once in DJI Home. For a BLE-only comparison,
-disable Wi-Fi/mobile data and confirm fresh readings still arrive.
+Capturing Android Bluetooth HCI logs allows us to compare the integration's connection 
+and authentication process with the DJI Home app. Make sure to use a station already linked to DJI Home.
 
-Export the full `btsnoop_hci.log` using the phone's bug-report facility, then disable
-HCI logging. Availability varies by phone; see [Android's instructions](https://source.android.com/docs/core/connect/bluetooth/verifying_debugging#debugging-with-logs).
-Keep the bug report private. Extract the HCI file locally and pass it to the same
-`decode` command. Supported inputs are CLI JSONL and H4 btsnoop v1/link type 1002;
-PCAP, ZIP files, and enhanced ATT are not supported. An empty report does not prove
-the device sent nothing.
+1. Make sure the power station is set up in the DJI Home app. Disable its Home Assistant entry.
+2. Turn Wi-Fi and cellular data off on the phone, keeping Bluetooth on. This prevents DJI Home app from using cloud.
+3. Enable Android Developer options (usually tapping Build number seven times under Settings → About phone).
+4. Enable **Bluetooth HCI snoop log** in Developer options. Select **Enabled** or **Full**.
+   Turn Bluetooth off and back on before opening the app so logging captures. 
+   Disconnect other Bluetooth devices on the phone.
+5. Open DJI Home app. It should connect to the station via Bluetooth.
+   It might say "Network Unavailable", that's expected.
+   Navigate in the app, make sure we have some readings, we can change some power station settings too.
+6. Use **Developer options → Take bug report** (choose **Full** if available). Wait for the completion notification
+   and export the zip file. See [Android's bug-report guide](https://developer.android.com/studio/debug/bug-report#capture).
+7. Close DJI Home, disable Bluetooth HCI logging, turn Bluetooth off and back on.
+   Turn phone's WiFi and Cellular back on; re-enable the Home Assistant entry.
+8. Extract the zip file and search for `btsnoop_hci.log`, often under `FS/data/misc/bluetooth/logs/`. 
+   Attach this log file to the Github issue, or share it privately with the maintainer
+   (since this may contain sensitive information such as pair_key and device identity).
+9. Reset Power Station and set it up again in DJI Home app, to refresh the pair key.
 
 ## Inspect and share
 
-Default reports contain metadata, not names, addresses, credentials, or payloads.
+Default HA reports contain metadata, not names, addresses, credentials, or payloads.
 Encrypted authentication responses are labeled `status: encrypted`; their first wire
 byte is ciphertext and cannot be interpreted as an authentication status. Capture uses
 the advertised model to select the same transport handling as the integration.
