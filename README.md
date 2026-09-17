@@ -22,7 +22,7 @@ used only during setup to retrieve the device's local credential.
 - Input, output, AC, USB-A, USB-C, SDC, SDC Lite, 12 V, and XT60 power
 - Connected expansion-battery devices with battery level and pack diagnostics
 - Discharge and recharge limit controls
-- Power 2000 discharge/recharge watts control
+- Power 2000 discharge/recharge watts control, and [electricity price periods](docs/time-periods.md) for Scheduled Periods and TOU
 - Firmware, timezone, display, reserve, and cloud-status diagnostics
 - Automatic discovery, reconnect-on-advertisement, and sanitized HA diagnostics
 - Persistent authenticated BLE connection with live telemetry pushes
@@ -77,7 +77,7 @@ Only the pair key and device metadata are stored. Normal operation is local BLE.
 The protocol tests are deterministic and require neither Home Assistant nor Bluetooth:
 
 ```bash
-python3 -m pip install "cryptography>=44.0.0" aiohttp
+python3 -m pip install "cryptography>=44.0.0" aiohttp voluptuous
 python3 -m unittest discover -v
 uvx ruff check custom_components tests scripts
 ```

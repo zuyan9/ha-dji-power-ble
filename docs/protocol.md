@@ -214,8 +214,26 @@ The Power 2000 **Power adjustment** selector changes only `chg_mode` (byte 17):
 configuration and preserves both watt setpoints and all other settings. Automatic
 also requires a linked smart meter (`src_dev_id`); link it in DJI Home first.
 Both watt numbers are available only in Manual with valid reported limits.
-Initial grid installation, Time of Use selection, tariff configuration, and meter
-linking remain in DJI Home. These controls do not construct missing configuration.
+Initial grid installation, Time of Use selection, and meter linking remain in DJI
+Home. These controls do not construct missing configuration.
+
+The Power 2000 **Set electricity price time periods** action replaces the complete
+tariff schedule in key `0x16`. Scheduled Periods and Time of Use share this list.
+Each 10-byte period contains a type, a recurrence type, a 32-bit weekday mask, and
+four bytes for the start/end hours and minutes. The list uses outer key `0x1016`
+with individual key `0x0016` records on writes. On reads, each nested record is
+decoded using the tariff schema, independent of its child tag. The integration
+validates up to eight periods per tariff type, rejects overlaps across midnight
+and week boundaries, and uses
+the station's timezone without changing it. An explicit empty list is distinct
+from an omitted or malformed key.
+
+Schedule writes require fresh schedule and Eco configuration, preserve the selected
+mode, and include the same `0x0E` rules record as AC output writes. Both keys require
+successful acknowledgements, followed by matching tariff readback. Clearing the
+last period is rejected while scheduled or grid operation is active. Schedule
+entities, reads, and writes are restricted to Power 2000. The codec and offline
+confirmation tests do not establish physical Power 2000 schedule execution.
 
 A `0x63` response contains a four-byte status for each requested key. Every key must be
 present with status zero. An acknowledgement means the command was accepted, not that
@@ -225,9 +243,10 @@ requested values appear or the operation times out.
 The first confirmation read follows the acknowledgement immediately. If the reported
 values do not match, the client makes up to eight further attempts, waiting two
 seconds between attempts. Each read also has a transport timeout. AC output is
-confirmed with an explicit `0x0D` GET, percentage limits with `0x05`, and Power 2000
-controls with `0x18`; unrelated expansion-battery or configuration reads are excluded
-from write confirmation. Cached values cannot substitute for missing readback fields.
+confirmed with an explicit `0x0D` GET, percentage limits with `0x05`, Power 2000
+power controls with `0x18`, and tariff periods with `0x16`. Unrelated expansion-battery
+or configuration reads are excluded from write confirmation. Cached values cannot
+substitute for missing readback fields.
 Writes remain serialized until confirmation completes, and confirmed values are
 published immediately regardless of the Home Assistant update interval.
 

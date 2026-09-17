@@ -42,6 +42,14 @@ _REAPPEAR_CALLBACKS_KEY = f"{DOMAIN}_reappear_callbacks"
 _MAX_ADVERTISEMENT_AGE = 60.0
 
 
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Register actions even when no station is currently loaded."""
+    from .services import async_setup_services
+
+    async_setup_services(hass)
+    return True
+
+
 def _register_reappear_callback(
     hass: HomeAssistant, entry: ConfigEntry, address: str
 ) -> None:

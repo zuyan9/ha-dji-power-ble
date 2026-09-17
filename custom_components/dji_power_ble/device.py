@@ -32,6 +32,7 @@ from .duml import (
     SET_COMMAND,
     START_BIND,
     TELEMETRY_COMMAND,
+    TIME_PERIODS_KEY,
     WRITE_UUID,
     DumlPacket,
     DumlStream,
@@ -41,13 +42,17 @@ from .duml import (
     build_charge_power_set_payload,
     build_discharge_power_set_payload,
     build_power_adjustment_set_payload,
+    build_time_periods_set_payload,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
     normalize_pair_key,
+    normalize_time_periods,
     parse_report,
     parse_set_ack,
     parse_telemetry,
+    validate_time_periods_mode,
 )
+from .features import ModelFeature, supports_feature
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -178,7 +183,10 @@ class DjiPowerDevice:
                 self._merge_data({"hms_raw": self._decode_payload(packet).hex()})
         except ProtocolError as error:
             if packet.command_id == TELEMETRY_COMMAND:
-                self._merge_data({"expansion_batteries": None})
+                invalidated = {"expansion_batteries": None}
+                if supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
+                    invalidated.update(time_periods=None, key_16=None)
+                self._merge_data(invalidated)
             _LOGGER.debug(
                 "%s: ignored malformed 0x%02x push: %s",
                 self.address,
@@ -379,7 +387,7 @@ class DjiPowerDevice:
         """Fetch and publish a keyed configuration snapshot."""
         await self._read_expansion_batteries()
         await self._read_config(0x04)
-        if self.model == "DJI Power 2000":
+        if supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             try:
                 await self._read_eco_mode()
             except DjiPowerDisconnectedError:
@@ -387,6 +395,13 @@ class DjiPowerDevice:
             except DjiPowerError as error:
                 # Older firmware may omit or reject this optional setting.
                 _LOGGER.debug("Eco-mode configuration unavailable: %s", error)
+        if supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
+            try:
+                await self._read_time_periods()
+            except DjiPowerDisconnectedError:
+                raise
+            except DjiPowerError as error:
+                _LOGGER.debug("Time-period configuration unavailable: %s", error)
 
     def _start_expansion_refresh(self) -> None:
         """Refresh optional pack telemetry using the station's existing session."""
@@ -477,6 +492,50 @@ class DjiPowerDevice:
                 return
         raise DjiPowerError("station did not report the requested eco-mode values")
 
+    async def _read_time_periods(self) -> list[dict[str, object]]:
+        """Require a valid fresh schedule, including an explicit empty list."""
+        try:
+            update = await self._read_config(TIME_PERIODS_KEY)
+            periods = update.get("time_periods")
+            if not isinstance(periods, list):
+                raise DjiPowerError("station omitted or returned invalid time periods")
+        except DjiPowerDisconnectedError:
+            raise
+        except (DjiPowerError, BleakError, EOFError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            self._merge_data({"time_periods": None, "key_16": None})
+            raise DjiPowerError(str(error)) from error
+        return periods
+
+    async def set_time_periods(self, periods: object) -> None:
+        """Replace Power 2000 tariff periods and confirm a fresh matching list."""
+        if not supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
+            raise DjiPowerError("time-period control is only enabled for Power 2000")
+        try:
+            requested = normalize_time_periods(periods)
+        except ProtocolError as error:
+            raise DjiPowerError(str(error)) from error
+        async with self._operation_lock:
+            current = await self._read_time_periods()
+            eco_mode = await self._read_eco_mode()
+            try:
+                validate_time_periods_mode(eco_mode, clearing=not requested)
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            if requested == current:
+                return
+            await self._set(
+                build_time_periods_set_payload(requested),
+                (TIME_PERIODS_KEY, RULES_KEY),
+            )
+            for attempt in range(READBACK_RETRIES + 1):
+                if attempt:
+                    await asyncio.sleep(READBACK_RETRY_INTERVAL)
+                if await self._read_time_periods() == requested:
+                    return
+            raise DjiPowerError("station did not report the requested time periods")
+
     async def _set(self, payload: bytes, expected_keys: tuple[int, ...]) -> None:
         response = await self._request(SET_COMMAND, payload)
         try:
@@ -550,7 +609,7 @@ class DjiPowerDevice:
 
     async def set_charge_power(self, watts: int) -> None:
         """Set Power 2000 manual recharge watts and require matching readback."""
-        if self.model != "DJI Power 2000":
+        if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError(
                 "charge-power control is only enabled for Power 2000"
             )
@@ -567,7 +626,7 @@ class DjiPowerDevice:
 
     async def set_discharge_power(self, watts: int) -> None:
         """Set Power 2000 manual discharge watts and require matching readback."""
-        if self.model != "DJI Power 2000":
+        if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError(
                 "discharge-power control is only enabled for Power 2000"
             )
@@ -584,7 +643,7 @@ class DjiPowerDevice:
 
     async def set_power_adjustment(self, mode: str) -> None:
         """Select Automatic/Manual power adjustment and confirm its readback."""
-        if self.model != "DJI Power 2000":
+        if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError(
                 "power-adjustment control is only enabled for Power 2000"
             )

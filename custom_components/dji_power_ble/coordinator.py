@@ -144,3 +144,11 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         except DjiPowerError as error:
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
+
+    async def async_set_time_periods(self, periods: object) -> None:
+        """Replace tariff periods and publish the confirmed station settings."""
+        try:
+            await self.device.set_time_periods(periods)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
