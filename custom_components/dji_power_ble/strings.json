@@ -79,16 +79,16 @@
     "step": {
       "init": {
         "title": "DJI Power options",
-        "description": "Changes to the update interval or connection retention apply without reconnecting.",
+        "description": "Change plugin options.",
         "data": {
           "update_interval": "Home Assistant update interval",
           "connection_source": "Bluetooth connection source",
           "keep_connection": "Keep connection during HA restarts and reloads"
         },
         "data_description": {
-          "update_interval": "Minimum time between routine Home Assistant updates. Set to 0 for immediate updates. Lower values may increase database writes.",
-          "connection_source": "Automatic allows local adapters and Bluetooth proxies. Selecting a local adapter prevents fallback to other adapters or proxies. Changing the source requires a new connection and authentication.",
-          "keep_connection": "Requires a selected local adapter; Automatic turns this off. Keeps the connection through HA Core restarts and integration reloads while Bluetooth stays running. Host reboots, Bluetooth resets, or loss of range still disconnect it."
+          "update_interval": "Set to 0 for immediate updates.",
+          "connection_source": "Automatic allows local adapters and Bluetooth proxies.",
+          "keep_connection": "Require local adapter, keep BLE connection through HA Core restarts and reloads."
         }
       }
     },
