@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import logging
+from copy import deepcopy
 from typing import Any
 
 import voluptuous as vol
@@ -27,12 +28,16 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS, CONF_EMAIL, CONF_NAME, CONF_PASSWORD
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    TimeSelector,
 )
 
 from .cloud import (
@@ -58,7 +63,14 @@ from .const import (
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
 )
-from .duml import ProtocolError, normalize_pair_key, parse_manufacturer_data
+from .duml import (
+    TIME_PERIOD_DAYS,
+    ProtocolError,
+    normalize_pair_key,
+    normalize_time_periods,
+    parse_manufacturer_data,
+)
+from .features import ModelFeature, supports_feature
 from .local_ble import async_local_adapters
 
 _LOGGER = logging.getLogger(__name__)
@@ -410,10 +422,42 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 class DjiPowerOptionsFlow(OptionsFlow):
     """Configure runtime behavior for a DJI Power station."""
 
+    def __init__(self) -> None:
+        self._periods: list[dict[str, object]] | None = None
+        self._original_periods: list[dict[str, object]] | None = None
+        self._edit_index: int | None = None
+
+    def _schedule_coordinator(self):
+        return self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+
+    def _supports_schedule(self) -> bool:
+        coordinator = self._schedule_coordinator()
+        model = (
+            coordinator.device.model
+            if coordinator is not None
+            else self.config_entry.data.get(CONF_MODEL)
+        )
+        return supports_feature(model, ModelFeature.TARIFF_SCHEDULE)
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage integration options."""
+        if user_input is None and self._supports_schedule():
+            return self.async_show_menu(
+                step_id="init", menu_options=["connection", "time_periods"]
+            )
+        return await self._async_connection_options(user_input, step_id="init")
+
+    async def async_step_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Change connection and update options."""
+        return await self._async_connection_options(user_input, step_id="connection")
+
+    async def _async_connection_options(
+        self, user_input: dict[str, Any] | None, *, step_id: str
+    ) -> FlowResult:
         errors: dict[str, str] = {}
         current = {
             CONF_UPDATE_INTERVAL: self.config_entry.options.get(
@@ -472,7 +516,237 @@ class DjiPowerOptionsFlow(OptionsFlow):
             )
 
         return self.async_show_form(
-            step_id="init",
+            step_id=step_id,
             data_schema=self.add_suggested_values_to_schema(schema, current),
             errors=errors,
         )
+
+    async def _async_load_periods(self) -> FlowResult | None:
+        """Guard every schedule step and load an independent draft once."""
+        if not self._supports_schedule():
+            return self.async_abort(reason="schedule_not_supported")
+        coordinator = self._schedule_coordinator()
+        if coordinator is None:
+            return self.async_abort(reason="station_unavailable")
+        if self._periods is None:
+            try:
+                periods = await coordinator.async_get_time_periods()
+                self._periods = normalize_time_periods(periods)
+            except (HomeAssistantError, ProtocolError) as err:
+                return self.async_show_form(
+                    step_id="time_periods",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "schedule_read_failed"},
+                    description_placeholders={"periods": "", "reason": str(err)},
+                )
+            self._original_periods = deepcopy(self._periods)
+        return None
+
+    @staticmethod
+    def _period_label(period: dict[str, object]) -> str:
+        kind = "Peak" if period["type"] == "peak" else "Off-peak"
+        days = period["days"]
+        recurrence = (
+            "Every day"
+            if days == list(TIME_PERIOD_DAYS)
+            else ", ".join(day.title() for day in days)
+        )
+        overnight = " (+1 day)" if period["end"] < period["start"] else ""
+        return (
+            f"{kind}: {recurrence}, {period['start']}–{period['end']}{overnight}"
+        )
+
+    def _periods_summary(self) -> str:
+        return "\n".join(
+            f"- {self._period_label(period)}" for period in self._periods or []
+        ) or "No periods."
+
+    async def async_step_time_periods(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Show the current draft and available editing actions."""
+        if result := await self._async_load_periods():
+            return result
+        actions = ["add_period"]
+        if self._periods:
+            actions.extend(["edit_period", "delete_period"])
+        actions.extend(["save_periods", "discard_periods"])
+        return self.async_show_menu(
+            step_id="time_periods",
+            menu_options=actions,
+            description_placeholders={
+                "periods": self._periods_summary(),
+                "reason": "",
+            },
+        )
+
+    async def async_step_add_period(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Append a period to the draft."""
+        return await self._async_period_form(user_input, step_id="add_period")
+
+    async def async_step_change_period(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Edit the selected draft period."""
+        if self._edit_index is None:
+            return await self.async_step_edit_period()
+        return await self._async_period_form(user_input, step_id="change_period")
+
+    async def _async_period_form(
+        self, user_input: dict[str, Any] | None, *, step_id: str
+    ) -> FlowResult:
+        if result := await self._async_load_periods():
+            return result
+        assert self._periods is not None
+        schema = vol.Schema(
+            {
+                vol.Required("type"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["peak", "off_peak"], translation_key="period_type"
+                    )
+                ),
+                vol.Required("days"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=list(TIME_PERIOD_DAYS),
+                        multiple=True,
+                        translation_key="weekdays",
+                    )
+                ),
+                vol.Required("start"): TimeSelector(),
+                vol.Required("end"): TimeSelector(),
+            }
+        )
+        current = (
+            deepcopy(self._periods[self._edit_index])
+            if step_id == "change_period"
+            else {"type": "off_peak", "days": list(TIME_PERIOD_DAYS)}
+        )
+        errors = {}
+        reason = ""
+        if user_input is not None:
+            try:
+                period = schema(user_input)
+                for field in ("start", "end"):
+                    time = period[field]
+                    if len(time) == 8 and time.endswith(":00"):
+                        period[field] = time[:5]
+                candidate = deepcopy(self._periods)
+                if step_id == "change_period":
+                    candidate[self._edit_index] = period
+                else:
+                    candidate.append(period)
+                self._periods = normalize_time_periods(candidate)
+            except (vol.Invalid, ProtocolError) as err:
+                errors["base"] = "invalid_period"
+                reason = str(err)
+                current.update(user_input)
+            else:
+                self._edit_index = None
+                return await self.async_step_time_periods()
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=self.add_suggested_values_to_schema(schema, current),
+            errors=errors,
+            description_placeholders={"reason": reason},
+        )
+
+    async def async_step_edit_period(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Select the period to edit."""
+        return await self._async_select_period(user_input, step_id="edit_period")
+
+    async def async_step_delete_period(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Remove a selected period from the draft."""
+        return await self._async_select_period(user_input, step_id="delete_period")
+
+    async def _async_select_period(
+        self, user_input: dict[str, Any] | None, *, step_id: str
+    ) -> FlowResult:
+        if result := await self._async_load_periods():
+            return result
+        if not self._periods:
+            return await self.async_step_time_periods()
+        choices = {
+            str(index): self._period_label(period)
+            for index, period in enumerate(self._periods)
+        }
+        schema = vol.Schema({vol.Required("period"): vol.In(choices)})
+        errors = {}
+        if user_input is not None:
+            try:
+                index = int(schema(user_input)["period"])
+            except vol.Invalid:
+                errors["period"] = "invalid_period_selection"
+            else:
+                if step_id == "delete_period":
+                    self._periods.pop(index)
+                    self._edit_index = None
+                    return await self.async_step_time_periods()
+                self._edit_index = index
+                return await self.async_step_change_period()
+        return self.async_show_form(
+            step_id=step_id, data_schema=schema, errors=errors
+        )
+
+    async def async_step_save_periods(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Review and save through the confirmed BLE write path."""
+        if result := await self._async_load_periods():
+            return result
+        reason = ""
+        if user_input is not None:
+            coordinator = self._schedule_coordinator()
+            try:
+                await coordinator.async_set_time_periods(
+                    deepcopy(self._periods),
+                    expected_periods=deepcopy(self._original_periods),
+                )
+            except HomeAssistantError as err:
+                if err.translation_key == "schedule_changed":
+                    return await self.async_step_schedule_changed()
+                reason = str(err)
+            else:
+                # This is a device write, not an options change or entry reload.
+                return self.async_abort(reason="schedule_saved")
+        return self.async_show_menu(
+            step_id="save_periods",
+            menu_options=["apply_periods", "time_periods"],
+            description_placeholders={
+                "periods": self._periods_summary(),
+                "reason": reason,
+            },
+        )
+
+    async def async_step_apply_periods(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Apply the draft after choosing Save schedule on the review screen."""
+        return await self.async_step_save_periods({})
+
+    async def async_step_schedule_changed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Reload a conflicting schedule only after explicit confirmation."""
+        if result := await self._async_load_periods():
+            return result
+        if user_input is not None:
+            self._periods = self._original_periods = None
+            self._edit_index = None
+            return await self.async_step_time_periods()
+        return self.async_show_form(
+            step_id="schedule_changed",
+            data_schema=vol.Schema({}),
+            description_placeholders={"periods": self._periods_summary()},
+        )
+
+    async def async_step_discard_periods(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Close the editor without saving the draft."""
+        return self.async_abort(reason="schedule_cancelled")

@@ -86,6 +86,10 @@ class DjiPowerDisconnectedError(DjiPowerError):
     """The BLE link disappeared during an operation."""
 
 
+class DjiPowerScheduleChangedError(DjiPowerError):
+    """The station schedule changed while a replacement was being edited."""
+
+
 StateCallback: TypeAlias = Callable[[dict[str, object]], None]
 DisconnectCallback: TypeAlias = Callable[[Exception | None], None]
 
@@ -764,12 +768,27 @@ class DjiPowerDevice:
             raise DjiPowerError(str(error)) from error
         return periods
 
-    async def set_time_periods(self, periods: object) -> None:
+    async def get_time_periods(self) -> list[dict[str, object]]:
+        """Read a fresh Power 2000 schedule without interrupting a write."""
+        if not supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
+            raise DjiPowerError("time periods are only enabled for Power 2000")
+        async with self._operation_lock:
+            # Return an independent normalized copy for editors to retain.
+            return normalize_time_periods(await self._read_time_periods())
+
+    async def set_time_periods(
+        self, periods: object, *, expected_periods: object | None = None
+    ) -> None:
         """Replace Power 2000 tariff periods and confirm a fresh matching list."""
         if not supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
             raise DjiPowerError("time-period control is only enabled for Power 2000")
         try:
             requested = normalize_time_periods(periods)
+            expected = (
+                normalize_time_periods(expected_periods)
+                if expected_periods is not None
+                else None
+            )
         except ProtocolError as error:
             raise DjiPowerError(str(error)) from error
         async with self._operation_lock:
@@ -781,6 +800,10 @@ class DjiPowerDevice:
                 raise DjiPowerError(str(error)) from error
             if requested == current:
                 return
+            if expected is not None and current != expected:
+                raise DjiPowerScheduleChangedError(
+                    "the station's time periods changed while you were editing"
+                )
             await self._set(
                 build_time_periods_set_payload(requested),
                 (TIME_PERIODS_KEY, RULES_KEY),

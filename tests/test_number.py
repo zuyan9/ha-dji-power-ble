@@ -37,6 +37,10 @@ class _DjiPowerError(Exception):
     pass
 
 
+class _DjiPowerScheduleChangedError(_DjiPowerError):
+    pass
+
+
 class _HomeAssistantError(Exception):
     pass
 
@@ -57,6 +61,7 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleTyp
             DjiPowerDevice=object,
             DjiPowerError=_DjiPowerError,
             DjiPowerAuthenticationError=_DjiPowerError,
+            DjiPowerScheduleChangedError=_DjiPowerScheduleChangedError,
         ),
         "homeassistant": _module("homeassistant"),
         "homeassistant.components": _module("homeassistant.components"),

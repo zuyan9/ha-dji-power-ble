@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import types
 import unittest
@@ -32,6 +33,9 @@ class _OptionsFlow:
     def async_show_form(self, **kwargs):
         return {"type": "form", **kwargs}
 
+    def async_show_menu(self, **kwargs):
+        return {"type": "menu", **kwargs}
+
     def async_create_entry(self, **kwargs):
         return {"type": "create_entry", **kwargs}
 
@@ -56,6 +60,51 @@ class _NumberSelector:
         )(value)
 
 
+class _SelectSelectorMode(StrEnum):
+    DROPDOWN = "dropdown"
+    LIST = "list"
+
+
+class _SelectSelector:
+    """Validate native selection choices without importing Home Assistant."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def __call__(self, value):
+        choices = [
+            option["value"] if isinstance(option, dict) else option
+            for option in self.config["options"]
+        ]
+        if self.config.get("multiple"):
+            return vol.All(list, [vol.In(choices)])(value)
+        return vol.In(choices)(value)
+
+
+class _TimeSelector:
+    """Accept minute/second clock strings as the HA time selector does."""
+
+    def __init__(self, config=None):
+        self.config = config or {}
+
+    def __call__(self, value):
+        if not isinstance(value, str) or not re.fullmatch(
+            r"(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?", value
+        ):
+            raise vol.Invalid("Invalid time")
+        return value
+
+
+class HomeAssistantError(Exception):
+    """Preserve HA's translated error details used by the options flow."""
+
+    def __init__(self, message=None, **kwargs):
+        super().__init__(message)
+        self.translation_key = kwargs.get("translation_key")
+        self.translation_domain = kwargs.get("translation_domain")
+        self.translation_placeholders = kwargs.get("translation_placeholders")
+
+
 def _module(name: str, **attributes) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attributes)
@@ -68,6 +117,11 @@ def _load_flow() -> types.ModuleType:
         NumberSelector=_NumberSelector,
         NumberSelectorConfig=dict,
         NumberSelectorMode=_NumberSelectorMode,
+        SelectSelector=_SelectSelector,
+        SelectSelectorConfig=dict,
+        SelectSelectorMode=_SelectSelectorMode,
+        TimeSelector=_TimeSelector,
+        TimeSelectorConfig=dict,
     )
     modules = {
         PACKAGE: _module(PACKAGE, __path__=[str(COMPONENT)]),
@@ -80,12 +134,6 @@ def _load_flow() -> types.ModuleType:
             DjiDevice=object,
             DjiRateLimited=Exception,
             DjiTwoFactorRequired=Exception,
-        ),
-        f"{PACKAGE}.duml": _module(
-            f"{PACKAGE}.duml",
-            ProtocolError=Exception,
-            normalize_pair_key=lambda value: value,
-            parse_manufacturer_data=lambda value: value,
         ),
         f"{PACKAGE}.local_ble": _module(
             f"{PACKAGE}.local_ble", async_local_adapters=AsyncMock()
@@ -116,6 +164,9 @@ def _load_flow() -> types.ModuleType:
         "homeassistant.data_entry_flow": _module(
             "homeassistant.data_entry_flow", FlowResult=dict
         ),
+        "homeassistant.exceptions": _module(
+            "homeassistant.exceptions", HomeAssistantError=HomeAssistantError
+        ),
         "homeassistant.helpers": _module("homeassistant.helpers", selector=selector),
         "homeassistant.helpers.selector": selector,
         "homeassistant.helpers.aiohttp_client": _module(
@@ -132,6 +183,13 @@ def _load_flow() -> types.ModuleType:
     assert spec and spec.loader
     flow = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, modules):
+        duml_spec = importlib.util.spec_from_file_location(
+            f"{PACKAGE}.duml", COMPONENT / "duml.py"
+        )
+        assert duml_spec and duml_spec.loader
+        duml = importlib.util.module_from_spec(duml_spec)
+        sys.modules[duml_spec.name] = duml
+        duml_spec.loader.exec_module(duml)
         spec.loader.exec_module(flow)
     return flow
 

@@ -89,7 +89,97 @@
           "update_interval": "Set to 0 for immediate updates.",
           "connection_source": "Automatic allows local adapters and Bluetooth proxies.",
           "keep_connection": "Require local adapter, keep BLE connection through HA Core restarts and reloads."
+        },
+        "menu_options": {
+          "connection": "Connection options",
+          "time_periods": "Electricity price periods"
         }
+      },
+      "connection": {
+        "title": "Connection options",
+        "description": "Change plugin options.",
+        "data": {
+          "update_interval": "Home Assistant update interval",
+          "connection_source": "Bluetooth connection source",
+          "keep_connection": "Keep connection during HA restarts and reloads"
+        },
+        "data_description": {
+          "update_interval": "Set to 0 for immediate updates.",
+          "connection_source": "Automatic allows local adapters and Bluetooth proxies.",
+          "keep_connection": "Require local adapter, keep BLE connection through HA Core restarts and reloads."
+        }
+      },
+      "time_periods": {
+        "title": "Electricity price periods",
+        "description": "Times use the station's local time zone. Changes remain a draft until you save.\n\n{periods}\n\n{reason}",
+        "menu_options": {
+          "add_period": "Add period",
+          "edit_period": "Edit period",
+          "delete_period": "Delete period",
+          "save_periods": "Review and save",
+          "discard_periods": "Discard changes"
+        },
+        "submit": "Retry"
+      },
+      "add_period": {
+        "title": "Add electricity price period",
+        "description": "Times use the station's local time zone. An end time earlier than the start spans midnight.\n\n{reason}",
+        "data": {
+          "type": "Price period",
+          "days": "Days",
+          "start": "Start time",
+          "end": "End time"
+        },
+        "data_description": {
+          "days": "Select all seven days for every day.",
+          "start": "Use whole minutes.",
+          "end": "Use whole minutes."
+        },
+        "submit": "Add period"
+      },
+      "change_period": {
+        "title": "Edit electricity price period",
+        "description": "Times use the station's local time zone. An end time earlier than the start spans midnight.\n\n{reason}",
+        "data": {
+          "type": "Price period",
+          "days": "Days",
+          "start": "Start time",
+          "end": "End time"
+        },
+        "data_description": {
+          "days": "Select all seven days for every day.",
+          "start": "Use whole minutes.",
+          "end": "Use whole minutes."
+        },
+        "submit": "Update period"
+      },
+      "edit_period": {
+        "title": "Choose a period to edit",
+        "data": {
+          "period": "Period"
+        },
+        "submit": "Edit period"
+      },
+      "delete_period": {
+        "title": "Delete electricity price period",
+        "description": "The period will be removed from your draft. Save the schedule to apply the deletion to the station.",
+        "data": {
+          "period": "Period"
+        },
+        "submit": "Delete period"
+      },
+      "save_periods": {
+        "title": "Save electricity price periods",
+        "description": "Save this complete schedule to the station. Times use the station's local time zone.\n\n{periods}\n\n{reason}",
+        "menu_options": {
+          "apply_periods": "Save schedule",
+          "time_periods": "Back to editing"
+        }
+      },
+      "schedule_changed": {
+        "title": "The station's schedule changed",
+        "description": "The schedule changed on the station while you were editing. Your draft was not saved. Reload the current schedule, then reapply your edits.\n\nYour draft:\n\n{periods}",
+        "submit": "Reload current schedule"
       }
     },
     "error": {
@@ -97,7 +187,16 @@
       "invalid_update_interval": "Enter a whole number from 0 to 60 seconds.",
       "invalid_connection_source": "Select Automatic or one of the listed local Bluetooth adapters.",
       "invalid_keep_connection": "Select whether to keep the Bluetooth connection.",
-      "invalid_connection_options": "Check the options and try again."
+      "invalid_connection_options": "Check the options and try again.",
+      "invalid_period": "Check the period and try again.",
+      "invalid_period_selection": "Select one of the listed periods.",
+      "schedule_read_failed": "Could not read the station's schedule. Check the Bluetooth connection and retry."
+    },
+    "abort": {
+      "schedule_saved": "Electricity price periods saved and confirmed by the station.",
+      "schedule_cancelled": "Draft discarded.",
+      "schedule_not_supported": "Electricity price periods are supported only on the Power 2000.",
+      "station_unavailable": "The station is unavailable. Enable the integration and reconnect before editing its schedule."
     }
   },
   "entity": {
@@ -133,6 +232,30 @@
           "description": "Complete list of periods with type (peak or off_peak), start and end (quoted HH:MM), and optional days (mon through sun; omit for every day). At most eight periods of each type. An empty list clears the schedule only when Scheduled Periods and all grid-tied modes are inactive."
         }
       }
+    }
+  },
+  "selector": {
+    "period_type": {
+      "options": {
+        "peak": "Peak",
+        "off_peak": "Off-peak"
+      }
+    },
+    "weekdays": {
+      "options": {
+        "mon": "Monday",
+        "tue": "Tuesday",
+        "wed": "Wednesday",
+        "thu": "Thursday",
+        "fri": "Friday",
+        "sat": "Saturday",
+        "sun": "Sunday"
+      }
+    }
+  },
+  "exceptions": {
+    "schedule_changed": {
+      "message": "The station's schedule changed while you were editing. Reload the current schedule and reapply your edits."
     }
   }
 }

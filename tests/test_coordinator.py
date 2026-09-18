@@ -74,6 +74,19 @@ class DjiPowerAuthenticationError(DjiPowerError):
     """Test authentication failure."""
 
 
+class DjiPowerScheduleChangedError(DjiPowerError):
+    """Test stale editor snapshot."""
+
+
+class HomeAssistantError(Exception):
+    """Keep HA error translation metadata available in offline tests."""
+
+    def __init__(self, *args, translation_domain=None, translation_key=None):
+        super().__init__(*args)
+        self.translation_domain = translation_domain
+        self.translation_key = translation_key
+
+
 class _DataUpdateCoordinator:
     def __class_getitem__(cls, item):
         return cls
@@ -108,6 +121,7 @@ def _load_coordinator() -> types.ModuleType:
             DjiPowerDevice=object,
             DjiPowerError=DjiPowerError,
             DjiPowerAuthenticationError=DjiPowerAuthenticationError,
+            DjiPowerScheduleChangedError=DjiPowerScheduleChangedError,
         ),
         "homeassistant": _module("homeassistant"),
         "homeassistant.config_entries": _module(
@@ -119,7 +133,7 @@ def _load_coordinator() -> types.ModuleType:
             "homeassistant.core", HomeAssistant=object, callback=lambda method: method
         ),
         "homeassistant.exceptions": _module(
-            "homeassistant.exceptions", HomeAssistantError=Exception
+            "homeassistant.exceptions", HomeAssistantError=HomeAssistantError
         ),
         "homeassistant.helpers": _module("homeassistant.helpers"),
         "homeassistant.helpers.update_coordinator": _module(
@@ -445,6 +459,58 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         delay, flush_pending = self.loop.call_later.call_args.args
         self.assertEqual(delay, 59)
         return self.loop.call_later.return_value, flush_pending
+
+    async def test_schedule_editor_read_publishes_fresh_state_immediately(self):
+        timer, flush_pending = self._prepare_throttled_control({"time_periods": []})
+        periods = [{"type": "peak", "start": "17:00", "end": "20:00"}]
+
+        async def read():
+            self.device.data = {"battery_percent": 62, "time_periods": periods}
+            return periods
+
+        self.device.get_time_periods = AsyncMock(side_effect=read)
+
+        self.assertEqual(await self.coordinator.async_get_time_periods(), periods)
+        self.device.get_time_periods.assert_awaited_once_with()
+        timer.cancel.assert_called_once()
+        flush_pending()
+        self.assertEqual(self.coordinator.data, self.device.data)
+
+    async def test_schedule_editor_read_translates_failure_without_publication(self):
+        self.device.get_time_periods = AsyncMock(
+            side_effect=DjiPowerError("invalid time periods")
+        )
+        with (
+            patch.object(self.coordinator, "_publish") as publish,
+            self.assertRaisesRegex(HomeAssistantError, "invalid time periods"),
+        ):
+            await self.coordinator.async_get_time_periods()
+        publish.assert_not_called()
+
+    async def test_schedule_editor_save_delegates_snapshot_and_publishes(self):
+        requested = [{"type": "peak", "start": "17:00", "end": "20:00"}]
+        self.device.data = {"time_periods": requested}
+        self.device.set_time_periods = AsyncMock()
+
+        await self.coordinator.async_set_time_periods(requested, expected_periods=[])
+
+        self.device.set_time_periods.assert_awaited_once_with(
+            requested, expected_periods=[]
+        )
+        self.assertEqual(self.coordinator.data, self.device.data)
+
+    async def test_schedule_editor_conflict_has_translation_metadata(self):
+        self.device.set_time_periods = AsyncMock(
+            side_effect=DjiPowerScheduleChangedError("schedule changed")
+        )
+        with (
+            patch.object(self.coordinator, "_publish") as publish,
+            self.assertRaises(HomeAssistantError) as caught,
+        ):
+            await self.coordinator.async_set_time_periods([], expected_periods=[])
+        self.assertEqual(caught.exception.translation_domain, "dji_power_ble")
+        self.assertEqual(caught.exception.translation_key, "schedule_changed")
+        publish.assert_not_called()
 
     async def test_all_controls_publish_immediately_and_clear_pending_telemetry(
         self,
