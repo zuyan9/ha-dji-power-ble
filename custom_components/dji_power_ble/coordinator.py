@@ -11,7 +11,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
+from .const import (
+    CONF_KEEP_CONNECTION,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
+)
 from .device import DjiPowerDevice, DjiPowerError
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,6 +34,7 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         super().__init__(hass, _LOGGER, name=f"{DOMAIN} {device.address}")
         self.entry = entry
         self.device = device
+        self._closed = False
         self._publish_interval = float(
             entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
         )
@@ -39,7 +45,29 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         self._unsub_disconnect = device.add_disconnect_listener(self._handle_disconnect)
 
     @callback
+    def async_apply_options(self) -> None:
+        """Apply compatible options without interrupting the Bluetooth session."""
+        if self._closed:
+            return
+        self.device.keep_connection = self.entry.options.get(
+            CONF_KEEP_CONNECTION, False
+        )
+        interval = float(
+            self.entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+        )
+        if interval == self._publish_interval:
+            return
+        self._publish_interval = interval
+        if self._push_timer is not None:
+            self._push_timer.cancel()
+            self._push_timer = None
+        if self._pending_data is not None:
+            self._handle_state(self._pending_data)
+
+    @callback
     def _handle_state(self, data: dict[str, object]) -> None:
+        if self._closed:
+            return
         now = self.hass.loop.time()
         remaining = self._publish_interval - (now - self._last_push)
         if remaining <= 0:
@@ -51,6 +79,8 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
 
     @callback
     def _publish(self, data: dict[str, object]) -> None:
+        if self._closed:
+            return
         self._last_push = self.hass.loop.time()
         self._pending_data = None
         if self._push_timer is not None:
@@ -60,12 +90,18 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
 
     @callback
     def _flush_pending(self) -> None:
+        if self._push_timer is not None:
+            self._push_timer.cancel()
         self._push_timer = None
         if self._pending_data is not None:
-            self._publish(self._pending_data)
+            # A cancelled timer can already be queued when options change.
+            # Recheck the current interval before publishing buffered data.
+            self._handle_state(self._pending_data)
 
     @callback
     def _handle_disconnect(self, error: Exception | None) -> None:
+        if self._closed:
+            return
         # A queued pre-disconnect snapshot must not make entities available again.
         self._pending_data = None
         if self._push_timer is not None:
@@ -82,20 +118,40 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
 
     async def _async_update_data(self) -> dict[str, object]:
         """Establish the initial link; later updates arrive as pushes."""
+        if self._closed:
+            raise UpdateFailed("Bluetooth client is shutting down")
         try:
             await self.device.connect()
         except (BleakError, DjiPowerError, TimeoutError) as error:
             raise UpdateFailed(str(error)) from error
         return dict(self.device.data)
 
-    async def async_disconnect(self) -> None:
-        """Unsubscribe callbacks and close the BLE link."""
+    async def async_shutdown(self) -> None:
+        """Release the client before HA cancels background Bluetooth tasks."""
+        await self.async_disconnect(keep_connection=self.device.keep_connection)
+
+    @callback
+    def async_release_device(self) -> None:
+        """Release coordinator callbacks while another owner keeps the device."""
+        if self._closed:
+            return
+        self._closed = True
         self._unsub_state()
         self._unsub_disconnect()
+        self._pending_data = None
         if self._push_timer is not None:
             self._push_timer.cancel()
             self._push_timer = None
-        await self.device.disconnect()
+
+    async def async_disconnect(self, *, keep_connection: bool = False) -> None:
+        """Unsubscribe callbacks and close the BLE link."""
+        if self._closed:
+            return
+        self.async_release_device()
+        if keep_connection:
+            await self.device.disconnect(keep_connection=True)
+        else:
+            await self.device.disconnect()
 
     async def async_set_ac(self, enabled: bool) -> None:
         """Set AC output, converting library failures to HA service errors."""

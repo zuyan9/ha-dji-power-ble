@@ -26,6 +26,34 @@ logger:
 
 Restart HA after updating integration files to get newly added logging.
 
+## Keep the station connected during HA restarts and reloads
+
+In the HA integration options, **Bluetooth connection source** defaults to
+**Automatic**, which allows local adapters and ESPHome Bluetooth proxies. Selecting
+a specific local adapter uses only that adapter. If it disconnects, the station
+stays unavailable instead of switching to another adapter or proxy.
+Saving with **Automatic** turns connection retention off.
+
+Selecting a local Linux Bluetooth adapter also allows
+**Keep connection during HA restarts and reloads**. This attempts to preserve
+the Bluetooth connection when HA Core stops, then restore notifications and verify
+the existing authenticated session when HA starts. Integration reloads reuse the
+live device connection when the adapter and credentials stay the same.
+
+BlueZ and the selected built-in or USB adapter must remain running. This cannot
+preserve a connection through a host reboot, Bluetooth reset, loss of range, or an
+ESPHome proxy. Disabling or removing the entry still disconnects. Switching adapters
+or changing credentials requires a new connection and authentication.
+
+Changing the update interval or retention option applies immediately without
+reconnecting. Turning retention off keeps the current connection open, but later
+restarts and reloads disconnect normally.
+
+Retention may help avoid fresh authentication after long station uptime; it cannot
+repair a station that already rejects new authentication. If the connection is lost
+and authentication fails, a full restart that resets power the station's controller
+may be needed. Restarting HA alone does not reset that controller.
+
 ## Local BLE tools
 
 [`scripts/dji_power_debug.py`](../scripts/dji_power_debug.py) shares the integration's

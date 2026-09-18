@@ -103,7 +103,8 @@ class ExpansionBatteryDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 "serial_number": "TEST-STATION",
                 "model": "DJI Power 2000",
             },
-            options={"update_interval": 5},
+            options={"update_interval": 5, "connection_source": "AA:BB:CC:DD:EE:01",
+                     "keep_connection": True},
         )
         coordinator = types.SimpleNamespace(
             data=state, device=types.SimpleNamespace(is_connected=True)
@@ -126,7 +127,10 @@ class ExpansionBatteryDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 "model": "DJI Power 2000",
             },
         )
-        self.assertEqual(result["options"], {"update_interval": 5})
+        self.assertEqual(result["options"], {"update_interval": 5,
+                                           "connection_source": REDACTED,
+                                           "keep_connection": True})
+        self.assertEqual(entry.options["connection_source"], "AA:BB:CC:DD:EE:01")
         self.assertTrue(result["connected"])
         self.assertEqual(
             result["state"],

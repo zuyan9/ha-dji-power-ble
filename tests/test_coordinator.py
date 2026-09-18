@@ -162,10 +162,52 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             add_disconnect_listener=Mock(),
             connect=AsyncMock(),
             disconnect=AsyncMock(),
+            keep_connection=False,
         )
         self.coordinator = coordinator_module.DjiPowerCoordinator(
             self.hass, self.entry, self.device
         )
+
+    async def test_shutdown_retains_only_opted_in_session_before_core_stopping(self):
+        for keep in (False, True):
+            with self.subTest(keep_connection=keep):
+                self.device.keep_connection = keep
+                self.device.disconnect.reset_mock()
+                coordinator = coordinator_module.DjiPowerCoordinator(
+                    self.hass, self.entry, self.device
+                )
+                self.hass.is_stopping = False
+                coordinator._handle_state({"battery_percent": 60})
+                self.loop.time.return_value = 101.0
+                coordinator._handle_state({"battery_percent": 61})
+                await coordinator.async_shutdown()
+                expected = {"keep_connection": True} if keep else {}
+                self.device.disconnect.assert_awaited_once_with(**expected)
+                self.assertIsNone(coordinator._pending_data)
+                coordinator._handle_disconnect(None)
+                self.hass.config_entries.async_schedule_reload.assert_not_called()
+                with self.assertRaisesRegex(Exception, "shutting down"):
+                    await coordinator._async_update_data()
+                self.device.connect.assert_not_awaited()
+                await coordinator.async_disconnect()
+                self.device.disconnect.assert_awaited_once()
+
+    async def test_ordinary_unload_closes_even_when_retention_enabled(self):
+        self.device.keep_connection = True
+        await self.coordinator.async_disconnect()
+        await self.coordinator.async_shutdown()
+        self.device.disconnect.assert_awaited_once_with()
+
+    async def test_late_callbacks_cannot_publish_after_shutdown(self):
+        self.coordinator._handle_state({"battery_percent": 60})
+        self.loop.time.return_value = 101.0
+        self.coordinator._handle_state({"battery_percent": 61})
+        flush = self.loop.call_later.call_args.args[1]
+        await self.coordinator.async_shutdown()
+        flush()
+        self.coordinator._handle_state({"battery_percent": 62})
+        self.coordinator._publish({"battery_percent": 63})
+        self.assertEqual(self.coordinator.data, {"battery_percent": 60})
 
     def test_pending_snapshot_cannot_restore_availability_after_disconnect(
         self,
@@ -205,6 +247,177 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.coordinator.data, {"battery_percent": 62})
         self.assertTrue(self.coordinator.last_update_success)
         self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    def test_zero_interval_publishes_rapid_state_changes_without_a_timer(self):
+        self.entry.options["update_interval"] = 0
+        coordinator = coordinator_module.DjiPowerCoordinator(
+            self.hass, self.entry, self.device
+        )
+        with patch.object(
+            coordinator, "async_set_updated_data",
+            wraps=coordinator.async_set_updated_data,
+        ) as publish:
+            for now, battery in ((100.0, 60), (100.0, 61), (100.01, 62)):
+                self.loop.time.return_value = now
+
+                coordinator._handle_state({"battery_percent": battery})
+
+                self.assertEqual(coordinator.data, {"battery_percent": battery})
+                self.assertTrue(coordinator.last_update_success)
+            self.assertEqual(publish.call_count, 3)
+        self.assertIsNone(coordinator._push_timer)
+        self.assertIsNone(coordinator._pending_data)
+        self.loop.call_later.assert_not_called()
+        self.device.connect.assert_not_awaited()
+        self.device.disconnect.assert_not_awaited()
+        self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    def test_live_interval_changes_reschedule_or_publish_pending_snapshot(self):
+        for interval, now, delay in (
+            (2, 101.0, 1.0), (10, 102.0, 8.0), (1, 103.0, None), (0, 101.0, None)
+        ):
+            with self.subTest(interval=interval):
+                self.loop.reset_mock()
+                self.loop.time.return_value = 100.0
+                self.entry.options = {"update_interval": 5}
+                coordinator = coordinator_module.DjiPowerCoordinator(
+                    self.hass, self.entry, self.device
+                )
+                coordinator._handle_state({"battery_percent": 60})
+                self.loop.time.return_value = 101.0
+                coordinator._handle_state({"battery_percent": 61})
+                timer = self.loop.call_later.return_value
+                self.loop.time.return_value = now
+                self.entry.options = {
+                    "update_interval": interval, "keep_connection": True
+                }
+
+                coordinator.async_apply_options()
+
+                timer.cancel.assert_called_once_with()
+                self.assertEqual(coordinator._publish_interval, interval)
+                self.assertTrue(self.device.keep_connection)
+                if delay is None:
+                    self.assertEqual(coordinator.data, {"battery_percent": 61})
+                    self.assertIsNone(coordinator._pending_data)
+                    self.assertIsNone(coordinator._push_timer)
+                    self.loop.call_later.assert_called_once()
+                else:
+                    self.assertEqual(coordinator.data, {"battery_percent": 60})
+                    self.assertEqual(self.loop.call_later.call_args.args[0], delay)
+                    self.assertEqual(self.loop.call_later.call_count, 2)
+                self.device.disconnect.assert_not_awaited()
+                self.device.connect.assert_not_awaited()
+                self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    def test_live_change_from_zero_restores_throttling_without_reconnecting(self):
+        self.entry.options["update_interval"] = 0
+        self.coordinator.async_apply_options()
+        self.coordinator._handle_state({"battery_percent": 60})
+        self.loop.time.return_value = 101.0
+        self.coordinator._handle_state({"battery_percent": 61})
+        self.entry.options["update_interval"] = 5
+
+        self.coordinator.async_apply_options()
+
+        self.loop.call_later.assert_not_called()
+        self.loop.time.return_value = 102.0
+        self.coordinator._handle_state({"battery_percent": 62})
+        self.assertEqual(self.loop.call_later.call_args.args[0], 4.0)
+        self.loop.time.return_value = 103.0
+        self.coordinator._handle_state({"battery_percent": 63})
+        self.assertEqual(self.coordinator.data, {"battery_percent": 61})
+        self.loop.call_later.assert_called_once()
+        self.loop.time.return_value = 106.0
+        self.loop.call_later.call_args.args[1]()
+        self.assertEqual(self.coordinator.data, {"battery_percent": 63})
+        self.assertIsNone(self.coordinator._pending_data)
+        self.assertIsNone(self.coordinator._push_timer)
+        self.device.connect.assert_not_awaited()
+        self.device.disconnect.assert_not_awaited()
+        self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    def test_retention_toggle_applies_without_disturbing_pending_publication(self):
+        self.coordinator._handle_state({"battery_percent": 60})
+        self.loop.time.return_value = 101.0
+        self.coordinator._handle_state({"battery_percent": 61})
+        timer = self.loop.call_later.return_value
+        for keep in (True, False):
+            with self.subTest(keep=keep):
+                self.entry.options["keep_connection"] = keep
+
+                self.coordinator.async_apply_options()
+
+                self.assertIs(self.device.keep_connection, keep)
+                self.assertIs(self.coordinator._push_timer, timer)
+                timer.cancel.assert_not_called()
+                self.device.disconnect.assert_not_awaited()
+                self.device.connect.assert_not_awaited()
+        self.loop.call_later.assert_called_once()
+
+    def test_old_timer_cannot_publish_early_after_interval_is_lengthened(self):
+        self.coordinator._handle_state({"battery_percent": 60})
+        self.loop.time.return_value = 101.0
+        self.coordinator._handle_state({"battery_percent": 61})
+        old_flush = self.loop.call_later.call_args.args[1]
+        self.entry.options["update_interval"] = 10
+        self.loop.time.return_value = 102.0
+        self.coordinator.async_apply_options()
+
+        self.loop.time.return_value = 105.0
+        old_flush()
+
+        self.assertEqual(self.coordinator.data, {"battery_percent": 60})
+        self.assertEqual(self.loop.call_later.call_args.args[0], 5.0)
+        self.loop.time.return_value = 110.0
+        self.loop.call_later.call_args.args[1]()
+        self.assertEqual(self.coordinator.data, {"battery_percent": 61})
+
+    async def test_release_transfers_live_device_without_old_callbacks_or_timers(self):
+        self.device.is_connected = True
+        old_state = self.device.add_state_listener.call_args.args[0]
+        old_disconnect = self.device.add_disconnect_listener.call_args.args[0]
+        unsubscribe_state = self.device.add_state_listener.return_value
+        unsubscribe_disconnect = self.device.add_disconnect_listener.return_value
+        old_state({"battery_percent": 60})
+        self.loop.time.return_value = 101.0
+        old_state({"battery_percent": 61})
+        timer = self.loop.call_later.return_value
+        flush = self.loop.call_later.call_args.args[1]
+
+        self.coordinator.async_release_device()
+        self.coordinator.async_release_device()
+
+        unsubscribe_state.assert_called_once_with()
+        unsubscribe_disconnect.assert_called_once_with()
+        timer.cancel.assert_called_once_with()
+        self.assertIsNone(self.coordinator._pending_data)
+        self.assertIsNone(self.coordinator._push_timer)
+        self.assertTrue(self.device.is_connected)
+        old_state({"battery_percent": 62})
+        old_disconnect(None)
+        flush()
+        self.assertEqual(self.coordinator.data, {"battery_percent": 60})
+        replacement = coordinator_module.DjiPowerCoordinator(
+            self.hass, self.entry, self.device
+        )
+        replacement._handle_state({"battery_percent": 63})
+        await self.coordinator.async_disconnect()
+        await self.coordinator.async_shutdown()
+        self.device.disconnect.assert_not_awaited()
+        self.assertEqual(replacement.data, {"battery_percent": 63})
+        self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    def test_released_coordinator_ignores_late_option_updates(self):
+        self.coordinator.async_release_device()
+        self.entry.options = {"update_interval": 1, "keep_connection": True}
+
+        self.coordinator.async_apply_options()
+
+        self.assertEqual(self.coordinator._publish_interval, 5)
+        self.assertFalse(self.device.keep_connection)
+        self.loop.call_later.assert_not_called()
+        self.device.disconnect.assert_not_awaited()
 
     def test_disconnect_during_setup_does_not_schedule_reload(self) -> None:
         self.entry.state = "setup_in_progress"

@@ -22,13 +22,18 @@ from homeassistant.components.bluetooth import (
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
-    OptionsFlowWithReload,
+    OptionsFlow,
 )
 from homeassistant.const import CONF_ADDRESS, CONF_EMAIL, CONF_NAME, CONF_PASSWORD
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+)
 
 from .cloud import (
     CODE_IMAGE_CAPTCHA_ERROR,
@@ -40,10 +45,13 @@ from .cloud import (
     DjiTwoFactorRequired,
 )
 from .const import (
+    CONF_CONNECTION_SOURCE,
+    CONF_KEEP_CONNECTION,
     CONF_MODEL,
     CONF_PAIR_KEY,
     CONF_SERIAL_NUMBER,
     CONF_UPDATE_INTERVAL,
+    CONNECTION_SOURCE_AUTOMATIC,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MANUFACTURER_ID,
@@ -51,6 +59,7 @@ from .const import (
     MIN_UPDATE_INTERVAL,
 )
 from .duml import ProtocolError, normalize_pair_key, parse_manufacturer_data
+from .local_ble import async_local_adapters
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,9 +69,14 @@ CONF_TOKEN = "member_token"
 
 OPTIONS_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_UPDATE_INTERVAL): vol.All(
-            vol.Coerce(int),
-            vol.Range(min=MIN_UPDATE_INTERVAL, max=MAX_UPDATE_INTERVAL),
+        vol.Required(CONF_UPDATE_INTERVAL): NumberSelector(
+            NumberSelectorConfig(
+                min=MIN_UPDATE_INTERVAL,
+                max=MAX_UPDATE_INTERVAL,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="s",
+            )
         )
     }
 )
@@ -393,22 +407,72 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
-class DjiPowerOptionsFlow(OptionsFlowWithReload):
+class DjiPowerOptionsFlow(OptionsFlow):
     """Configure runtime behavior for a DJI Power station."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage integration options."""
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
-
+        errors: dict[str, str] = {}
         current = {
             CONF_UPDATE_INTERVAL: self.config_entry.options.get(
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
-            )
+            ),
+            CONF_CONNECTION_SOURCE: self.config_entry.options.get(
+                CONF_CONNECTION_SOURCE, CONNECTION_SOURCE_AUTOMATIC
+            ),
+            CONF_KEEP_CONNECTION: self.config_entry.options.get(
+                CONF_KEEP_CONNECTION, False
+            ),
         }
+        sources = {CONNECTION_SOURCE_AUTOMATIC: "Automatic (local or proxy)"}
+        try:
+            sources.update(await async_local_adapters())
+        except Exception:
+            _LOGGER.warning("Could not enumerate local Bluetooth adapters")
+            errors["base"] = "adapters_unavailable"
+        selected = current[CONF_CONNECTION_SOURCE]
+        if selected not in sources:
+            sources[selected] = f"{selected} (unavailable)"
+
+        schema = OPTIONS_SCHEMA.extend(
+            {
+                vol.Required(CONF_CONNECTION_SOURCE): vol.In(sources),
+                vol.Required(CONF_KEEP_CONNECTION): bool,
+            }
+        )
+        if user_input is not None:
+            try:
+                validated = schema(user_input)
+                interval = validated[CONF_UPDATE_INTERVAL]
+                if not interval.is_integer():
+                    raise vol.Invalid(
+                        "Expected whole seconds", path=[CONF_UPDATE_INTERVAL]
+                    )
+                validated[CONF_UPDATE_INTERVAL] = int(interval)
+            except vol.Invalid as err:
+                field = err.path[0] if err.path else "base"
+                if field == CONF_UPDATE_INTERVAL:
+                    errors[field] = "invalid_update_interval"
+                elif field == CONF_CONNECTION_SOURCE:
+                    errors[field] = "invalid_connection_source"
+                elif field == CONF_KEEP_CONNECTION:
+                    errors[field] = "invalid_keep_connection"
+                else:
+                    errors["base"] = "invalid_connection_options"
+            else:
+                if validated[CONF_CONNECTION_SOURCE] == CONNECTION_SOURCE_AUTOMATIC:
+                    validated[CONF_KEEP_CONNECTION] = False
+                return self.async_create_entry(
+                    data={**self.config_entry.options, **validated}
+                )
+            current.update(
+                {key: value for key, value in user_input.items() if key in current}
+            )
+
         return self.async_show_form(
             step_id="init",
-            data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, current),
+            data_schema=self.add_suggested_values_to_schema(schema, current),
+            errors=errors,
         )

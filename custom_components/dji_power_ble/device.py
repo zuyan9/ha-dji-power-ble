@@ -60,10 +60,13 @@ from .features import ModelFeature, supports_feature
 if TYPE_CHECKING:
     from bleak.backends.characteristic import BleakGATTCharacteristic
 
+    from .local_ble import LocalBleakClient
+
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_REQUEST_TIMEOUT = 8.0
 DEFAULT_CONNECT_TIMEOUT = 30.0
+RESUME_PROBE_TIMEOUT = 3.0
 AUTHENTICATION_ATTEMPTS = 2
 READBACK_RETRIES = 8
 READBACK_RETRY_INTERVAL = 2.0
@@ -98,14 +101,26 @@ class DjiPowerDevice:
         name: str,
         model: str = "DJI Power",
         serial_number: str | None = None,
+        local_adapter: str | None = None,
+        keep_connection: bool = False,
+        allocate_connection_slot: Callable[[BLEDevice], bool] | None = None,
+        release_connection_slot: Callable[[BLEDevice], None] | None = None,
     ) -> None:
+        if keep_connection and local_adapter is None:
+            raise ValueError("Connection retention requires a selected local adapter")
         self._ble_device = ble_device
+        self._local_adapter = local_adapter
+        self.keep_connection = keep_connection
+        self._authenticated = False
+        self._allocate_slot_callback = allocate_connection_slot
+        self._release_slot_callback = release_connection_slot
+        self._slot_allocated = False
         self._pair_key = normalize_pair_key(pair_key)
         self._name = name
         self.model = model
         self._encrypted_transport = model == "DJI Power 1000"
         self.serial_number = serial_number
-        self._client: BleakClient | None = None
+        self._client: BleakClient | LocalBleakClient | None = None
         self._write_characteristic: BleakGATTCharacteristic | None = None
         self._stream = DumlStream()
         self._sequence = 0x1000
@@ -127,6 +142,32 @@ class DjiPowerDevice:
     def is_connected(self) -> bool:
         """Return whether the underlying GATT client is connected."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def can_retain_connection(self) -> bool:
+        """Return whether this authorized local session can survive a reload."""
+        return (
+            self.keep_connection
+            and self._local_adapter is not None
+            and self._authenticated
+            and self.is_connected
+        )
+
+    def matches_connection(
+        self, address: str, pair_key: str | bytes, *,
+        local_adapter: str | None, model: str,
+    ) -> bool:
+        """Check settings which require a new transport or authentication."""
+        try:
+            normalized_key = normalize_pair_key(pair_key)
+        except ProtocolError:
+            return False
+        return (
+            self.address.upper() == address.upper()
+            and self._pair_key == normalized_key
+            and self._local_adapter == local_adapter
+            and self.model == model
+        )
 
     def update_ble_device(self, ble_device: BLEDevice) -> None:
         """Use a fresher scanner object for the next connection."""
@@ -226,6 +267,8 @@ class DjiPowerDevice:
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         self._client = None
+        self._authenticated = False
+        self._release_connection_slot()
         self._write_characteristic = None
         if self._expansion_refresh_task is not None:
             self._expansion_refresh_task.cancel()
@@ -239,7 +282,24 @@ class DjiPowerDevice:
         for callback in tuple(self._disconnect_callbacks):
             callback(error)
 
-    async def _establish(self) -> BleakClient:
+    async def _establish(self) -> BleakClient | LocalBleakClient:
+        if self._local_adapter is not None:
+            # Bypass HA's automatic source selection and retry-connector's
+            # adapter switching for an explicitly selected local adapter.
+            from .local_ble import LocalBleakClient
+
+            if self._allocate_slot_callback is not None:
+                if not self._allocate_slot_callback(self._ble_device):
+                    raise DjiPowerError(
+                        "No free connection slot on the selected Bluetooth adapter"
+                    )
+                self._slot_allocated = True
+            client = LocalBleakClient(
+                self._ble_device, disconnected_callback=self._on_disconnect
+            )
+            self._client = client  # Also clean up a failed/cancelled connect.
+            await client.connect()
+            return client
         return await establish_connection(
             BleakClientWithServiceCache,
             self._ble_device,
@@ -247,6 +307,13 @@ class DjiPowerDevice:
             disconnected_callback=self._on_disconnect,
             max_attempts=3,
         )
+
+    def _release_connection_slot(self) -> None:
+        """Release HA's reservation only when the underlying link has closed."""
+        if self._slot_allocated:
+            self._slot_allocated = False
+            if self._release_slot_callback is not None:
+                self._release_slot_callback(self._ble_device)
 
     async def _subscribe(self, client: BleakClient) -> None:
         """Select a complete GATT layout from this connection's services."""
@@ -278,6 +345,7 @@ class DjiPowerDevice:
         if self.is_connected:
             return
         self._disconnecting = False
+        self._authenticated = False
         self._stream.clear()
         self._report_event.clear()
         try:
@@ -300,6 +368,10 @@ class DjiPowerDevice:
         try:
             await self._subscribe(client)
         except BleakError:
+            if self._local_adapter is not None:
+                # A retained session must not be dropped by automatic cache
+                # recovery, nor moved to a different adapter.
+                raise
             # Partial service discovery can poison BlueZ's cache. Rediscover and
             # select the characteristics again on the replacement connection.
             _LOGGER.debug("%s: clearing incomplete GATT cache", self.address)
@@ -309,7 +381,14 @@ class DjiPowerDevice:
             client = await self._establish()
             self._client = client
             await self._subscribe(client)
-        await self._authenticate()
+        resumed = (
+            self.keep_connection
+            and getattr(client, "connected_before_attach", False)
+            and await self._resume_session()
+        )
+        if not resumed:
+            await self._authenticate()
+        self._authenticated = True
         await self.refresh_config()
         try:
             async with asyncio.timeout(5):
@@ -319,25 +398,91 @@ class DjiPowerDevice:
             # delayed on an idle or older station.
             _LOGGER.debug("%s: no initial 0x61 push within five seconds", self.address)
 
-    async def disconnect(self) -> None:
-        """Cleanly close the persistent link."""
+    async def _resume_session(self) -> bool:
+        """Prove an existing link is authorized with a fresh, matched GET."""
+        try:
+            response = await self._request(
+                GET_COMMAND,
+                bytes((0x00, CHARGE_LIMIT_KEY, 0x10)),
+                timeout=RESUME_PROBE_TIMEOUT,
+            )
+            payload = self._decode_payload(response)
+            # Require the successful GET envelope and the requested record;
+            # unsolicited reports, empty ACKs, and cached data prove nothing.
+            if (
+                response.source != POWER_DESTINATION
+                or response.destination != APP_SOURCE
+                or len(payload) < 20
+                or payload[:4] != bytes(4)
+                or payload[6:8] != b"\x10\x00"
+                or len(parse_keyed_values(payload).get(CHARGE_LIMIT_KEY, b"")) != 24
+            ):
+                return False
+            self._merge_data(parse_telemetry(payload))
+        except DjiPowerDisconnectedError:
+            raise
+        except (DjiPowerError, BleakError, ProtocolError, TimeoutError):
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from None
+            _LOGGER.debug("Existing Bluetooth session could not be resumed")
+            return False
+        _LOGGER.debug("Resumed authenticated local Bluetooth session")
+        return True
+
+    async def disconnect(self, *, keep_connection: bool = False) -> None:
+        """Close the client, optionally retaining an authorized link at HA stop."""
+        client = self._client
+        retain = (
+            keep_connection
+            and self.keep_connection
+            and self._authenticated
+            and client is not None
+            and client.is_connected
+        )
+        self._disconnecting = True
+        self._client = None
+        self._authenticated = False
         self._write_characteristic = None
+        for _, _, future in self._pending.values():
+            if not future.done():
+                future.set_exception(
+                    DjiPowerDisconnectedError("Bluetooth client closed")
+                )
+        self._pending.clear()
         task = self._expansion_refresh_task
         self._expansion_refresh_task = None
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        client = self._client
         if client is None:
+            self._release_connection_slot()
+            self._disconnecting = False
             return
-        self._disconnecting = True
-        self._client = None
+        retained = False
         try:
+            if retain and client.is_connected:
+                try:
+                    await client.detach()
+                    retained = True
+                    # BlueZ and HA's physical-link watcher now own the slot.
+                    self._slot_allocated = False
+                    _LOGGER.debug(
+                        "Kept local Bluetooth link during Home Assistant stop"
+                    )
+                    return
+                except (
+                    BleakError, AttributeError, RuntimeError, OSError, TimeoutError
+                ):
+                    _LOGGER.warning(
+                        "Could not retain local Bluetooth link; closing the connection"
+                    )
             # Bleak stops notifications as part of disconnecting.
             with contextlib.suppress(BleakError):
                 await client.disconnect()
         finally:
+            if not retained:
+                self._release_connection_slot()
             self._disconnecting = False
 
     async def _request(
