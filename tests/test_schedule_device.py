@@ -97,6 +97,92 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
                     schedule_get in self.client.requests, model == "DJI Power 2000"
                 )
 
+    async def test_editor_read_returns_fresh_independent_schedule(self):
+        self.device.data["time_periods"] = duml.normalize_time_periods([OFF_PEAK])
+
+        periods = await self.device.get_time_periods()
+
+        self.assertEqual(periods, duml.normalize_time_periods([PEAK]))
+        self.assertEqual(
+            self.client.requests, [(duml.GET_COMMAND, b"\x00\x16\x10")]
+        )
+        periods[0]["days"].clear()
+        periods[0]["start"] = "01:00"
+        self.assertEqual(
+            self.device.data["time_periods"], duml.normalize_time_periods([PEAK])
+        )
+
+    async def test_editor_read_accepts_explicit_empty_schedule(self):
+        self.client.values[0x16] = b""
+        self.assertEqual(await self.device.get_time_periods(), [])
+
+    async def test_editor_read_rejects_unsupported_model_before_io(self):
+        self.device.model = "DJI Power 1000 V2"
+        with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+            await self.device.get_time_periods()
+        self.assertEqual(self.client.requests, [])
+
+    async def test_editor_read_does_not_reuse_missing_or_invalid_schedule(self):
+        for value in (None, b"bad"):
+            with self.subTest(value=value):
+                self.device.data["time_periods"] = duml.normalize_time_periods([PEAK])
+                if value is None:
+                    self.client.values.pop(0x16, None)
+                else:
+                    self.client.values[0x16] = value
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.get_time_periods()
+                self.assertIsNone(self.device.data["time_periods"])
+                self.assertFalse(self.device._operation_lock.locked())
+
+    async def test_stale_editor_snapshot_rejects_write_without_set(self):
+        self.device.data["time_periods"] = []
+        with self.assertRaises(device_module.DjiPowerScheduleChangedError):
+            await self.device.set_time_periods([OFF_PEAK], expected_periods=[])
+        self.assertEqual(
+            [cmd for cmd, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.GET_COMMAND],
+        )
+        self.assertFalse(self.client.did_set)
+        self.assertEqual(
+            self.device.data["time_periods"], duml.normalize_time_periods([PEAK])
+        )
+
+    async def test_stale_snapshot_can_retry_already_applied_schedule(self):
+        await self.device.set_time_periods([PEAK], expected_periods=[OFF_PEAK])
+        self.assertFalse(self.client.did_set)
+        self.assertEqual(
+            [cmd for cmd, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.GET_COMMAND],
+        )
+
+    async def test_stale_snapshot_noop_still_checks_empty_schedule_mode(self):
+        self.client.values[0x16] = b""
+        self.set_mode(2)
+        with self.assertRaises(device_module.DjiPowerError):
+            await self.device.set_time_periods([], expected_periods=[PEAK])
+        self.assertFalse(self.client.did_set)
+
+    async def test_expected_snapshot_normalizes_period_and_day_order(self):
+        schedule = [PEAK, OFF_PEAK]
+        payload = duml.build_time_periods_set_payload(schedule)
+        self.client.values[0x16] = duml.parse_keyed_values(payload)[0x16]
+        expected = [
+            {**OFF_PEAK, "days": list(reversed(duml.TIME_PERIOD_DAYS))}, PEAK
+        ]
+
+        await self.device.set_time_periods([OFF_PEAK], expected_periods=expected)
+
+        self.assertTrue(self.client.did_set)
+        self.assertEqual(
+            self.device.data["time_periods"], duml.normalize_time_periods([OFF_PEAK])
+        )
+
+    async def test_invalid_expected_snapshot_is_rejected_before_reading(self):
+        with self.assertRaises(device_module.DjiPowerError):
+            await self.device.set_time_periods([OFF_PEAK], expected_periods="invalid")
+        self.assertEqual(self.client.requests, [])
+
     async def test_fresh_state_write_ack_and_immediate_matching_readback(self):
         self.device.data["time_periods"] = duml.normalize_time_periods([OFF_PEAK])
         original_eco = self.client.values[0x18]
@@ -327,6 +413,82 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.device.data["time_periods"], duml.normalize_time_periods([PEAK])
         )
         self.sleep.assert_not_awaited()
+
+    async def test_editor_read_waits_for_pending_write_confirmation(self):
+        reading = asyncio.Event()
+        release = asyncio.Event()
+        queued = asyncio.Event()
+        original = self.client.write_gatt_char
+
+        async def hold_first_readback(*args, **kwargs):
+            if len(self.client.requests) == 3:
+                reading.set()
+                await release.wait()
+            await original(*args, **kwargs)
+
+        async def read_for_editor():
+            queued.set()
+            return await self.device.get_time_periods()
+
+        self.client.write_gatt_char = hold_first_readback
+        writer = asyncio.create_task(self.device.set_time_periods([OFF_PEAK]))
+        await reading.wait()
+        reader = asyncio.create_task(read_for_editor())
+        await queued.wait()
+        self.assertFalse(reader.done())
+        self.assertEqual(len(self.client.requests), 3)
+        release.set()
+        await writer
+        self.assertEqual(await reader, duml.normalize_time_periods([OFF_PEAK]))
+        self.assertEqual(len(self.client.requests), 5)
+
+    async def test_queued_editor_write_cannot_overwrite_first_write(self):
+        reading = asyncio.Event()
+        release = asyncio.Event()
+        queued = asyncio.Event()
+        original = self.client.write_gatt_char
+
+        async def hold_first_readback(*args, **kwargs):
+            if len(self.client.requests) == 3:
+                reading.set()
+                await release.wait()
+            await original(*args, **kwargs)
+
+        async def stale_replace():
+            queued.set()
+            await self.device.set_time_periods([PEAK], expected_periods=[PEAK])
+
+        self.client.write_gatt_char = hold_first_readback
+        first = asyncio.create_task(self.device.set_time_periods([OFF_PEAK]))
+        await reading.wait()
+        second = asyncio.create_task(stale_replace())
+        await queued.wait()
+        self.assertFalse(second.done())
+        release.set()
+        await first
+        with self.assertRaises(device_module.DjiPowerScheduleChangedError):
+            await second
+        self.assertEqual(
+            sum(cmd == duml.SET_COMMAND for cmd, _ in self.client.requests), 1
+        )
+        self.assertEqual(
+            self.device.data["time_periods"], duml.normalize_time_periods([OFF_PEAK])
+        )
+
+    async def test_expected_snapshot_is_copied_before_waiting_for_lock(self):
+        expected = [dict(PEAK)]
+        queued = asyncio.Event()
+
+        async def replace():
+            queued.set()
+            await self.device.set_time_periods([OFF_PEAK], expected_periods=expected)
+
+        async with self.device._operation_lock:
+            task = asyncio.create_task(replace())
+            await queued.wait()
+            expected.clear()
+        await task
+        self.assertTrue(self.client.did_set)
 
     async def test_push_absence_preserves_schedule_but_invalid_data_clears_it(self):
         await self.device.refresh_config()

@@ -17,7 +17,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
-from .device import DjiPowerDevice, DjiPowerError
+from .device import DjiPowerDevice, DjiPowerError, DjiPowerScheduleChangedError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -227,10 +227,32 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
-    async def async_set_time_periods(self, periods: object) -> None:
+    async def async_get_time_periods(self) -> list[dict[str, object]]:
+        """Read tariff periods for editing and publish the fresh station state."""
+        try:
+            periods = await self.device.get_time_periods()
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+        return periods
+
+    async def async_set_time_periods(
+        self, periods: object, *, expected_periods: object | None = None
+    ) -> None:
         """Replace tariff periods and publish the confirmed station settings."""
         try:
-            await self.device.set_time_periods(periods)
+            if expected_periods is None:
+                await self.device.set_time_periods(periods)
+            else:
+                await self.device.set_time_periods(
+                    periods, expected_periods=expected_periods
+                )
+        except DjiPowerScheduleChangedError as error:
+            raise HomeAssistantError(
+                str(error),
+                translation_domain=DOMAIN,
+                translation_key="schedule_changed",
+            ) from error
         except DjiPowerError as error:
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
