@@ -29,6 +29,11 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+)
 
 from .cloud import (
     CODE_IMAGE_CAPTCHA_ERROR,
@@ -64,9 +69,14 @@ CONF_TOKEN = "member_token"
 
 OPTIONS_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_UPDATE_INTERVAL): vol.All(
-            vol.Coerce(int),
-            vol.Range(min=MIN_UPDATE_INTERVAL, max=MAX_UPDATE_INTERVAL),
+        vol.Required(CONF_UPDATE_INTERVAL): NumberSelector(
+            NumberSelectorConfig(
+                min=MIN_UPDATE_INTERVAL,
+                max=MAX_UPDATE_INTERVAL,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="s",
+            )
         )
     }
 )
@@ -400,15 +410,10 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 class DjiPowerOptionsFlow(OptionsFlow):
     """Configure runtime behavior for a DJI Power station."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._options: dict[str, Any] | None = None
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage integration options."""
-        self._options = None
         errors: dict[str, str] = {}
         current = {
             CONF_UPDATE_INTERVAL: self.config_entry.options.get(
@@ -416,6 +421,9 @@ class DjiPowerOptionsFlow(OptionsFlow):
             ),
             CONF_CONNECTION_SOURCE: self.config_entry.options.get(
                 CONF_CONNECTION_SOURCE, CONNECTION_SOURCE_AUTOMATIC
+            ),
+            CONF_KEEP_CONNECTION: self.config_entry.options.get(
+                CONF_KEEP_CONNECTION, False
             ),
         }
         sources = {CONNECTION_SOURCE_AUTOMATIC: "Automatic (local or proxy)"}
@@ -429,62 +437,42 @@ class DjiPowerOptionsFlow(OptionsFlow):
             sources[selected] = f"{selected} (unavailable)"
 
         schema = OPTIONS_SCHEMA.extend(
-            {vol.Required(CONF_CONNECTION_SOURCE): vol.In(sources)}
+            {
+                vol.Required(CONF_CONNECTION_SOURCE): vol.In(sources),
+                vol.Required(CONF_KEEP_CONNECTION): bool,
+            }
         )
         if user_input is not None:
             try:
                 validated = schema(user_input)
+                interval = validated[CONF_UPDATE_INTERVAL]
+                if not interval.is_integer():
+                    raise vol.Invalid(
+                        "Expected whole seconds", path=[CONF_UPDATE_INTERVAL]
+                    )
+                validated[CONF_UPDATE_INTERVAL] = int(interval)
             except vol.Invalid as err:
                 field = err.path[0] if err.path else "base"
                 if field == CONF_UPDATE_INTERVAL:
                     errors[field] = "invalid_update_interval"
                 elif field == CONF_CONNECTION_SOURCE:
                     errors[field] = "invalid_connection_source"
+                elif field == CONF_KEEP_CONNECTION:
+                    errors[field] = "invalid_keep_connection"
                 else:
                     errors["base"] = "invalid_connection_options"
             else:
-                self._options = {**self.config_entry.options, **validated}
-                self._options[CONF_KEEP_CONNECTION] = False
-                if validated[CONF_CONNECTION_SOURCE] != CONNECTION_SOURCE_AUTOMATIC:
-                    return await self.async_step_retention()
-                return self.async_create_entry(data=self._options)
+                if validated[CONF_CONNECTION_SOURCE] == CONNECTION_SOURCE_AUTOMATIC:
+                    validated[CONF_KEEP_CONNECTION] = False
+                return self.async_create_entry(
+                    data={**self.config_entry.options, **validated}
+                )
             current.update(
                 {key: value for key, value in user_input.items() if key in current}
             )
 
         return self.async_show_form(
             step_id="init",
-            data_schema=self.add_suggested_values_to_schema(schema, current),
-            errors=errors,
-        )
-
-    async def async_step_retention(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Offer connection retention when a local adapter is selected."""
-        if (
-            self._options is None
-            or self._options[CONF_CONNECTION_SOURCE] == CONNECTION_SOURCE_AUTOMATIC
-        ):
-            return self.async_abort(reason="retention_unavailable")
-
-        errors: dict[str, str] = {}
-        schema = vol.Schema({vol.Required(CONF_KEEP_CONNECTION): bool})
-        if user_input is not None:
-            try:
-                validated = schema(user_input)
-            except vol.Invalid:
-                errors[CONF_KEEP_CONNECTION] = "invalid_keep_connection"
-            else:
-                return self.async_create_entry(data={**self._options, **validated})
-
-        current = {
-            CONF_KEEP_CONNECTION: self.config_entry.options.get(
-                CONF_KEEP_CONNECTION, False
-            )
-        }
-        return self.async_show_form(
-            step_id="retention",
             data_schema=self.add_suggested_values_to_schema(schema, current),
             errors=errors,
         )

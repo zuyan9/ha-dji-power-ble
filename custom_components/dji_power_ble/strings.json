@@ -79,29 +79,25 @@
     "step": {
       "init": {
         "title": "DJI Power options",
-        "description": "Choose how often readings are published to Home Assistant and which Bluetooth adapter connects to this station. Automatic allows local adapters and Bluetooth proxies. Selecting a local adapter prevents fallback to other adapters or proxies. Update interval and retention changes apply without reconnecting. Changing the adapter disconnects the station and requires fresh authentication.",
+        "description": "Changes to the update interval or connection retention apply without reconnecting.",
         "data": {
-          "update_interval": "Home Assistant update interval (seconds)",
-          "connection_source": "Bluetooth connection source"
-        }
-      },
-      "retention": {
-        "title": "Keep the local Bluetooth connection",
-        "description": "Keep this station connected through Home Assistant Core restarts and integration reloads using the same local adapter. BlueZ and the adapter must stay running. Changing this option does not disconnect the station; turning it off restores normal disconnection on later restarts and reloads. Host reboots, Bluetooth resets, loss of range, disabling or removing the entry still disconnect it.",
-        "data": {
+          "update_interval": "Home Assistant update interval",
+          "connection_source": "Bluetooth connection source",
           "keep_connection": "Keep connection during HA restarts and reloads"
+        },
+        "data_description": {
+          "update_interval": "Minimum time between routine Home Assistant updates. Set to 0 for immediate updates. Lower values may increase database writes.",
+          "connection_source": "Automatic allows local adapters and Bluetooth proxies. Selecting a local adapter prevents fallback to other adapters or proxies. Changing the source requires a new connection and authentication.",
+          "keep_connection": "Requires a selected local adapter; Automatic turns this off. Keeps the connection through HA Core restarts and integration reloads while Bluetooth stays running. Host reboots, Bluetooth resets, or loss of range still disconnect it."
         }
       }
     },
     "error": {
       "adapters_unavailable": "Could not list local Bluetooth adapters. You can keep the current selection or use Automatic.",
-      "invalid_update_interval": "Enter an update interval from 1 to 60 seconds.",
+      "invalid_update_interval": "Enter a whole number from 0 to 60 seconds.",
       "invalid_connection_source": "Select Automatic or one of the listed local Bluetooth adapters.",
       "invalid_keep_connection": "Select whether to keep the Bluetooth connection.",
-      "invalid_connection_options": "Choose the connection source first, then configure retention if it is supported."
-    },
-    "abort": {
-      "retention_unavailable": "Connection retention requires a selected local Bluetooth adapter."
+      "invalid_connection_options": "Check the options and try again."
     }
   },
   "entity": {

@@ -32,6 +32,7 @@ In the HA integration options, **Bluetooth connection source** defaults to
 **Automatic**, which allows local adapters and ESPHome Bluetooth proxies. Selecting
 a specific local adapter uses only that adapter. If it disconnects, the station
 stays unavailable instead of switching to another adapter or proxy.
+Saving with **Automatic** turns connection retention off.
 
 Selecting a local Linux Bluetooth adapter also allows
 **Keep connection during HA restarts and reloads**. This attempts to preserve

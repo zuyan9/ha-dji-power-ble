@@ -7,8 +7,11 @@ import json
 import sys
 import types
 import unittest
+from enum import StrEnum
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+import voluptuous as vol
 
 COMPONENT = Path(__file__).parents[1] / "custom_components" / "dji_power_ble"
 PACKAGE = "_dji_power_connection_options_tests"
@@ -36,6 +39,23 @@ class _OptionsFlow:
         return {"type": "abort", **kwargs}
 
 
+class _NumberSelectorMode(StrEnum):
+    BOX = "box"
+
+
+class _NumberSelector:
+    """Model HA's numeric coercion and bounds without importing HA itself."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def __call__(self, value):
+        return vol.All(
+            vol.Coerce(float),
+            vol.Range(min=self.config["min"], max=self.config["max"]),
+        )(value)
+
+
 def _module(name: str, **attributes) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attributes)
@@ -43,6 +63,12 @@ def _module(name: str, **attributes) -> types.ModuleType:
 
 
 def _load_flow() -> types.ModuleType:
+    selector = _module(
+        "homeassistant.helpers.selector",
+        NumberSelector=_NumberSelector,
+        NumberSelectorConfig=dict,
+        NumberSelectorMode=_NumberSelectorMode,
+    )
     modules = {
         PACKAGE: _module(PACKAGE, __path__=[str(COMPONENT)]),
         f"{PACKAGE}.cloud": _module(
@@ -90,7 +116,8 @@ def _load_flow() -> types.ModuleType:
         "homeassistant.data_entry_flow": _module(
             "homeassistant.data_entry_flow", FlowResult=dict
         ),
-        "homeassistant.helpers": _module("homeassistant.helpers"),
+        "homeassistant.helpers": _module("homeassistant.helpers", selector=selector),
+        "homeassistant.helpers.selector": selector,
         "homeassistant.helpers.aiohttp_client": _module(
             "homeassistant.helpers.aiohttp_client",
             async_get_clientsession=lambda hass: None,
@@ -129,54 +156,63 @@ class ConnectionOptionsTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_existing_entry_defaults_to_automatic_and_retention_disabled(self):
+    @staticmethod
+    def options(interval=5, source="automatic", keep=False):
+        return {
+            "update_interval": interval,
+            "connection_source": source,
+            "keep_connection": keep,
+        }
+
+    async def test_existing_entry_defaults_to_one_page_with_retention_disabled(self):
         result = await self.flow.async_step_init()
 
+        self.assertEqual(result["type"], "form")
         self.assertEqual(result["step_id"], "init")
+        self.assertEqual(self.flow.suggested, self.options())
         self.assertEqual(
-            self.flow.suggested,
-            {"update_interval": 5, "connection_source": "automatic"},
-        )
-        result = await self.flow.async_step_init(
-            {"update_interval": 5, "connection_source": "automatic"}
-        )
-        self.assertEqual(result["type"], "create_entry")
-        self.assertEqual(
-            result["data"],
-            {
-                "update_interval": 5,
-                "connection_source": "automatic",
-                "keep_connection": False,
-            },
+            {marker.schema for marker in result["data_schema"].schema},
+            {"update_interval", "connection_source", "keep_connection"},
         )
 
-    async def test_local_adapter_offers_explicit_retention_choice(self):
+        result = await self.flow.async_step_init(self.options())
+
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["data"], self.options())
+
+    async def test_interval_selector_is_numeric_box_with_seconds_and_zero_minimum(self):
+        result = await self.flow.async_step_init()
+        selector = next(
+            validator
+            for marker, validator in result["data_schema"].schema.items()
+            if marker.schema == "update_interval"
+        )
+
+        self.assertIsInstance(selector, _NumberSelector)
+        self.assertEqual(selector.config["min"], 0)
+        self.assertEqual(selector.config["max"], 60)
+        self.assertEqual(selector.config["step"], 1)
+        self.assertEqual(selector.config["mode"], _NumberSelectorMode.BOX)
+        self.assertEqual(selector.config["unit_of_measurement"], "s")
+
+    async def test_local_adapter_and_retention_save_together_on_one_page(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
                 result = await self.flow.async_step_init(
-                    {"update_interval": "7", "connection_source": ADAPTER}
-                )
-                self.assertEqual(result["step_id"], "retention")
-                self.assertFalse(self.flow.suggested["keep_connection"])
-
-                result = await self.flow.async_step_retention(
-                    {"keep_connection": enabled}
+                    self.options("7", ADAPTER, enabled)
                 )
 
                 self.assertEqual(result["type"], "create_entry")
-                self.assertEqual(result["data"]["connection_source"], ADAPTER)
-                self.assertEqual(result["data"]["update_interval"], 7)
+                self.assertEqual(result["data"], self.options(7, ADAPTER, enabled))
+                self.assertIs(type(result["data"]["update_interval"]), int)
                 self.assertIs(result["data"]["keep_connection"], enabled)
 
     async def test_unknown_model_can_enable_retention_before_station_is_loaded(self):
         self.flow.config_entry.data = {}
 
-        result = await self.flow.async_step_init(
-            {"update_interval": 5, "connection_source": ADAPTER}
-        )
+        result = await self.flow.async_step_init(self.options(5, ADAPTER, True))
 
-        self.assertEqual(result["step_id"], "retention")
-        result = await self.flow.async_step_retention({"keep_connection": True})
+        self.assertEqual(result["type"], "create_entry")
         self.assertTrue(result["data"]["keep_connection"])
 
     async def test_all_models_can_enable_retention_on_selected_local_adapter(self):
@@ -186,69 +222,60 @@ class ConnectionOptionsTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(model=model):
                 self.flow.config_entry.data["model"] = model
+
                 result = await self.flow.async_step_init(
-                    {"update_interval": 5, "connection_source": ADAPTER}
+                    self.options(5, ADAPTER, True)
                 )
 
-                self.assertEqual(result["step_id"], "retention")
-                result = await self.flow.async_step_retention(
-                    {"keep_connection": True}
-                )
                 self.assertEqual(result["type"], "create_entry")
                 self.assertEqual(result["data"]["connection_source"], ADAPTER)
                 self.assertTrue(result["data"]["keep_connection"])
 
-    async def test_switch_to_automatic_clears_retention(self):
-        self.flow.config_entry.options = {
-            "connection_source": ADAPTER,
-            "keep_connection": True,
-        }
+    async def test_automatic_clears_retention_even_when_submitted_enabled(self):
+        self.flow.config_entry.options = self.options(5, ADAPTER, True)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                result = await self.flow.async_step_init(
+                    self.options(5, "automatic", enabled)
+                )
 
-        result = await self.flow.async_step_init(
-            {"update_interval": 5, "connection_source": "automatic"}
-        )
-
-        self.assertFalse(result["data"]["keep_connection"])
-        result = await self.flow.async_step_retention({"keep_connection": True})
-        self.assertEqual(result["reason"], "retention_unavailable")
+                self.assertEqual(result["type"], "create_entry")
+                self.assertEqual(result["data"], self.options())
 
     async def test_selected_missing_adapter_is_retained_without_fallback(self):
-        self.flow.config_entry.options = {
-            "connection_source": MISSING_ADAPTER,
-            "keep_connection": True,
-        }
+        current = self.options(7, MISSING_ADAPTER, True)
+        self.flow.config_entry.options = current
+
         result = await self.flow.async_step_init()
-        self.assertEqual(self.flow.suggested["connection_source"], MISSING_ADAPTER)
-        validated = result["data_schema"](
-            {"update_interval": 5, "connection_source": MISSING_ADAPTER}
-        )
+
+        self.assertEqual(self.flow.suggested, current)
+        validated = result["data_schema"](current)
         self.assertEqual(validated["connection_source"], MISSING_ADAPTER)
 
         result = await self.flow.async_step_init(validated)
-        self.assertEqual(result["step_id"], "retention")
-        self.assertTrue(self.flow.suggested["keep_connection"])
-        result = await self.flow.async_step_retention({"keep_connection": True})
-        self.assertEqual(result["data"]["connection_source"], MISSING_ADAPTER)
 
-    async def test_adapter_enumeration_error_keeps_current_selection(self):
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["data"], current)
+
+    async def test_adapter_enumeration_error_keeps_all_current_values(self):
         self.adapters.side_effect = RuntimeError("D-Bus unavailable")
-        self.flow.config_entry.options["connection_source"] = MISSING_ADAPTER
+        current = self.options(7, MISSING_ADAPTER, True)
+        self.flow.config_entry.options = current
 
         result = await self.flow.async_step_init()
 
         self.assertEqual(result["errors"], {"base": "adapters_unavailable"})
-        self.assertEqual(self.flow.suggested["connection_source"], MISSING_ADAPTER)
-        result = await self.flow.async_step_init(
-            {"update_interval": 5, "connection_source": "automatic"}
-        )
+        self.assertEqual(self.flow.suggested, current)
+
+        result = await self.flow.async_step_init(self.options())
+
         self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["data"], self.options())
 
     async def test_proxy_only_installation_can_save_automatic(self):
         self.adapters.return_value = {}
 
-        result = await self.flow.async_step_init(
-            {"update_interval": 5, "connection_source": "automatic"}
-        )
+        result = await self.flow.async_step_init(self.options())
 
         self.assertEqual(result["type"], "create_entry")
         self.assertFalse(result["data"]["keep_connection"])
@@ -256,63 +283,91 @@ class ConnectionOptionsTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_or_proxy_source_rejected(self):
         for source in (MISSING_ADAPTER, "esphome-proxy", "hci0", None):
             with self.subTest(source=source):
-                result = await self.flow.async_step_init(
-                    {"update_interval": 5, "connection_source": source}
-                )
+                result = await self.flow.async_step_init(self.options(source=source))
+
                 self.assertEqual(result["type"], "form")
+                self.assertEqual(result["step_id"], "init")
                 self.assertEqual(
                     result["errors"]["connection_source"],
                     "invalid_connection_source",
                 )
 
-    async def test_interval_range_validation_is_preserved(self):
-        for interval in (0, 61, "not a number"):
+    async def test_intervals_outside_bounds_or_fractional_are_rejected(self):
+        for interval in (-1, 61, "not a number", None, 0.5, 7.5, "7.5"):
             with self.subTest(interval=interval):
-                result = await self.flow.async_step_init(
-                    {"update_interval": interval, "connection_source": "automatic"}
-                )
+                result = await self.flow.async_step_init(self.options(interval))
+
                 self.assertEqual(result["type"], "form")
+                self.assertEqual(result["step_id"], "init")
                 self.assertEqual(
                     result["errors"]["update_interval"], "invalid_update_interval"
                 )
-        for interval in (1, 60):
-            with self.subTest(interval=interval):
-                result = await self.flow.async_step_init(
-                    {"update_interval": interval, "connection_source": "automatic"}
-                )
-                self.assertEqual(result["type"], "create_entry")
 
-    async def test_crafted_retention_on_init_is_rejected(self):
-        result = await self.flow.async_step_init(
-            {
-                "update_interval": 5,
-                "connection_source": "automatic",
-                "keep_connection": True,
-            }
-        )
+    async def test_zero_boundaries_and_numeric_input_store_integer_seconds(self):
+        for interval, expected in ((0, 0), (1, 1), (60, 60), ("7", 7), (7.0, 7)):
+            with self.subTest(interval=interval):
+                result = await self.flow.async_step_init(self.options(interval))
+
+                self.assertEqual(result["type"], "create_entry")
+                self.assertEqual(result["data"]["update_interval"], expected)
+                self.assertIs(type(result["data"]["update_interval"]), int)
+
+    async def test_retention_rejects_non_boolean_input_on_single_page(self):
+        for source in ("automatic", ADAPTER):
+            for value in ("true", "false", 0, 1, None):
+                with self.subTest(source=source, value=value):
+                    result = await self.flow.async_step_init(
+                        self.options(5, source, value)
+                    )
+
+                    self.assertEqual(result["type"], "form")
+                    self.assertEqual(result["step_id"], "init")
+                    self.assertEqual(
+                        result["errors"]["keep_connection"],
+                        "invalid_keep_connection",
+                    )
+
+    async def test_invalid_input_preserves_other_submitted_values(self):
+        submitted = self.options("invalid", ADAPTER, True)
+
+        result = await self.flow.async_step_init(submitted)
 
         self.assertEqual(result["type"], "form")
-        self.assertEqual(result["errors"]["base"], "invalid_connection_options")
+        self.assertEqual(self.flow.suggested, submitted)
+        result = await self.flow.async_step_init(self.options(0, ADAPTER, True))
+        self.assertEqual(result["data"], self.options(0, ADAPTER, True))
 
-    async def test_retention_step_requires_source_selection(self):
-        result = await self.flow.async_step_retention({"keep_connection": True})
+    async def test_all_three_fields_are_required(self):
+        errors = {
+            "update_interval": "invalid_update_interval",
+            "connection_source": "invalid_connection_source",
+            "keep_connection": "invalid_keep_connection",
+        }
+        for missing, expected in errors.items():
+            with self.subTest(missing=missing):
+                submitted = self.options()
+                submitted.pop(missing)
 
-        self.assertEqual(result["type"], "abort")
-        self.assertEqual(result["reason"], "retention_unavailable")
+                result = await self.flow.async_step_init(submitted)
 
-    async def test_retention_rejects_non_boolean_input(self):
-        await self.flow.async_step_init(
-            {"update_interval": 5, "connection_source": ADAPTER}
-        )
-        for value in ("true", 1, None):
-            with self.subTest(value=value):
-                result = await self.flow.async_step_retention(
-                    {"keep_connection": value}
-                )
                 self.assertEqual(result["type"], "form")
-                self.assertEqual(
-                    result["errors"]["keep_connection"], "invalid_keep_connection"
-                )
+                self.assertEqual(result["errors"][missing], expected)
+
+    async def test_unknown_stored_options_survive_but_unknown_input_is_rejected(self):
+        self.flow.config_entry.options = {"future_option": "preserved"}
+
+        result = await self.flow.async_step_init(self.options(7, ADAPTER, True))
+
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(
+            result["data"],
+            {"future_option": "preserved", **self.options(7, ADAPTER, True)},
+        )
+        result = await self.flow.async_step_init(
+            {"unrecognized_field": True, **self.options()}
+        )
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["errors"]["base"], "invalid_connection_options")
 
     def test_english_translations_match_strings(self):
         self.assertEqual(
