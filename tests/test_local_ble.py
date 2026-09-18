@@ -23,6 +23,7 @@ class LocalBleSubprocessTests(unittest.TestCase):
 if __name__ == "__main__":
     import asyncio
     import importlib.util
+    import threading
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, patch
 
@@ -149,7 +150,7 @@ if __name__ == "__main__":
                 return backend.services
 
             patcher = patch.object(
-                local._local_backend_type(), "_get_services", services
+                bluez.BleakClientBlueZDBus, "_get_services", services
             )
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -297,7 +298,7 @@ if __name__ == "__main__":
                 backend.services = BleakGATTServiceCollection()
                 return backend.services
 
-            with patch.object(local._local_backend_type(), "_get_services", services):
+            with patch.object(bluez.BleakClientBlueZDBus, "_get_services", services):
                 client = await self.connect(retained=True)
                 self.assertIsNone(client._backend._retention_monitor_task)
                 await client.detach()
@@ -332,7 +333,7 @@ if __name__ == "__main__":
             device = await local.async_local_device(ADAPTER, STATION)
             self.client = local.LocalBleakClient(device)
             with patch.object(
-                local._local_backend_type(), "_get_services", stalled_services
+                bluez.BleakClientBlueZDBus, "_get_services", stalled_services
             ):
                 task = asyncio.create_task(self.client.connect())
                 await entered.wait()
@@ -377,13 +378,49 @@ if __name__ == "__main__":
 
         async def test_unknown_bleak_major_is_rejected_without_patching_bleak(self):
             original_client = bleak.BleakClient
+            device = await local.async_local_device(ADAPTER, STATION)
+            self.client = local.LocalBleakClient(device)
             with (
                 patch.object(local, "_backend_type", None),
                 patch.object(local, "version", return_value="4.0.0"),
                 self.assertRaisesRegex(BleakError, "version"),
             ):
-                local._local_backend_type()
+                await self.client.connect()
             self.assertIs(bleak.BleakClient, original_client)
+            self.assertFalse(self.client.is_connected)
+            await self.client.disconnect()
+            await self.client.detach()
+            self.assertEqual(self.members(), [])
+
+        async def test_version_metadata_is_deferred_and_read_off_the_event_loop(self):
+            event_loop_thread = threading.get_ident()
+            version_threads = []
+            real_version = local.version
+
+            def read_version(package):
+                version_threads.append(threading.get_ident())
+                self.assertNotEqual(threading.get_ident(), event_loop_thread)
+                return real_version(package)
+
+            device = await local.async_local_device(ADAPTER, STATION)
+            with (
+                patch.object(local, "_backend_type", None),
+                patch.object(local, "version", side_effect=read_version) as read,
+            ):
+                self.client = local.LocalBleakClient(device)
+                read.assert_not_called()
+                self.assertFalse(self.client.is_connected)
+                with self.assertRaisesRegex(BleakError, "not been discovered"):
+                    _ = self.client.services
+                await self.client.disconnect()
+                await self.client.detach()
+                read.assert_not_called()
+
+                await self.client.connect()
+
+                read.assert_called_once_with("bleak")
+                self.assertEqual(len(version_threads), 1)
+                self.assertTrue(self.client.is_connected)
 
         async def test_non_linux_has_no_local_choices(self):
             with patch.object(local.sys, "platform", "darwin"):

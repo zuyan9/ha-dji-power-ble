@@ -141,16 +141,13 @@ class LocalBleakClient:
         self._device = device
         self._disconnected_callback = disconnected_callback
         self.connected_before_attach = False
-        self._backend = _local_backend_type()(
-            device,
-            bluez={},
-            timeout=10.0,
-            disconnected_callback=self._on_backend_disconnect,
-        )
+        self._backend: Any | None = None
 
     def _on_backend_disconnect(self) -> None:
         """Release D-Bus on unexpected loss before the owner drops this client."""
         backend = self._backend
+        if backend is None:
+            return
         self.connected_before_attach = False
         # Bleak 3 keeps the bus after its disconnect signal cleanup. An explicit
         # disconnect still needs that bus until its method reply has arrived.
@@ -163,12 +160,12 @@ class LocalBleakClient:
     @property
     def is_connected(self) -> bool:
         """Return whether this client currently owns an attached BLE session."""
-        return self._backend.is_connected
+        return self._backend is not None and self._backend.is_connected
 
     @property
     def services(self) -> BleakGATTServiceCollection:
         """Return the GATT table for the attached connection."""
-        services = self._backend.services
+        services = self._backend.services if self._backend is not None else None
         if services is None:
             raise BleakError("Local Bluetooth services have not been discovered")
         return services
@@ -189,6 +186,16 @@ class LocalBleakClient:
     async def connect(self) -> None:
         """Attach to the selected controller, never selecting another source."""
         self.connected_before_attach = False
+        if self._backend is None:
+            # Package metadata and the first backend import read the filesystem.
+            # Defer them until connect and keep those reads off HA's event loop.
+            backend_type = await asyncio.to_thread(_local_backend_type)
+            self._backend = backend_type(
+                self._device,
+                bluez={},
+                timeout=10.0,
+                disconnected_callback=self._on_backend_disconnect,
+            )
         manager = await _manager()
         if not self._selected_device_matches(manager):
             raise BleakError("The selected local Bluetooth device is unavailable")
@@ -219,6 +226,8 @@ class LocalBleakClient:
         callback: Callable[[BleakGATTCharacteristic, bytearray], None],
     ) -> None:
         """Subscribe using the normal Bleak callback shape."""
+        if self._backend is None:
+            raise BleakError("Local Bluetooth client is not connected")
         await self._backend.start_notify(
             characteristic,
             lambda data: callback(characteristic, data),
@@ -229,15 +238,20 @@ class LocalBleakClient:
         self, characteristic: BleakGATTCharacteristic, data: bytes, *, response: bool
     ) -> None:
         """Write to this connection's selected characteristic."""
+        if self._backend is None:
+            raise BleakError("Local Bluetooth client is not connected")
         await self._backend.write_gatt_char(characteristic, data, response)
 
     async def disconnect(self) -> None:
         """Normally release both the station link and local resources."""
-        await self._backend.disconnect()
+        if self._backend is not None:
+            await self._backend.disconnect()
 
     async def detach(self) -> None:
         """Close our D-Bus session while leaving an established link in BlueZ."""
         backend = self._backend
+        if backend is None:
+            return
         if not backend.is_connected:
             await backend.disconnect()
             return
