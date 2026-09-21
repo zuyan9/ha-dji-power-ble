@@ -221,7 +221,7 @@
   "services": {
     "set_time_periods": {
       "name": "Set electricity price time periods",
-      "description": "Replace all peak and off-peak periods on a Power 2000. Times use the station's timezone. This does not change the Energy Optimization mode.",
+      "description": "Replace all peak and off-peak periods on a Power 2000 when this action runs. Times use the station's timezone and whole minutes (seconds 00). This does not change the Energy Optimization mode.",
       "fields": {
         "device_id": {
           "name": "Power station",
@@ -229,7 +229,7 @@
         },
         "periods": {
           "name": "Time periods",
-          "description": "Complete list of periods with type (peak or off_peak), start and end (quoted HH:MM), and optional days (mon through sun; omit for every day). At most eight periods of each type. An empty list clears the schedule only when Scheduled Periods and all grid-tied modes are inactive."
+          "description": "Add, edit, or delete periods in the complete replacement schedule. Leave days unset for every day; otherwise select one or more days. At most eight periods of each type. To clear all periods, use Configure or YAML periods: [] with Scheduled Periods and all grid-tied modes off."
         }
       }
     }
@@ -250,6 +250,14 @@
         "fri": "Friday",
         "sat": "Saturday",
         "sun": "Sunday"
+      }
+    },
+    "time_period": {
+      "fields": {
+        "type": "Price period",
+        "start": "Start time (seconds 00)",
+        "end": "End time (seconds 00)",
+        "days": "Days (optional; select all for every day)"
       }
     }
   },

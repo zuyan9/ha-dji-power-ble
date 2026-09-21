@@ -15,7 +15,22 @@ SERVICE_SET_TIME_PERIODS = "set_time_periods"
 
 
 def _validate_periods(value: object) -> list[dict[str, object]]:
-    """Apply the same semantic checks to actions and direct device writes."""
+    """Accept HA time-selector values before applying schedule validation."""
+    if isinstance(value, list):
+        value = [
+            dict(period) if isinstance(period, dict) else period for period in value
+        ]
+        for period in value:
+            if not isinstance(period, dict):
+                continue
+            for field in ("start", "end"):
+                time = period.get(field)
+                if isinstance(time, str) and len(time) == 8 and time[5] == ":":
+                    if time[6:] != "00":
+                        raise vol.Invalid(
+                            "period times must use whole minutes (00 seconds)"
+                        )
+                    period[field] = time[:5]
     try:
         return normalize_time_periods(value)
     except ProtocolError as error:
