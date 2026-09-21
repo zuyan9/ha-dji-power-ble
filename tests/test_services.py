@@ -7,6 +7,7 @@ import json
 import sys
 import types
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -101,6 +102,81 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.async_set_time_periods.assert_awaited_once_with([
             PERIOD | {"days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}
         ])
+
+    async def test_form_times_and_yaml_times_produce_the_same_schedule(self) -> None:
+        yaml_periods = [
+            PERIOD,
+            {"type": "peak", "days": ["sun", "mon"], "start": "22:00", "end": "00:00"},
+        ]
+        form_periods = [
+            {**period, "start": period["start"] + ":00", "end": period["end"] + ":00"}
+            for period in reversed(yaml_periods)
+        ]
+        original = deepcopy(form_periods)
+        await self.invoke(yaml_periods)
+        expected = self.coordinator.async_set_time_periods.call_args.args[0]
+        self.coordinator.async_set_time_periods.reset_mock()
+
+        await self.invoke(form_periods)
+
+        self.coordinator.async_set_time_periods.assert_awaited_once_with(expected)
+        self.assertEqual(form_periods, original)
+
+    async def test_mixed_form_and_yaml_times_are_accepted(self) -> None:
+        await self.invoke([PERIOD | {"start": "00:30:00"}])
+        self.coordinator.async_set_time_periods.assert_awaited_once_with([
+            PERIOD | {"days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}
+        ])
+
+    async def test_seconds_are_rejected_without_rounding_or_mutation(self) -> None:
+        for field in ("start", "end"):
+            for time in ("00:30:01", "00:30:59", "00:30:00.001"):
+                periods = [PERIOD | {field: time}]
+                original = deepcopy(periods)
+                with (
+                    self.subTest(field=field, time=time),
+                    self.assertRaises(vol.Invalid),
+                ):
+                    await self.invoke(periods)
+                self.assertEqual(periods, original)
+        self.coordinator.async_set_time_periods.assert_not_awaited()
+
+    async def test_form_times_still_require_a_valid_complete_schedule(self) -> None:
+        period = PERIOD | {"start": "00:30:00", "end": "05:30:00"}
+        for periods in (
+            [period | {"days": []}],
+            [period | {"days": ["mon", "mon"]}],
+            [period | {"days": ["monday"]}],
+            [period | {"start": "24:00:00"}],
+            [period | {"end": "00:30:00"}],
+            [period | {"start": "00:60:00"}],
+            [period | {"start": "0:30:00"}],
+            [period | {"start": "aa:bb:00"}],
+            [period | {"start": None}],
+            [period | {"end": 1800}],
+            [period | {"cycle": "daily"}],
+            [period, period | {"type": "peak"}],
+            [period, None],
+            [
+                {"type": "peak", "start": f"{hour:02}:00:00", "end": f"{hour:02}:30:00"}
+                for hour in range(9)
+            ],
+            [
+                {
+                    "type": "peak", "days": ["sun"],
+                    "start": "23:00:00", "end": "01:00:00",
+                },
+                {
+                    "type": "off_peak", "days": ["mon"],
+                    "start": "00:30:00", "end": "02:00:00",
+                },
+            ],
+        ):
+            original = deepcopy(periods)
+            with self.subTest(periods=periods), self.assertRaises(vol.Invalid):
+                await self.invoke(periods)
+            self.assertEqual(periods, original)
+        self.coordinator.async_set_time_periods.assert_not_awaited()
 
     async def test_empty_list_reaches_device_for_fresh_mode_check(self) -> None:
         await self.invoke([])

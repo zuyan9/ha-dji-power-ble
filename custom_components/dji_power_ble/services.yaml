@@ -1,8 +1,9 @@
 set_time_periods:
   name: Set electricity price time periods
   description: >-
-    Replace all peak and off-peak periods on a Power 2000. Times use the station's
-    timezone. This does not change the Energy Optimization mode.
+    Replace all peak and off-peak periods on a Power 2000 when this action runs.
+    Times use the station's timezone and whole minutes (seconds 00).
+    This does not change the Energy Optimization mode.
   fields:
     device_id:
       name: Power station
@@ -16,10 +17,10 @@ set_time_periods:
     periods:
       name: Time periods
       description: >-
-        Complete list of periods with type (peak or off_peak), start and end
-        (quoted HH:MM), and optional days (mon through sun; omit for every day).
-        At most eight periods of each type. An empty list clears the schedule
-        only when Scheduled Periods and all grid-tied modes are inactive.
+        Add, edit, or delete periods in the complete replacement schedule.
+        Leave days unset for every day; otherwise select one or more days.
+        At most eight periods of each type. To clear all periods, use Configure
+        or YAML periods: [] with Scheduled Periods and all grid-tied modes off.
       required: true
       example:
         - type: off_peak
@@ -27,3 +28,52 @@ set_time_periods:
           end: "05:30"
       selector:
         object:
+          multiple: true
+          label_field: start
+          description_field: end
+          translation_key: time_period
+          fields:
+            type:
+              label: Price period
+              required: true
+              selector:
+                select:
+                  mode: dropdown
+                  translation_key: period_type
+                  options:
+                    - value: peak
+                      label: Peak
+                    - value: off_peak
+                      label: Off-peak
+            start:
+              label: Start time (seconds 00)
+              required: true
+              selector:
+                time:
+            end:
+              label: End time (seconds 00)
+              required: true
+              selector:
+                time:
+            days:
+              label: Days (optional; select all for every day)
+              selector:
+                select:
+                  multiple: true
+                  mode: dropdown
+                  translation_key: weekdays
+                  options:
+                    - value: mon
+                      label: Monday
+                    - value: tue
+                      label: Tuesday
+                    - value: wed
+                      label: Wednesday
+                    - value: thu
+                      label: Thursday
+                    - value: fri
+                      label: Friday
+                    - value: sat
+                      label: Saturday
+                    - value: sun
+                      label: Sunday
