@@ -165,12 +165,6 @@ DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SensorEntityDescription(
-        key="runtime_min",
-        name="Runtime remaining",
-        device_class=SensorDeviceClass.DURATION,
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-    ),
-    SensorEntityDescription(
         key="primary_battery_percent",
         name="Primary battery",
         device_class=SensorDeviceClass.BATTERY,
@@ -216,6 +210,21 @@ DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         key="firmware_secondary",
         name="Secondary firmware",
         entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+)
+
+BATTERY_TIME_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="runtime_min",
+        name="Remaining Time",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+    ),
+    SensorEntityDescription(
+        key="recharging_time_min",
+        name="Recharging Time",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
     ),
 )
 
@@ -269,6 +278,10 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         DjiPowerSensor(coordinator, description) for description in DESCRIPTIONS
+    )
+    async_add_entities(
+        DjiPowerBatteryTimeSensor(coordinator, description)
+        for description in BATTERY_TIME_DESCRIPTIONS
     )
     if supports_feature(coordinator.device.model, ModelFeature.TARIFF_SCHEDULE):
         async_add_entities([DjiPowerTimePeriodsSensor(coordinator)])
@@ -336,6 +349,22 @@ class DjiPowerSensor(DjiPowerEntity, SensorEntity):
         if isinstance(value, str) and len(value) > 255:
             return value[:255]
         return value
+
+
+class DjiPowerBatteryTimeSensor(DjiPowerSensor):
+    """Show the reported duration only for the matching battery time category."""
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.native_value is not None
+
+    @property
+    def native_value(self) -> int | None:
+        data = self.coordinator.data or {}
+        time_types = (0, 2) if self.entity_description.key == "runtime_min" else (1,)
+        if data.get("battery_time_type") not in time_types:
+            return None
+        return data.get("runtime_min")
 
 
 class DjiPowerTimePeriodsSensor(DjiPowerEntity, SensorEntity):

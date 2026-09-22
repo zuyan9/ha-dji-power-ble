@@ -18,7 +18,7 @@ used only during setup to retrieve the device's local credential.
 ## Features
 
 - AC output control; discharge and recharge limit controls
-- Battery level, remaining time, temperature, and charging status
+- Battery level, remaining time, charging time, temperature, and charging status
 - Input, output, AC, USB, SDC, etc. power readings
 - Expansion battery devices with battery level and pack diagnostics
 - [SDC and car-charger controls](docs/accessory-controls.md) reported by the station

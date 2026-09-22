@@ -1,4 +1,4 @@
-"""Offline checks for expansion-pack devices and dynamic sensor discovery."""
+"""Offline checks for battery times, expansion packs, and sensor discovery."""
 
 from __future__ import annotations
 
@@ -190,6 +190,191 @@ class _DeviceRegistry:
         self.devices[identifier].__dict__.update(info)
 
 
+class BatteryTimeSensorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.unload_callbacks = []
+        self.entry = types.SimpleNamespace(
+            entry_id="station",
+            title="Power station",
+            data={"address": ADDRESS},
+            async_on_unload=self.unload_callbacks.append,
+        )
+        self.coordinator = types.SimpleNamespace(
+            entry=self.entry,
+            device=types.SimpleNamespace(
+                address=ADDRESS,
+                model="DJI Power 2000",
+                serial_number="SYNTHETICBASE",
+            ),
+            data={},
+            last_update_success=True,
+            async_add_listener=lambda listener: lambda: None,
+        )
+        self.entities = {
+            description.key: sensor.DjiPowerBatteryTimeSensor(
+                self.coordinator, description
+            )
+            for description in sensor.BATTERY_TIME_DESCRIPTIONS
+        }
+
+    async def test_discovery_preserves_existing_identity_across_models(self) -> None:
+        for model in (
+            "DJI Power 2000",
+            "DJI Power 1000 V2",
+            "DJI Power 1000 Mini",
+            "DJI Power 1000",
+            "DJI Power 500",
+        ):
+            with self.subTest(model=model):
+                self.coordinator.device.model = model
+                hass = types.SimpleNamespace(
+                    data={DOMAIN: {self.entry.entry_id: self.coordinator}},
+                    entity_registry=_EntityRegistry(),
+                    device_registry=_DeviceRegistry(),
+                )
+                legacy_id = f"{ADDRESS}_runtime_min"
+                hass.entity_registry.register(legacy_id)
+                registered = hass.entity_registry.async_get_entity_id(
+                    "sensor", DOMAIN, legacy_id
+                )
+                added = []
+                await sensor.async_setup_entry(hass, self.entry, added.extend)
+                times = [
+                    entity for entity in added
+                    if isinstance(entity, sensor.DjiPowerBatteryTimeSensor)
+                ]
+                self.assertEqual(len(times), 2)
+                self.assertEqual(
+                    {entity._attr_unique_id for entity in times},
+                    {legacy_id, f"{ADDRESS}_recharging_time_min"},
+                )
+                self.assertEqual(
+                    sum(entity._attr_unique_id == legacy_id for entity in added), 1
+                )
+                self.assertEqual(
+                    hass.entity_registry.async_get_entity_id(
+                        "sensor", DOMAIN, legacy_id
+                    ),
+                    registered,
+                )
+                for entity in times:
+                    self.assertIsNone(entity.native_value)
+                    self.assertFalse(entity.available)
+
+    def test_names_units_and_default_visibility(self) -> None:
+        self.assertEqual(
+            {
+                key: entity.entity_description.name
+                for key, entity in self.entities.items()
+            },
+            {
+                "runtime_min": "Remaining Time",
+                "recharging_time_min": "Recharging Time",
+            },
+        )
+        for entity in self.entities.values():
+            description = entity.entity_description
+            self.assertEqual(description.device_class, "duration")
+            self.assertEqual(description.native_unit_of_measurement, "min")
+            self.assertTrue(description.entity_registry_enabled_default)
+
+    def test_mode_transitions_publish_only_the_applicable_time(self) -> None:
+        for time_type, minutes, active_key in (
+            (0, 5940, "runtime_min"),
+            (1, 90, "recharging_time_min"),
+            (2, 135, "runtime_min"),
+            (1, 45, "recharging_time_min"),
+            (0, 5940, "runtime_min"),
+        ):
+            with self.subTest(time_type=time_type, minutes=minutes):
+                self.coordinator.data = {
+                    "battery_time_type": time_type,
+                    "runtime_min": minutes,
+                    "input_w": 400,
+                    "output_w": 380,
+                }
+                for key, entity in self.entities.items():
+                    self.assertEqual(entity.available, key == active_key)
+                    self.assertEqual(
+                        entity.native_value, minutes if key == active_key else None
+                    )
+
+    def test_missing_or_unknown_type_clears_both_times(self) -> None:
+        for data in (
+            None,
+            {},
+            {"runtime_min": 120},
+            {"runtime_min": 120, "battery_time_type": None},
+            {"runtime_min": 120, "battery_time_type": 3},
+            {"runtime_min": 120, "battery_time_type": 255},
+        ):
+            with self.subTest(data=data):
+                self.coordinator.data = data
+                for entity in self.entities.values():
+                    self.assertIsNone(entity.native_value)
+                    self.assertFalse(entity.available)
+
+    def test_missing_duration_does_not_use_primary_or_a_derived_value(self) -> None:
+        for time_type in (0, 1, 2):
+            for missing in ({}, {"runtime_min": None}):
+                with self.subTest(time_type=time_type, missing=missing):
+                    self.coordinator.data = {
+                        "battery_time_type": time_type,
+                        "primary_runtime_min": 120,
+                        "recharging_time_min": 90,
+                        "input_w": 500,
+                        **missing,
+                    }
+                    for entity in self.entities.values():
+                        self.assertIsNone(entity.native_value)
+                        self.assertFalse(entity.available)
+
+    def test_zero_and_99_hours_are_preserved_in_each_applicable_mode(self) -> None:
+        for time_type, active_key in (
+            (0, "runtime_min"),
+            (1, "recharging_time_min"),
+            (2, "runtime_min"),
+        ):
+            for minutes in (0, 5940):
+                with self.subTest(time_type=time_type, minutes=minutes):
+                    self.coordinator.data = {
+                        "battery_time_type": time_type, "runtime_min": minutes
+                    }
+                    self.assertTrue(self.entities[active_key].available)
+                    self.assertEqual(self.entities[active_key].native_value, minutes)
+
+    def test_coordinator_failure_and_recovery_preserve_active_time(self) -> None:
+        for time_type, active_key in (
+            (1, "recharging_time_min"), (2, "runtime_min")
+        ):
+            with self.subTest(time_type=time_type):
+                self.coordinator.data = {
+                    "battery_time_type": time_type, "runtime_min": 120
+                }
+                self.coordinator.last_update_success = False
+                self.assertTrue(
+                    all(not entity.available for entity in self.entities.values())
+                )
+                self.coordinator.last_update_success = True
+                self.assertTrue(self.entities[active_key].available)
+                self.assertEqual(self.entities[active_key].native_value, 120)
+
+    def test_primary_runtime_remains_an_independent_disabled_sensor(self) -> None:
+        description = next(
+            item for item in sensor.DESCRIPTIONS if item.key == "primary_runtime_min"
+        )
+        entity = sensor.DjiPowerSensor(self.coordinator, description)
+        self.assertEqual(entity._attr_unique_id, f"{ADDRESS}_primary_runtime_min")
+        self.assertFalse(description.entity_registry_enabled_default)
+        for time_type in (0, 1, 2):
+            self.coordinator.data = {
+                "battery_time_type": time_type,
+                "runtime_min": 120,
+                "primary_runtime_min": 37,
+            }
+            self.assertEqual(entity.native_value, 37)
+
+
 class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.listeners = []
@@ -255,7 +440,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=23.5, firmware="01.02.03.04")
         await self.setup([pack])
         self.assertEqual(
-            len(self.entities) - len(self.packs()), len(sensor.DESCRIPTIONS) + 1
+            len(self.entities) - len(self.packs()),
+            len(sensor.DESCRIPTIONS) + len(sensor.BATTERY_TIME_DESCRIPTIONS) + 1,
         )
         self.assertEqual(len(self.packs()), 4)
         self.assertEqual(len(self.hass.device_registry.devices), 2)

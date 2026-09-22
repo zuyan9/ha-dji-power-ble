@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
 
-from tests.test_duml import SYNTHETIC_ECO_MODE, expansion_battery
+from tests.test_duml import SYNTHETIC_ECO_MODE, expansion_battery, record
 
 ROOT = Path(__file__).parents[1]
 COMPONENT = ROOT / "custom_components" / "dji_power_ble"
@@ -1486,8 +1486,60 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.device._handle_packet(packet)
 
         self.assertEqual(self.device.data["battery_percent"], 66)
-        self.assertTrue(self.device.data["charging"])
+        self.assertFalse(self.device.data["charging"])
         self.assertEqual(len(updates), 1)
+
+    async def test_report_transitions_keep_battery_state_across_partial_pushes(
+        self,
+    ) -> None:
+        updates = []
+        self.device.add_state_listener(updates.append)
+        cases = (
+            (None, None, 516, None, None, None),
+            (1, 120, None, 1, 120, True),
+            (2, 5940, 516, 2, 5940, False),
+            (None, None, 0, 2, 5940, False),
+            (0, 0, None, 0, 0, False),
+            (1, 15, None, 1, 15, True),
+            (255, 12, None, 255, 12, None),
+            (None, None, 600, 255, 12, None),
+        )
+        for sequence, case in enumerate(cases, start=1):
+            time_type, duration, input_w, expected_type, expected_time, charging = case
+            with self.subTest(sequence=sequence, time_type=time_type):
+                payload = duml.build_keyed_header(sequence)
+                if time_type is not None:
+                    battery = bytearray.fromhex("c819000000c8190000")
+                    battery[2:4] = duration.to_bytes(2, "little")
+                    battery[4] = time_type
+                    payload += record(0x3020, battery)
+                if input_w is not None:
+                    power = (500).to_bytes(2, "little") + input_w.to_bytes(2, "little")
+                    payload += record(0x3030, power)
+                wire = duml.DumlPacket(
+                    0xAB,
+                    0x02,
+                    sequence,
+                    0,
+                    duml.POWER_COMMAND_SET,
+                    duml.REPORT_COMMAND,
+                    payload,
+                ).encode()
+
+                for offset in range(0, len(wire), 7):
+                    self.device._on_notify(None, bytearray(wire[offset : offset + 7]))
+
+                self.assertEqual(len(updates), sequence)
+                self.assertEqual(updates[-1].get("battery_time_type"), expected_type)
+                self.assertEqual(updates[-1].get("runtime_min"), expected_time)
+                self.assertIs(updates[-1].get("charging"), charging)
+                if sequence == 1:
+                    self.assertNotIn("charging", updates[-1])
+                if expected_type == 255:
+                    self.assertIn("charging", updates[-1])
+
+        self.assertEqual(updates[1]["runtime_min"], 120)
+        self.assertTrue(updates[1]["charging"])
 
 
 class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):

@@ -337,10 +337,12 @@ def parse_report(payload: bytes) -> dict[str, object]:
     if battery_values:
         battery = battery_values[0]
         if len(battery) >= 9:
+            time_type = battery[4]
             data.update(
                 battery_percent=int.from_bytes(battery[0:2], "little") / 100,
                 runtime_min=int.from_bytes(battery[2:4], "little"),
-                battery_time_type=battery[4],
+                battery_time_type=time_type,
+                charging=time_type == 1 if time_type in (0, 1, 2) else None,
                 primary_battery_percent=int.from_bytes(battery[5:7], "little") / 100,
                 primary_runtime_min=int.from_bytes(battery[7:9], "little"),
             )
@@ -355,9 +357,6 @@ def parse_report(payload: bytes) -> dict[str, object]:
     power = power_values[0]
     data["output_w"] = int.from_bytes(power[0:2], "little")
     data["input_w"] = int.from_bytes(power[2:4], "little")
-    # time_type remained 2 in a live capture while the station was charging at
-    # 380-399 W. Total input power matches the app and cloud charging state.
-    data["charging"] = bool(data["input_w"])
 
     interfaces: list[dict[str, object]] = []
     group_output: dict[int, int] = {}
