@@ -139,7 +139,7 @@ each encoded as a little-endian uint16. The integration retains its existing
 | `0x05` | Charge limits | Recharge and discharge limits |
 | `0x06` | Energy storage | Energy reserve |
 | `0x0C` | Display | Display timeout |
-| `0x0D` | Power switch | AC output state |
+| `0x0D` | Power switch | AC output state; Power 1000 Mini USB output states |
 | `0x15` | Timezone | UTC offset in minutes |
 | `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
 
@@ -288,16 +288,13 @@ Writes remain serialized until confirmation completes, and confirmed values are
 published immediately regardless of the Home Assistant update interval.
 
 The Power 2000 controls' encoding and mode checks are verified against the app.
-Manual discharge control has been reported working on hardware. Recharge power
-remains experimental pending confirmation of device acceptance and charging behavior
-on a physical Power 2000.
+Manual discharge control has been reported working on hardware.
 
 ## SDC and car-charger configuration
 
 Optional SDC controls are enabled for Power 1000, Power 1000 V2, and Power 2000
 when their configuration reports supported rows. A telemetry interface alone is
-insufficient to create a switch. These controls remain experimental pending
-accessory-specific hardware validation.
+insufficient to create a switch.
 
 Key `0x0A` (`car_charges`) contains nested charger rows with a 65-byte fixed prefix:
 
@@ -320,9 +317,11 @@ car-to-station voltage. Numeric writes require enabled Recharge mode and valid
 bounds for that particular field.
 
 Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
-`type, sequence, switch`. AC is type `2`, sequence `1`; SDC and SDC Lite use
-types `5` and `6` with their reported sequence. All switch writes retain other
-rows, including AC, and modify only the addressed switch byte.
+`type, sequence, switch`. AC is type `2`, sequence `1`; USB-A and USB-C use
+types `3` and `4`, and SDC and SDC Lite use types `5` and `6`, each with their
+reported one-based sequence. All switch writes retain other rows, including AC,
+and modify only the addressed switch byte. USB switches are enabled only on
+Power 1000 Mini; SDC controls only on Power 1000, Power 1000 V2, and Power 2000.
 
 SET uses child tags `0x000A` and `0x000D` inside outer properties `0x100A` and
 `0x100D`. Readback child tags can differ; parsing follows the enclosing property's

@@ -129,6 +129,7 @@ class _Coordinator:
         self.listeners = []
         self.async_set_car_charger = AsyncMock()
         self.async_set_sdc = AsyncMock()
+        self.async_set_usb = AsyncMock()
 
     def async_add_listener(self, listener):
         self.listeners.append(listener)
@@ -252,11 +253,56 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_model_does_not_register_or_create_accessory_controls(
         self,
     ) -> None:
-        self.coordinator.device.model = "DJI Power 1000 Mini"
-        self.coordinator.data = {"car_chargers": [_car()]}
+        self.coordinator.device.model = "DJI Power"
+        self.coordinator.data = {
+            "car_chargers": [_car()],
+            "power_switches": [{"type": 3, "seq": 1, "sw": 1}],
+        }
         await self._setup()
         self.assertEqual(self._accessories(), [])
         self.assertEqual(self.coordinator.listeners, [])
+
+    async def test_usb_model_creates_only_reported_usb_switches(self) -> None:
+        self.coordinator.device.model = "DJI Power 1000 Mini"
+        self.coordinator.data = {
+            "car_chargers": [_car()],
+            "power_switches": [
+                {"type": 2, "seq": 1, "sw": 1},
+                {"type": 3, "seq": 1, "sw": 1},
+                {"type": 5, "seq": 1, "sw": 1},
+                {"type": 4, "seq": 2, "sw": 2},
+                {"type": 4, "seq": 1, "sw": 0},
+            ],
+        }
+        await self._setup()
+        self.assertEqual(len(self.coordinator.listeners), 1)
+        self.assertEqual(
+            [entity._attr_name for entity in self._accessories()],
+            ["USB-A1 output", "USB-C2 output"],
+        )
+        self.assertTrue(all(
+            isinstance(entity, switch.DjiPowerUsbSwitch)
+            for entity in self._accessories()
+        ))
+        self.coordinator.publish(
+            self.coordinator.data
+            | {
+                "power_switches": [
+                    {"type": 3, "seq": 1, "sw": 2},
+                    {"type": 3, "seq": 2, "sw": 1},
+                    {"type": 4, "seq": 1, "sw": 1},
+                    {"type": 4, "seq": 2, "sw": 1},
+                ]
+            }
+        )
+        self.assertEqual(
+            [entity._attr_name for entity in self._accessories()],
+            ["USB-A1 output", "USB-C2 output", "USB-A2 output", "USB-C1 output"],
+        )
+        self.assertEqual(
+            [entity.is_on for entity in self._accessories()],
+            [False, True, True, True],
+        )
 
 
 class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
@@ -381,3 +427,70 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "whole number of watts"):
             await self.power.async_set_native_value(750.5)
         self.coordinator.async_set_car_charger.assert_not_awaited()
+
+
+class UsbSwitchTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.coordinator = _Coordinator("DJI Power 1000 Mini")
+        self.rows = [
+            {"type": 3, "seq": 1, "sw": 1},
+            {"type": 3, "seq": 2, "sw": 2},
+            {"type": 4, "seq": 1, "sw": 1},
+            {"type": 4, "seq": 2, "sw": 2},
+        ]
+        self.coordinator.data = {"power_switches": self.rows}
+        self.switches = {
+            (row["type"], row["seq"]): switch.DjiPowerUsbSwitch(
+                self.coordinator, (row["type"], row["seq"], 0)
+            )
+            for row in self.rows
+        }
+
+    def test_names_ids_and_state_follow_each_reported_port(self) -> None:
+        for (interface_type, seq), entity in self.switches.items():
+            with self.subTest(port=(interface_type, seq)):
+                port = "USB-A" if interface_type == 3 else "USB-C"
+                self.assertEqual(entity._attr_name, f"{port}{seq} output")
+                self.assertEqual(
+                    entity._attr_unique_id,
+                    f"{ADDRESS}_{interface_type}_{seq}_0_usb_output",
+                )
+                self.assertEqual(entity._attr_device_class, "outlet")
+                self.assertTrue(entity.available)
+                self.assertEqual(entity.is_on, seq == 1)
+
+    def test_missing_invalid_or_ambiguous_rows_are_unavailable(self) -> None:
+        entity = self.switches[(3, 1)]
+        for rows in (
+            None,
+            [],
+            "invalid",
+            [{"type": 5, "seq": 1, "sw": 1}],
+            [{"type": 3, "seq": 1, "sw": 1}, {"type": 3, "seq": 1, "sw": 2}],
+        ):
+            with self.subTest(rows=rows):
+                self.coordinator.data = {"power_switches": rows}
+                self.assertFalse(entity.available)
+        for value in (None, True, "1", 0, 3):
+            with self.subTest(sw=value):
+                self.coordinator.data = {
+                    "power_switches": [{"type": 3, "seq": 1, "sw": value}]
+                }
+                self.assertIsNone(entity.is_on)
+                self.assertFalse(entity.available)
+        self.coordinator.data = {"power_switches": self.rows}
+        self.coordinator.last_update_success = False
+        self.assertFalse(entity.available)
+
+    async def test_services_route_exact_port_without_optimistic_state(self) -> None:
+        for (interface_type, seq), entity in self.switches.items():
+            with self.subTest(port=(interface_type, seq)):
+                setter = self.coordinator.async_set_usb
+                setter.reset_mock()
+                await entity.async_turn_off()
+                setter.assert_awaited_once_with(interface_type, seq, False)
+                setter.reset_mock()
+                await entity.async_turn_on()
+                setter.assert_awaited_once_with(interface_type, seq, True)
+                self.assertEqual(entity.is_on, seq == 1)
+        self.coordinator.async_set_sdc.assert_not_awaited()

@@ -366,3 +366,71 @@ class SdcSwitchBuilderTests(unittest.TestCase):
                 self.assertRaises(duml.ProtocolError),
             ):
                 duml.build_sdc_switch_set_payload(value, interface_type, seq, enabled)
+
+
+class UsbSwitchBuilderTests(unittest.TestCase):
+    ROWS = (
+        b"\x02\x01\x01",
+        b"\x03\x01\x01",
+        b"\x03\x02\x02",
+        b"\x04\x01\x01",
+        b"\x04\x02\x01tail",
+    )
+
+    def value(self) -> bytes:
+        return b"".join(record(0x1014, row) for row in self.ROWS)
+
+    def test_each_usb_port_edit_changes_only_its_switch_byte(self) -> None:
+        for index, (interface_type, seq) in enumerate(
+            ((3, 1), (3, 2), (4, 1), (4, 2)), start=1
+        ):
+            for enabled in (False, True):
+                with self.subTest(port=(interface_type, seq), enabled=enabled):
+                    payload = duml.build_usb_switch_set_payload(
+                        self.value(), interface_type, seq, enabled, timestamp_ms=0
+                    )
+                    result = duml.parse_keyed_values(payload)
+                    self.assertEqual(
+                        result[0x0E], bytes.fromhex("0a00") + b"1800efffff"
+                    )
+                    records = duml.parse_tlvs(result[0x0D], strict=True)
+                    self.assertEqual([row.tag for row in records], [0x000D] * 5)
+                    expected = list(self.ROWS)
+                    row = bytearray(expected[index])
+                    row[2] = 1 if enabled else 2
+                    expected[index] = bytes(row)
+                    self.assertEqual([row.value for row in records], expected)
+
+    def test_missing_unknown_duplicate_and_malformed_usb_switches_fail(self) -> None:
+        for value in (
+            b"",
+            record(0x1014, b"\x02\x01\x01"),
+            record(0x1014, b"\x03\x02\x01"),
+            record(0x1014, b"\x03\x01\x00"),
+            record(0x1014, b"\x03\x01"),
+            record(0x1014, b"\x03\x01\x01") * 2,
+            "not hex",
+        ):
+            with self.subTest(value=value), self.assertRaises(duml.ProtocolError):
+                duml.build_usb_switch_set_payload(value, 3, 1, True)
+
+    def test_usb_identity_and_enabled_types_are_validated(self) -> None:
+        value = self.value() + record(0x1014, b"\x05\x01\x01")
+        for interface_type, seq, enabled in (
+            (2, 1, True),
+            (5, 1, True),
+            (True, 1, True),
+            (3, -1, True),
+            (3, 256, True),
+            (3, True, True),
+            (3, 1, 1),
+        ):
+            with (
+                self.subTest(interface_type=interface_type, seq=seq, enabled=enabled),
+                self.assertRaises(duml.ProtocolError),
+            ):
+                duml.build_usb_switch_set_payload(value, interface_type, seq, enabled)
+
+    def test_sdc_builder_cannot_address_usb_rows(self) -> None:
+        with self.assertRaises(duml.ProtocolError):
+            duml.build_sdc_switch_set_payload(self.value(), 3, 1, False)

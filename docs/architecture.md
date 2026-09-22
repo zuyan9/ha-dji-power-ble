@@ -68,9 +68,10 @@ devices and entities independently of connection order. Missing packs retain the
 registry entries and history with unavailable sensors, including after a reload.
 
 On these same models, optional SDC switch and car-charger configuration is first read
-in the background after setup, then refreshed with the packs every 30 seconds. The
-entity platforms discover controls from supported reported rows, identified by
-interface, port sequence, and charger type. Missing or invalid snapshots invalidate
+in the background after setup, then refreshed with the packs every 30 seconds. Power
+1000 Mini reads its switch list on the same schedule for USB output switches, without
+pack reads. The entity platforms discover controls from supported reported rows,
+identified by interface, port sequence, and charger type. Missing or invalid snapshots invalidate
 the affected controls without removing their entities. These controls remain on the
 station's device and use its existing connection.
 
@@ -82,14 +83,13 @@ values. Every SET must return a zero status for every requested key. The client 
 polls configuration until the requested state is observed, preventing a successful GATT
 write from being mistaken for an applied setting.
 
-AC and SDC switches read and preserve the complete switch list before editing their
-own row. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
+AC, SDC, and USB switches read and preserve the complete switch list before editing
+their own row. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
 chargers, and validate the selected setting against fresh reported bounds. All three
 paths require a fresh matching row after the keyed acknowledgement. Optional reads
 and writes share the operation lock, including the confirmation period.
 
-Writes are serialized with an operation lock. They remain experimental on models that
-do not yet have model-specific hardware validation; see the support table in the
+Writes are serialized with an operation lock. See the support table in the
 [README](../README.md#device-support).
 
 ## Updates and recovery

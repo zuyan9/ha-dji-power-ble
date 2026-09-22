@@ -1,9 +1,9 @@
-# SDC and car-charger controls
+# SDC, car-charger, and USB output controls
 
-These experimental controls use the station's existing Bluetooth connection on
-Power 1000, Power 1000 V2, and Power 2000. They appear when the station reports a
-supported accessory or switch record. They have offline protocol and transaction
-tests; physical accessory operation and Home Assistant runtime still need validation.
+These controls use the station's existing Bluetooth connection. SDC and car-charger
+controls are enabled on Power 1000, Power 1000 V2, and Power 2000; USB output
+switches are enabled on Power 1000 Mini. They appear when the station reports
+a supported accessory or switch record.
 
 ## Car chargers
 
@@ -26,8 +26,8 @@ voltage accepts hundredths of a volt.
 
 Each write changes only the addressed field in the reported configuration, preserving
 other settings and charger records in the payload. Selecting a mode does not rewrite
-its power or voltage settings. Reverse-charge power/voltage
-and the Auto-mode voltage threshold remain configurable through DJI Home.
+its power or voltage settings. Reverse-charge power/voltage and the Auto-mode voltage
+threshold remain configurable through DJI Home.
 
 ## SDC switches
 
@@ -35,13 +35,20 @@ An **SDC power** or **SDC Lite power** switch appears for each port with an expl
 supported switch record. SDC power readings alone do not establish switch support.
 The port switch and the car-recharging switch are separate settings.
 
-AC and SDC writes retain the complete reported switch list and change only the
+## USB outputs
+
+On Power 1000 Mini, a **USB-A1 output**, **USB-A2 output**, **USB-C1 output**, or
+**USB-C2 output** switch appears for each USB port with an explicit supported switch
+record. Other models do not create USB switches.
+
+AC, SDC, and USB writes retain the complete reported switch list and change only the
 addressed switch.
 
 ## Discovery and confirmation
 
 Accessory discovery runs after connection setup and refreshes every 30 seconds,
-alongside expansion-pack refreshes. Device pushes can update the controls sooner.
+alongside expansion-pack refreshes where supported. Device pushes can update the
+controls sooner.
 Newly attached accessories are discovered automatically. Missing, malformed, or failed
 snapshots make the affected controls unavailable. Disconnection also makes them
 unavailable; reconnecting or reattaching the same reported accessory restores them.
