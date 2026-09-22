@@ -816,6 +816,8 @@ class ReportTests(unittest.TestCase):
 
         self.assertEqual(parsed["battery_percent"], 47)
         self.assertEqual(parsed["runtime_min"], 5940)
+        self.assertEqual(parsed["battery_time_type"], 2)
+        self.assertFalse(parsed["charging"])
         self.assertEqual(parsed["temperature"], 25.1)
         self.assertEqual(parsed["usb_c_output_w"], 1)
         self.assertEqual(parsed["usb_c_1_output_w"], 1)
@@ -845,14 +847,51 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(parsed["sdc_input_w"], 11)
         self.assertEqual(parsed["interfaces"][-1]["input_voltage_v"], 51.234)
 
-    def test_input_power_drives_charging_when_time_type_is_not_zero(self) -> None:
-        battery = bytes.fromhex("c819990b02c8190000bc0c00")
-        payload = record(0x3020, battery) + record(0x3030, bytes.fromhex("00007c01"))
+    def test_battery_time_type_drives_charging_independent_of_power(self) -> None:
+        for time_type, expected in ((0, False), (1, True), (2, False), (255, None)):
+            for input_w, output_w in ((0, 500), (516, 500)):
+                with self.subTest(
+                    time_type=time_type, input_w=input_w, output_w=output_w
+                ):
+                    battery = bytearray.fromhex("c819990b02c8190000bc0c00")
+                    battery[4] = time_type
+                    power = output_w.to_bytes(2, "little") + input_w.to_bytes(
+                        2, "little"
+                    )
+                    parsed = duml.parse_report(
+                        record(0x3020, battery) + record(0x3030, power)
+                    )
 
-        parsed = duml.parse_report(payload)
+                    self.assertEqual(parsed["battery_time_type"], time_type)
+                    self.assertIs(parsed["charging"], expected)
 
-        self.assertEqual(parsed["battery_time_type"], 2)
-        self.assertTrue(parsed["charging"])
+    def test_battery_only_reports_preserve_duration_and_type(self) -> None:
+        for time_type, expected in ((0, False), (1, True), (2, False), (255, None)):
+            for duration in (0, 5940, 6000):
+                with self.subTest(time_type=time_type, duration=duration):
+                    battery = bytearray.fromhex("c819000000c819c801")
+                    battery[2:4] = duration.to_bytes(2, "little")
+                    battery[4] = time_type
+
+                    parsed = duml.parse_report(record(0x3020, battery))
+
+                    self.assertEqual(parsed["battery_time_type"], time_type)
+                    self.assertEqual(parsed["runtime_min"], duration)
+                    self.assertEqual(parsed["primary_runtime_min"], 456)
+                    self.assertIs(parsed["charging"], expected)
+                    self.assertNotIn("input_w", parsed)
+
+    def test_missing_or_short_battery_does_not_infer_charging(self) -> None:
+        for battery_record in (b"", *(record(0x3020, bytes(n)) for n in (0, 4, 8))):
+            with self.subTest(battery_record=battery_record.hex()):
+                parsed = duml.parse_report(
+                    battery_record + record(0x3030, bytes.fromhex("f4010402"))
+                )
+
+                self.assertEqual(parsed["input_w"], 516)
+                self.assertNotIn("charging", parsed)
+                self.assertNotIn("battery_time_type", parsed)
+                self.assertNotIn("runtime_min", parsed)
 
 
 class AdvertisementTests(unittest.TestCase):

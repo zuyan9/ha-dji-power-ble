@@ -185,7 +185,7 @@ Command `0x61` starts with the same 16-byte header and then uses nested records 
 
 | Tag | Meaning |
 | --- | --- |
-| `0x3020` | Battery percentage, remaining time, and optional temperature |
+| `0x3020` | Battery percentage, duration and time type, and optional temperature |
 | `0x3030` | Total input/output and nested interface groups |
 | `0x3031` | Interface container |
 | `0x3032` | Power, AC, USB, SDC, 12 V, or XT60 group |
@@ -195,6 +195,29 @@ Command `0x61` starts with the same 16-byte header and then uses nested records 
 An interface record identifies its group, one-based port sequence, type, switch state,
 output watts, and input watts. The known types are power, AC, USB-A, USB-C, SDC, SDC
 Lite, 12 V, and XT60. The codec exposes both aggregate and per-port values.
+
+### Battery time and charging
+
+The battery record's duration (`0x3020[2:4]`, minutes) and time type
+(`0x3020[4]`) control the charging and time entities:
+
+| Time type | Charging | Remaining Time | Recharging Time |
+| --- | --- | --- | --- |
+| `1` | Charging | Unavailable | Reported duration |
+| `0` or `2` | Not charging | Reported duration | Unavailable |
+| Other or no battery data | Unknown | Unavailable | Unavailable |
+
+External input power does not determine charging status: input can supply the
+station's outputs while the battery is not charging. **Not charging** includes
+both discharging and neutral operation. Type `0` is treated like `2` for these
+entities; the raw type remains available in diagnostic data.
+
+**Remaining Time** replaces the **Runtime remaining** name while retaining its
+existing entity ID and history. Its value is unavailable during recharging;
+automations that need the charging estimate should use **Recharging Time**.
+Reported durations, including zero and 5,940 minutes (99 hours), are preserved.
+A 99-hour reading can be a capped estimate or a fallback and does not identify
+a distinct sustaining state. Primary battery runtime is a separate reading.
 
 ## Writes and acknowledgement
 
