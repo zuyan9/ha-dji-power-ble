@@ -1,4 +1,4 @@
-"""Discovery and identities for controls reported by attached SDC accessories."""
+"""Discovery and identities for reported port switches and SDC accessories."""
 
 from __future__ import annotations
 
@@ -16,9 +16,12 @@ from .features import ModelFeature, supports_feature
 AccessoryIdentity = tuple[int, int, int]
 CAR_CHARGER_TYPES = {3, 4}
 SDC_INTERFACE_TYPES = {5, 6}
+USB_INTERFACE_TYPES = {3, 4}
 
 
-def reported_rows(data: dict, key: str) -> dict[AccessoryIdentity, dict]:
+def reported_rows(
+    data: dict, key: str, interface_types: set[int] = SDC_INTERFACE_TYPES
+) -> dict[AccessoryIdentity, dict]:
     """Return unambiguous rows with supported, fully reported identities."""
     rows = data.get(key)
     if not isinstance(rows, list):
@@ -33,7 +36,7 @@ def reported_rows(data: dict, key: str) -> dict[AccessoryIdentity, dict]:
         accessory_type = row.get("type") if key == "car_chargers" else 0
         if (
             type(interface_type) is not int
-            or interface_type not in SDC_INTERFACE_TYPES
+            or interface_type not in interface_types
             or type(seq) is not int
             or not 0 <= seq <= 255
             or type(accessory_type) is not int
@@ -52,9 +55,12 @@ def async_discover_accessories(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
     factories: dict[str, Callable[[AccessoryIdentity], list[DjiPowerEntity]]],
+    *,
+    feature: ModelFeature = ModelFeature.SDC_CONTROLS,
+    interface_types: set[int] = SDC_INTERFACE_TYPES,
 ) -> None:
     """Add each reported accessory once, including after setup or reconnection."""
-    if not supports_feature(coordinator.device.model, ModelFeature.SDC_CONTROLS):
+    if not supports_feature(coordinator.device.model, feature):
         return
     seen: set[tuple[str, AccessoryIdentity]] = set()
 
@@ -64,7 +70,8 @@ def async_discover_accessories(
             return
         entities = []
         for key, factory in factories.items():
-            for identity, row in reported_rows(coordinator.data or {}, key).items():
+            rows = reported_rows(coordinator.data or {}, key, interface_types)
+            for identity, row in rows.items():
                 state = row.get("sw")
                 if type(state) is not int or state not in (1, 2):
                     continue
@@ -83,6 +90,7 @@ class DjiPowerAccessoryEntity(DjiPowerEntity):
     """A station entity tied to a reported interface and accessory identity."""
 
     _row_key: str
+    _interface_types: set[int] = SDC_INTERFACE_TYPES
 
     def __init__(
         self, coordinator, identity: AccessoryIdentity, key: str, name: str
@@ -99,9 +107,9 @@ class DjiPowerAccessoryEntity(DjiPowerEntity):
 
     @property
     def row(self) -> dict[str, Any] | None:
-        return reported_rows(self.coordinator.data or {}, self._row_key).get(
-            self._identity
-        )
+        return reported_rows(
+            self.coordinator.data or {}, self._row_key, self._interface_types
+        ).get(self._identity)
 
     @property
     def available(self) -> bool:

@@ -1699,9 +1699,32 @@ class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):
         self.client.disconnect.assert_awaited_once()
 
     async def test_unsupported_model_does_not_start_worker(self):
-        self.device.model = "DJI Power 1000 Mini"
+        self.device.model = "DJI Power"
         self.device._start_expansion_refresh()
         self.assertIsNone(self.device._expansion_refresh_task)
+
+    async def test_usb_model_worker_refreshes_switches_without_pack_reads(self):
+        self.device.model = "DJI Power 1000 Mini"
+
+        async def accessories():
+            self.assertTrue(self.device._operation_lock.locked())
+            if accessory.await_count == 2:
+                self.client.is_connected = False
+
+        with (
+            patch.object(device_module.asyncio, "sleep", AsyncMock()) as sleep,
+            patch.object(
+                self.device, "_refresh_accessory_config",
+                AsyncMock(side_effect=accessories),
+            ) as accessory,
+            patch.object(
+                self.device, "_read_expansion_batteries", AsyncMock()
+            ) as packs,
+        ):
+            await self.device._refresh_expansion_loop()
+        sleep.assert_awaited_once_with(30.0)
+        self.assertEqual(accessory.await_count, 2)
+        packs.assert_not_awaited()
 
     async def test_worker_refreshes_even_empty_snapshot_under_operation_lock(self):
         self.device.data["expansion_batteries"] = []

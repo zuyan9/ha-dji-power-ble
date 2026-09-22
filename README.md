@@ -23,6 +23,7 @@ used only during setup to retrieve the device's local credential.
 - Expansion battery devices with battery level and pack diagnostics
 - [SDC and car-charger controls](docs/accessory-controls.md) reported by the station
 - Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
+- Power 1000 Mini: individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs)
 - Firmware, timezone, display, reserve, and cloud-status diagnostics
 
 ## Requirements

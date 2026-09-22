@@ -45,6 +45,7 @@ from .duml import (
     build_power_adjustment_set_payload,
     build_sdc_switch_set_payload,
     build_time_periods_set_payload,
+    build_usb_switch_set_payload,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
     normalize_pair_key,
@@ -238,12 +239,10 @@ class DjiPowerDevice:
             if packet.command_id == TELEMETRY_COMMAND:
                 invalidated = {"expansion_batteries": None}
                 if supports_feature(self.model, ModelFeature.SDC_CONTROLS):
+                    invalidated.update(car_chargers=None, key_0a=None)
+                if self._reads_power_switches:
                     invalidated.update(
-                        car_chargers=None,
-                        key_0a=None,
-                        power_switches=None,
-                        key_0d=None,
-                        ac_enabled=None,
+                        power_switches=None, key_0d=None, ac_enabled=None
                     )
                 if supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
                     invalidated.update(time_periods=None, key_16=None)
@@ -616,9 +615,18 @@ class DjiPowerDevice:
             except DjiPowerError as error:
                 _LOGGER.debug("Time-period configuration unavailable: %s", error)
 
+    @property
+    def _reads_power_switches(self) -> bool:
+        """Return whether optional port switches are refreshed on this model."""
+        return supports_feature(
+            self.model, ModelFeature.SDC_CONTROLS
+        ) or supports_feature(self.model, ModelFeature.USB_CONTROLS)
+
     def _start_expansion_refresh(self) -> None:
         """Refresh optional packs and accessories over the existing session."""
-        if self.model not in EXPANSION_MODELS or not self.is_connected:
+        if not self.is_connected or (
+            self.model not in EXPANSION_MODELS and not self._reads_power_switches
+        ):
             return
         if (
             self._expansion_refresh_task is None
@@ -637,19 +645,20 @@ class DjiPowerDevice:
             while self.is_connected:
                 await asyncio.sleep(EXPANSION_REFRESH_INTERVAL)
                 async with self._operation_lock:
-                    await self._read_expansion_batteries()
+                    if self.model in EXPANSION_MODELS:
+                        await self._read_expansion_batteries()
                     await self._refresh_accessory_config()
         except DjiPowerDisconnectedError:
             return
 
     async def _refresh_accessory_config(self) -> None:
         """Discover attached controls without making optional failures fatal."""
-        if not supports_feature(self.model, ModelFeature.SDC_CONTROLS):
-            return
-        for key, state_key in (
-            (CAR_CHARGERS_KEY, "car_chargers"),
-            (POWER_SWITCH_KEY, "power_switches"),
-        ):
+        configs = []
+        if supports_feature(self.model, ModelFeature.SDC_CONTROLS):
+            configs.append((CAR_CHARGERS_KEY, "car_chargers"))
+        if self._reads_power_switches:
+            configs.append((POWER_SWITCH_KEY, "power_switches"))
+        for key, state_key in configs:
             try:
                 await self._read_accessory_config(key, state_key)
             except DjiPowerDisconnectedError:
@@ -889,14 +898,32 @@ class DjiPowerDevice:
         """Set a reported SDC switch while retaining all other switch rows."""
         if not supports_feature(self.model, ModelFeature.SDC_CONTROLS):
             raise DjiPowerError("SDC controls are not supported on this model")
+        await self._set_port_switch(
+            build_sdc_switch_set_payload, interface_type, seq, enabled
+        )
+
+    async def set_usb(self, interface_type: int, seq: int, enabled: bool) -> None:
+        """Set a reported USB output while retaining all other switch rows."""
+        if not supports_feature(self.model, ModelFeature.USB_CONTROLS):
+            raise DjiPowerError("USB output controls are not supported on this model")
+        await self._set_port_switch(
+            build_usb_switch_set_payload, interface_type, seq, enabled
+        )
+
+    async def _set_port_switch(
+        self,
+        build: Callable[[str, int, int, bool], bytes],
+        interface_type: int,
+        seq: int,
+        enabled: bool,
+    ) -> None:
+        """Edit one fresh switch row and confirm it from a targeted readback."""
         async with self._operation_lock:
             update = await self._read_accessory_config(
                 POWER_SWITCH_KEY, "power_switches"
             )
             try:
-                payload = build_sdc_switch_set_payload(
-                    update["key_0d"], interface_type, seq, enabled
-                )
+                payload = build(update["key_0d"], interface_type, seq, enabled)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
             await self._set(payload, tuple(parse_keyed_values(payload)))

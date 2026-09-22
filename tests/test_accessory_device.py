@@ -24,6 +24,11 @@ SWITCHES = b"".join(
     struct.pack("<HHBBB", 0x1014, 3, kind, seq, state)
     for kind, seq, state in ((2, 1, 1), (5, 1, 1), (6, 2, 2))
 )
+# AC plus USB-A1, USB-A2, USB-C1 and USB-C2, as the app's USB sheet addresses them.
+USB_SWITCHES = b"".join(
+    struct.pack("<HHBBB", 0x1014, 3, kind, seq, state)
+    for kind, seq, state in ((2, 1, 1), (3, 1, 1), (3, 2, 2), (4, 1, 1), (4, 2, 1))
+)
 
 
 class AccessoryClient(StationClient):
@@ -114,7 +119,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 ))
 
     async def test_other_models_make_no_optional_reads_or_writes(self):
-        for model in ("DJI Power 1000 Mini", "DJI Power 500", "DJI Power"):
+        for model in ("DJI Power 500", "DJI Power"):
             with self.subTest(model=model):
                 self.reset_device(model)
                 await self.device._refresh_accessory_config()
@@ -122,6 +127,29 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                     await self.device.set_car_charger(5, 1, 4, enabled=True)
                 with self.assertRaises(device_module.DjiPowerError):
                     await self.device.set_sdc(5, 1, True)
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_usb(3, 1, True)
+                self.assertEqual(self.client.requests, [])
+
+    async def test_usb_model_reads_only_switches_and_rejects_sdc_controls(self):
+        self.reset_device("DJI Power 1000 Mini")
+        await self.device._refresh_accessory_config()
+        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x0d\x10")])
+        self.assertNotIn("car_chargers", self.device.data)
+        self.client.requests.clear()
+        with self.assertRaises(device_module.DjiPowerError):
+            await self.device.set_car_charger(5, 1, 4, enabled=True)
+        with self.assertRaises(device_module.DjiPowerError):
+            await self.device.set_sdc(5, 1, True)
+        self.assertEqual(self.client.requests, [])
+
+    async def test_sdc_models_reject_usb_controls_without_requests(self):
+        for model in ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"):
+            with self.subTest(model=model):
+                self.reset_device(model)
+                self.client.values[0x0D] = USB_SWITCHES
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_usb(3, 1, False)
                 self.assertEqual(self.client.requests, [])
 
     async def test_sdc_and_ac_updates_preserve_other_switches(self):
@@ -350,3 +378,113 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.device.data["car_chargers"])
         self.assertIsNone(self.device.data["power_switches"])
         self.assertIsNone(self.device.data["key_0a"])
+
+
+class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
+    """Synthetic Power 1000 Mini USB switch transactions; no hardware implied."""
+
+    def setUp(self):
+        self.device = device_module.DjiPowerDevice(
+            FakeBleDevice(), "ab" * 16, name="Station", model="DJI Power 1000 Mini"
+        )
+        self.client = AccessoryClient(self.device)
+        self.client.values = {0x0D: USB_SWITCHES}
+        self.device._client = self.client
+        self.device._write_characteristic = object()
+        retry = patch.object(device_module, "READBACK_RETRY_INTERVAL", 0)
+        retry.start()
+        self.addCleanup(retry.stop)
+
+    def switches(self):
+        return {
+            (row["type"], row["seq"]): row["sw"]
+            for row in self.device.data["power_switches"]
+        }
+
+    async def test_each_usb_port_uses_fresh_get_set_ack_and_targeted_readback(self):
+        for interface_type, seq in ((3, 1), (3, 2), (4, 1), (4, 2)):
+            for enabled in (False, True):
+                with self.subTest(port=(interface_type, seq), enabled=enabled):
+                    self.client.requests.clear()
+                    before = self.switches() if self.device.data else None
+                    with patch.object(
+                        device_module.asyncio, "sleep", AsyncMock()
+                    ) as sleep:
+                        await self.device.set_usb(interface_type, seq, enabled)
+                    sleep.assert_not_awaited()
+                    self.assertEqual(
+                        self.switches()[(interface_type, seq)], 1 if enabled else 2
+                    )
+                    if before is not None:
+                        before.pop((interface_type, seq))
+                        after = self.switches()
+                        after.pop((interface_type, seq))
+                        self.assertEqual(after, before)
+                    self.assertEqual(
+                        [command for command, _ in self.client.requests],
+                        [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+                    )
+                    self.assertEqual(self.client.requests[0][1], b"\x00\x0d\x10")
+                    self.assertEqual(self.client.requests[2][1], b"\x00\x0d\x10")
+                    written = duml.parse_keyed_values(self.client.requests[1][1])
+                    self.assertEqual(set(written), {0x0D, 0x0E})
+                    self.assertEqual(
+                        written[0x0E], bytes.fromhex("0a00") + b"1800efffff"
+                    )
+
+    async def test_usb_write_preserves_ac_and_other_usb_rows(self):
+        await self.device.set_usb(3, 1, False)
+        self.assertTrue(self.device.data["ac_enabled"])
+        self.assertEqual(
+            self.device.data["power_switches"],
+            [
+                {"type": 2, "seq": 1, "sw": 1},
+                {"type": 3, "seq": 1, "sw": 2},
+                {"type": 3, "seq": 2, "sw": 2},
+                {"type": 4, "seq": 1, "sw": 1},
+                {"type": 4, "seq": 2, "sw": 1},
+            ],
+        )
+
+    async def test_unreported_or_non_usb_port_never_sends_a_write(self):
+        for interface_type, seq in ((3, 3), (4, 0), (2, 1), (5, 1)):
+            with self.subTest(port=(interface_type, seq)):
+                self.client.requests.clear()
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_usb(interface_type, seq, True)
+                self.assertEqual(
+                    self.client.requests, [(duml.GET_COMMAND, b"\x00\x0d\x10")]
+                )
+
+    async def test_missing_or_rejected_ack_cannot_confirm_usb_switch(self):
+        for ack in ({}, {0x0D: b"\x01\x00\x00\x00"}, {0x0D: bytes(4)}):
+            with self.subTest(ack=ack):
+                self.client.requests.clear()
+                self.client.ack_override = ack
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_usb(4, 2, False)
+                self.assertEqual(len(self.client.requests), 2)
+
+    async def test_ineffective_usb_write_exhausts_readback_retries(self):
+        self.client.apply_set = False
+        with self.assertRaisesRegex(device_module.DjiPowerError, "did not report"):
+            await self.device.set_usb(4, 1, False)
+        self.assertEqual(self.switches()[(4, 1)], 1)
+        self.assertEqual(len(self.client.requests), device_module.READBACK_RETRIES + 3)
+
+    async def test_failed_switch_refresh_clears_usb_and_ac_state(self):
+        await self.device._refresh_accessory_config()
+        self.assertEqual(len(self.device.data["power_switches"]), 5)
+        self.client.values.pop(0x0D)
+        await self.device._refresh_accessory_config()
+        self.assertIsNone(self.device.data["power_switches"])
+        self.assertIsNone(self.device.data["ac_enabled"])
+        self.assertIsNone(self.device.data["key_0d"])
+
+    def test_malformed_push_invalidates_usb_and_ac_state(self):
+        self.device.data.update(power_switches=[{}], key_0d="old", ac_enabled=True)
+        self.client.send(duml.TELEMETRY_COMMAND, b"\x0d\x10\x41\x00\x01")
+        self.assertIsNone(self.device.data["power_switches"])
+        self.assertIsNone(self.device.data["key_0d"])
+        self.assertIsNone(self.device.data["ac_enabled"])
+        self.assertNotIn("car_chargers", self.device.data)

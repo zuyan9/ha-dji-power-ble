@@ -1006,18 +1006,17 @@ def build_car_charger_set_payload(
     )
 
 
-def build_sdc_switch_set_payload(
+def _build_port_switch_set_payload(
     current_value: str | bytes,
     interface_type: int,
     seq: int,
     enabled: bool,
-    *,
-    timestamp_ms: int | None = None,
+    label: str,
+    timestamp_ms: int | None,
 ) -> bytes:
-    """Edit an explicitly reported SDC switch without inventing a port row."""
-    _validate_sdc_identity(interface_type, seq)
+    """Edit one explicitly reported port switch without inventing a row."""
     if type(enabled) is not bool:
-        raise ProtocolError("SDC enabled state must be a boolean")
+        raise ProtocolError(f"{label} enabled state must be a boolean")
     value = _accessory_snapshot(current_value)
     rows = parse_power_switches(value)
     index = next(
@@ -1029,14 +1028,47 @@ def build_sdc_switch_set_payload(
         None,
     )
     if index is None:
-        raise ProtocolError("SDC switch is absent from the current snapshot")
+        raise ProtocolError(f"{label} switch is absent from the current snapshot")
     if rows[index]["sw"] not in (1, 2):
-        raise ProtocolError("SDC port reported an unknown switch state")
+        raise ProtocolError(f"{label} port reported an unknown switch state")
     updated = _replace_accessory_row(
         value, POWER_SWITCH_KEY, index, 2, bytes((1 if enabled else 2,))
     )
     return build_keyed_set_payload(
         [(POWER_SWITCH_KEY, updated), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+def build_sdc_switch_set_payload(
+    current_value: str | bytes,
+    interface_type: int,
+    seq: int,
+    enabled: bool,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Edit an explicitly reported SDC switch without inventing a port row."""
+    _validate_sdc_identity(interface_type, seq)
+    return _build_port_switch_set_payload(
+        current_value, interface_type, seq, enabled, "SDC", timestamp_ms
+    )
+
+
+def build_usb_switch_set_payload(
+    current_value: str | bytes,
+    interface_type: int,
+    seq: int,
+    enabled: bool,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Edit an explicitly reported USB-A or USB-C output switch."""
+    if type(interface_type) is not int or interface_type not in (3, 4):
+        raise ProtocolError("USB controls require a USB-A or USB-C interface")
+    if type(seq) is not int or not 0 <= seq <= 255:
+        raise ProtocolError("USB port sequence must be a reported byte")
+    return _build_port_switch_set_payload(
+        current_value, interface_type, seq, enabled, "USB", timestamp_ms
     )
 
 

@@ -9,6 +9,7 @@ class ModelFeature(StrEnum):
     TARIFF_SCHEDULE = "tariff_schedule"
     TOU_POWER_CONTROL = "tou_power_control"
     SDC_CONTROLS = "sdc_controls"
+    USB_CONTROLS = "usb_controls"
 
 
 _FEATURE_MODELS = {
@@ -17,6 +18,7 @@ _FEATURE_MODELS = {
     ModelFeature.SDC_CONTROLS: frozenset(
         {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
     ),
+    ModelFeature.USB_CONTROLS: frozenset({"DJI Power 1000 Mini"}),
 }
 
 

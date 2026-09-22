@@ -20,6 +20,11 @@ CONTROL_WRITES = (
         {"power_switches": [{"type": 5, "seq": 1, "sw": 2}]},
     ),
     (
+        "set_usb", (4, 2, True), {},
+        {"power_switches": [{"type": 4, "seq": 2, "sw": 2}]},
+        {"power_switches": [{"type": 4, "seq": 2, "sw": 1}]},
+    ),
+    (
         "set_car_charger", (5, 1, 4), {"recharge_power_w": 450},
         {"car_chargers": [{"interface_type": 5, "seq": 1, "type": 4,
                             "p_from_car_v": 400}]},
