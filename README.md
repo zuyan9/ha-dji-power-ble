@@ -88,8 +88,8 @@ acknowledgements.
 
 ## Known gaps
 
-- `0x66` HMS fault records have only been captured empty, so raw HMS bytes remain
-  diagnostics-only.
+- `0x66` HMS alarm reports remain diagnostics-only; no active-alarm entity is
+  implemented.
 - SDC output-voltage data is a subtype-dependent union and is not exposed until captures
   with real accessories establish safe entity mappings.
 - Cell-level BMS values are not present on the known app-facing BLE command path.

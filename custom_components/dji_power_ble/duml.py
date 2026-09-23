@@ -348,7 +348,9 @@ def parse_report(payload: bytes) -> dict[str, object]:
             )
         # dy301 emits only the first 9 bytes; dy302+ emits temperature as well.
         if len(battery) >= 11:
-            data["temperature"] = int.from_bytes(battery[9:11], "little") / 100
+            data["temperature"] = (
+                int.from_bytes(battery[9:11], "little", signed=True) / 100
+            )
 
     power_values = _records(top, 0x3030)
     if not power_values or len(power_values[0]) < 4:

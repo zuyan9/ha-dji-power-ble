@@ -823,6 +823,26 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(parsed["usb_c_1_output_w"], 1)
         self.assertEqual(parsed["interfaces"][0]["type_name"], "usb_c")
 
+    def test_battery_temperature_uses_signed_hundredths(self) -> None:
+        for encoded in (-1234, -1000, -1, 0, 2510):
+            with self.subTest(encoded=encoded):
+                battery = bytes.fromhex("c819990b02c8190000")
+                battery += encoded.to_bytes(2, "little", signed=True) + b"\x01"
+
+                parsed = duml.parse_report(record(0x3020, battery))
+
+                self.assertEqual(parsed["temperature"], encoded / 100)
+                self.assertEqual(parsed["battery_percent"], 66)
+
+    def test_missing_or_partial_temperature_is_not_reported(self) -> None:
+        battery = bytes.fromhex("c819990b02c819000018fc01")
+        for length in (9, 10):
+            with self.subTest(length=length):
+                parsed = duml.parse_report(record(0x3020, battery[:length]))
+
+                self.assertNotIn("temperature", parsed)
+                self.assertEqual(parsed["battery_percent"], 66)
+
     def test_nested_groups_preserve_ports_and_input_voltage(self) -> None:
         interfaces = record(
             0x3031,
