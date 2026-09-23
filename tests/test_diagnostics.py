@@ -1,4 +1,4 @@
-"""Offline checks that expansion-pack diagnostics retain no identifying data."""
+"""Offline checks that protocol diagnostics redact identifying data."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from tests.test_duml import SYNTHETIC_ECO_MODE, duml
 
 COMPONENT = Path(__file__).parents[1] / "custom_components" / "dji_power_ble"
 PACKAGE = "_dji_power_diagnostics_tests"
@@ -63,7 +65,7 @@ def _load_diagnostics() -> types.ModuleType:
 diagnostics = _load_diagnostics()
 
 
-class ExpansionBatteryDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_redacts_pack_identity_and_raw_records_without_mutating_state(
         self,
     ) -> None:
@@ -146,6 +148,39 @@ class ExpansionBatteryDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(state, original_state)
         self.assertEqual(entry.data, original_config)
+
+    async def test_redacts_meter_record_and_tail_but_preserves_power_settings(
+        self,
+    ) -> None:
+        eco_mode = bytearray(SYNTHETIC_ECO_MODE)
+        eco_mode[42:79] = b"TEST-METER-IDENTIFIER".ljust(37, b"\x00")
+        for tail in (b"", b"TEST-EXTENDED-IDENTIFIER"):
+            with self.subTest(extended=bool(tail)):
+                raw = bytes(eco_mode) + tail
+                state = duml.parse_telemetry(
+                    duml.build_keyed_set_payload(
+                        [(duml.ECO_MODE_KEY, raw)], timestamp_ms=0
+                    )
+                )
+                original_state = copy.deepcopy(state)
+                entry = types.SimpleNamespace(entry_id="station", data={}, options={})
+                coordinator = types.SimpleNamespace(
+                    data=state, device=types.SimpleNamespace(is_connected=True)
+                )
+                hass = types.SimpleNamespace(
+                    data={"dji_power_ble": {entry.entry_id: coordinator}}
+                )
+
+                result = await diagnostics.async_get_config_entry_diagnostics(
+                    hass, entry
+                )
+
+                self.assertEqual(result["state"], state | {"key_18": REDACTED})
+                self.assertEqual(result["state"]["power_adjustment"], "Manual")
+                self.assertEqual(result["state"]["charge_power_w"], 500)
+                self.assertEqual(result["state"]["discharge_power_w"], 93)
+                self.assertEqual(state, original_state)
+                self.assertEqual(state["key_18"], raw.hex())
 
     async def test_missing_state_remains_exportable_while_disconnected(self) -> None:
         entry = types.SimpleNamespace(entry_id="station", data={}, options={})

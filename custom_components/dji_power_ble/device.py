@@ -538,6 +538,12 @@ class DjiPowerDevice:
             raise DjiPowerError(
                 f"timeout waiting for 0x{command_id:02x} response"
             ) from error
+        except (BleakError, EOFError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            raise DjiPowerError(
+                f"Bluetooth transport failed during 0x{command_id:02x} request"
+            ) from error
         finally:
             self._pending.pop(sequence, None)
             if not future.done():
@@ -768,6 +774,32 @@ class DjiPowerDevice:
             raise DjiPowerError(str(error)) from error
         return current
 
+    async def _read_charge_limits(self) -> dict[str, object]:
+        """Invalidate unreadable limits, returning only a fresh complete record."""
+        invalidated = {
+            "key_05": None, "recharge_limit": None, "discharge_limit": None
+        }
+        try:
+            update = await self._read_config(CHARGE_LIMIT_KEY)
+        except DjiPowerDisconnectedError:
+            raise
+        except DjiPowerError as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            self._merge_data(invalidated)
+            raise
+        if (
+            isinstance(update.get("key_05"), str)
+            and isinstance(update.get("recharge_limit"), int)
+            and isinstance(update.get("discharge_limit"), int)
+        ):
+            return update
+        if not self.is_connected:
+            raise DjiPowerDisconnectedError("Bluetooth connection lost")
+        self._merge_data(invalidated)
+        # An omitted or malformed record may settle on a later confirmation read.
+        return {}
+
     async def _wait_for_eco_mode_values(self, expected: dict[str, object]) -> None:
         for attempt in range(READBACK_RETRIES + 1):
             if attempt:
@@ -847,14 +879,12 @@ class DjiPowerDevice:
         except ProtocolError as error:
             raise DjiPowerError(str(error)) from error
 
-    async def _wait_for_values(
-        self, expected: dict[str, object], *, config_key: int
-    ) -> None:
-        """Confirm from a fresh targeted read, delaying only subsequent attempts."""
+    async def _wait_for_charge_limits(self, expected: dict[str, int]) -> None:
+        """Confirm fresh limits, delaying only subsequent attempts."""
         for attempt in range(READBACK_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(READBACK_RETRY_INTERVAL)
-            update = await self._read_config(config_key)
+            update = await self._read_charge_limits()
             if all(
                 key in update and update[key] == value
                 for key, value in expected.items()
@@ -1002,7 +1032,7 @@ class DjiPowerDevice:
     ) -> None:
         """Set one or both energy-management limits."""
         async with self._operation_lock:
-            update = await self._read_config(CHARGE_LIMIT_KEY)
+            update = await self._read_charge_limits()
             current = update.get("key_05")
             old_discharge = update.get("discharge_limit")
             old_recharge = update.get("recharge_limit")
@@ -1025,12 +1055,11 @@ class DjiPowerDevice:
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
             await self._set(payload, (CHARGE_LIMIT_KEY,))
-            await self._wait_for_values(
+            await self._wait_for_charge_limits(
                 {
                     "discharge_limit": requested_discharge,
                     "recharge_limit": requested_recharge,
                 },
-                config_key=CHARGE_LIMIT_KEY,
             )
 
     async def set_charge_power(self, watts: int) -> None:

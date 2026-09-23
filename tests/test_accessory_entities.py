@@ -14,6 +14,10 @@ PACKAGE = "_dji_power_accessory_entity_tests"
 ADDRESS = "AA:BB:CC:DD:EE:FF"
 
 
+class _ServiceValidationError(Exception):
+    pass
+
+
 class _CoordinatorEntity:
     def __class_getitem__(cls, item):
         return cls
@@ -67,6 +71,9 @@ def _load_entities() -> dict[str, types.ModuleType]:
         ),
         "homeassistant.core": _module(
             "homeassistant.core", HomeAssistant=object, callback=lambda method: method
+        ),
+        "homeassistant.exceptions": _module(
+            "homeassistant.exceptions", ServiceValidationError=_ServiceValidationError
         ),
         "homeassistant.helpers": _module("homeassistant.helpers"),
         "homeassistant.helpers.entity_platform": _module(
@@ -422,9 +429,11 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.async_set_sdc.assert_awaited_once_with(5, 1, True)
 
     async def test_bad_ui_values_are_rejected_before_forwarding(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Auto, Recharge or Charge"):
+        with self.assertRaisesRegex(
+            _ServiceValidationError, "Auto, Recharge or Charge"
+        ):
             await self.mode.async_select_option("Unknown")
-        with self.assertRaisesRegex(ValueError, "whole number of watts"):
+        with self.assertRaisesRegex(_ServiceValidationError, "whole number of watts"):
             await self.power.async_set_native_value(750.5)
         self.coordinator.async_set_car_charger.assert_not_awaited()
 

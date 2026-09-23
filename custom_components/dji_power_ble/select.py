@@ -6,6 +6,7 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .accessory import (
@@ -60,7 +61,7 @@ class DjiPowerAdjustmentSelect(DjiPowerEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         if option not in self._attr_options:
-            raise ValueError("power adjustment must be Manual or Automatic")
+            raise ServiceValidationError("power adjustment must be Manual or Automatic")
         await self.coordinator.async_set_power_adjustment(option)
 
 
@@ -90,5 +91,7 @@ class DjiPowerCarModeSelect(DjiPowerCarChargerEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         if option not in self._attr_options:
-            raise ValueError("car recharging mode must be Auto, Recharge or Charge")
+            raise ServiceValidationError(
+                "car recharging mode must be Auto, Recharge or Charge"
+            )
         await self.async_set_charger(mode=self._attr_options.index(option) + 1)

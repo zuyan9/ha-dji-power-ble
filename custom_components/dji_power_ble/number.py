@@ -12,6 +12,7 @@ from homeassistant.const import (
     UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .accessory import (
@@ -72,13 +73,17 @@ class DjiPowerLimitNumber(DjiPowerEntity, NumberEntity):
         self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_{key}"
 
     @property
+    def available(self) -> bool:
+        return super().available and isinstance(self.native_value, int)
+
+    @property
     def native_value(self) -> int | None:
         return (self.coordinator.data or {}).get(self._key)
 
     async def async_set_native_value(self, value: float) -> None:
         limit = int(value)
         if limit != value:
-            raise ValueError("limit must be a whole-number percentage")
+            raise ServiceValidationError("limit must be a whole-number percentage")
         await self.coordinator.async_set_charge_limits(**{self._key: limit})
 
 
@@ -138,7 +143,9 @@ class DjiPowerDischargePowerNumber(_DjiPowerWattNumber):
     async def async_set_native_value(self, value: float) -> None:
         watts = int(value)
         if watts != value:
-            raise ValueError("discharge power must be a whole number of watts")
+            raise ServiceValidationError(
+                "discharge power must be a whole number of watts"
+            )
         await self.coordinator.async_set_discharge_power(watts)
 
 
@@ -151,7 +158,9 @@ class DjiPowerChargePowerNumber(_DjiPowerWattNumber):
     async def async_set_native_value(self, value: float) -> None:
         watts = int(value)
         if watts != value:
-            raise ValueError("recharge power must be a whole number of watts")
+            raise ServiceValidationError(
+                "recharge power must be a whole number of watts"
+            )
         await self.coordinator.async_set_charge_power(watts)
 
 
@@ -217,7 +226,9 @@ class DjiPowerCarRechargePowerNumber(_DjiPowerCarNumber):
     async def async_set_native_value(self, value: float) -> None:
         watts = int(value)
         if watts != value:
-            raise ValueError("car recharge power must be a whole number of watts")
+            raise ServiceValidationError(
+                "car recharge power must be a whole number of watts"
+            )
         await self.async_set_charger(recharge_power_w=watts)
 
 

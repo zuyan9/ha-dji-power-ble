@@ -159,15 +159,35 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _discovered_stations(self) -> dict[str, str]:
         """Currently-advertising, not-yet-configured DJI Power stations."""
-        configured = {e.data.get(CONF_ADDRESS) for e in self._async_current_entries()}
+        configured = {
+            _normalize_address(entry.data.get(CONF_ADDRESS))
+            for entry in self._async_current_entries()
+        }
         out: dict[str, str] = {}
         for info in async_discovered_service_info(self.hass, connectable=True):
-            if info.address in configured:
+            if _normalize_address(info.address) in configured:
                 continue
             name = info.name or ""
             if MANUFACTURER_ID in (info.manufacturer_data or {}):
                 out[info.address] = f"{name or 'DJI Power'} ({info.address})"
         return out
+
+    def _model_for_address(self, address: str) -> str:
+        """Use only model information belonging to the submitted station."""
+        normalized = _normalize_address(address)
+        if (
+            self._discovered_model
+            and normalized == _normalize_address(self._discovered_address)
+        ):
+            return self._discovered_model
+        for info in async_discovered_service_info(self.hass, connectable=True):
+            if _normalize_address(info.address) != normalized:
+                continue
+            manufacturer_data = info.manufacturer_data.get(MANUFACTURER_ID)
+            if manufacturer_data:
+                with contextlib.suppress(ProtocolError):
+                    return parse_manufacturer_data(manufacturer_data).model
+        return "DJI Power"
 
     def _address_schema_part(self) -> dict:
         """Address field: prefilled if discovered, a dropdown if any station is
@@ -209,7 +229,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_NAME: user_input.get(CONF_NAME)
                         or self._discovered_name
                         or "DJI Power",
-                        CONF_MODEL: self._discovered_model or "DJI Power",
+                        CONF_MODEL: self._model_for_address(address),
                     },
                 )
 
@@ -459,7 +479,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_ADDRESS: self._address,
                 CONF_PAIR_KEY: device.pair_key,
                 CONF_NAME: self._name or device.name or "DJI Power",
-                CONF_MODEL: self._discovered_model or "DJI Power",
+                CONF_MODEL: self._model_for_address(self._address),
                 CONF_SERIAL_NUMBER: device.sn,
             },
         )

@@ -16,6 +16,14 @@ PAIR_KEY = "ab" * 16
 PASSWORD = " synthetic-password "
 
 
+def advertisement(address, manufacturer_data=b"\x94\x10"):
+    return SimpleNamespace(
+        address=address,
+        name="Synthetic station",
+        manufacturer_data={flow_module.MANUFACTURER_ID: manufacturer_data},
+    )
+
+
 class ConfigFlowTests(IsolatedAsyncioTestCase):
     def setUp(self):
         self.devices = [cloud.DjiDevice("Synthetic station", "SN1", "", PAIR_KEY)]
@@ -92,6 +100,81 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
                     else:
                         self.assertEqual(result["type"], "create_entry")
                         self.assertEqual(result["data"]["address"], ADDRESS)
+
+    async def test_changed_discovery_address_resolves_its_own_model(self):
+        original = advertisement("AA:BB:CC:DD:EE:01", b"\x91\x10")
+        for step in ("manual", "token", "account"):
+            for candidates, expected in (
+                ([original, advertisement(ADDRESS.upper())], "DJI Power 2000"),
+                ([original], "DJI Power"),
+                ([original, advertisement(ADDRESS.upper(), b"\x94")], "DJI Power"),
+            ):
+                with self.subTest(step=step, expected=expected, candidates=candidates):
+                    flow = self.flow()
+                    flow._discovered_address = original.address
+                    flow._discovered_model = "DJI Power 1000"
+                    with patch.object(
+                        flow_module, "async_discovered_service_info",
+                        return_value=candidates,
+                    ):
+                        handler = getattr(flow, f"async_step_{step}")
+                        form = await handler()
+                        submitted = form["data_schema"](self.input_for(step))
+                        result = await handler(submitted)
+                        if step == "account":
+                            result = await flow.async_step_captcha(
+                                {"captcha_code": "code"}
+                            )
+                    self.assertEqual(result["type"], "create_entry")
+                    self.assertEqual(result["data"]["address"], ADDRESS)
+                    self.assertEqual(result["data"]["model"], expected)
+
+    async def test_same_discovery_address_preserves_model_across_formats(self):
+        for step in ("manual", "token", "account"):
+            for address in (ADDRESS.upper(), "AA-BB-CC-DD-EE-FF", "AABBCCDDEEFF"):
+                with self.subTest(step=step, address=address):
+                    flow = self.flow()
+                    flow._discovered_address = ADDRESS
+                    flow._discovered_model = "DJI Power 1000"
+                    result = await getattr(flow, f"async_step_{step}")(
+                        self.input_for(step, address)
+                    )
+                    if step == "account":
+                        result = await flow.async_step_captcha({"captcha_code": "code"})
+                    self.assertEqual(result["data"]["model"], "DJI Power 1000")
+
+    async def test_configured_filter_preserves_remaining_dropdown_keys(self):
+        other = advertisement("AA:BB:CC:DD:EE:02")
+        for stored in (ADDRESS, "AA-BB-CC-DD-EE-FF", "AABBCCDDEEFF"):
+            with self.subTest(stored=stored):
+                flow = self.flow()
+                flow._async_current_entries = lambda stored=stored: [
+                    SimpleNamespace(data={"address": stored})
+                ]
+                with patch.object(
+                    flow_module, "async_discovered_service_info",
+                    return_value=[advertisement(ADDRESS.upper()), other],
+                ):
+                    self.assertEqual(
+                        flow._discovered_stations(),
+                        {other.address: f"Synthetic station ({other.address})"},
+                    )
+                    form = await flow.async_step_manual()
+                submitted = self.input_for("manual", other.address)
+                self.assertEqual(form["data_schema"](submitted), submitted)
+
+    async def test_only_configured_advertisement_leaves_manual_address_editable(self):
+        flow = self.flow()
+        flow._async_current_entries = lambda: [
+            SimpleNamespace(data={"address": ADDRESS})
+        ]
+        with patch.object(
+            flow_module, "async_discovered_service_info",
+            return_value=[advertisement(ADDRESS.upper())],
+        ):
+            form = await flow.async_step_manual()
+        submitted = self.input_for("manual", "AA:BB:CC:DD:EE:02")
+        self.assertEqual(form["data_schema"](submitted), submitted)
 
     async def test_account_rejects_blank_credentials_before_fetching_captcha(self):
         for field in ("email", "password"):
