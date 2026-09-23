@@ -113,6 +113,11 @@ traffic.
 | `0x66` | Station push | HMS data retained raw for diagnostics |
 | `0x6A` | Request/response | Local authentication |
 
+When a `0x62` report addressed to the app requests acknowledgement, the integration
+replies with payload `01`, the same sequence and command, reversed addresses, and
+response attributes `0x80` plus the model's transport encryption type. This confirms
+report delivery; setting writes still require their own ACK and fresh readback.
+
 ## Keyed configuration
 
 Commands `0x60`, `0x62`, and `0x63` share a keyed configuration format. Snapshot and SET

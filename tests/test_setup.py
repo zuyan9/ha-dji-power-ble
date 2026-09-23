@@ -357,6 +357,116 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
             self.entry, data={**self.entry.data, "model": "DJI Power 1000"}
         )
 
+    async def test_legacy_local_model_recovers_from_bluez_manufacturer_data(self):
+        self.entry.data["model"] = "DJI Power"
+        self._local_device_lookup(types.SimpleNamespace(details={"props": {
+            "ManufacturerData": {integration.MANUFACTURER_ID: b"\x94\x10"},
+        }}))
+        bluetooth.async_last_service_info.return_value = None
+
+        self.assertTrue(await integration.async_setup_entry(self.hass, self.entry))
+
+        self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
+                         "DJI Power 2000")
+        self.hass.config_entries.async_update_entry.assert_called_once_with(
+            self.entry, data={**self.entry.data, "model": "DJI Power 2000"}
+        )
+        bluetooth.async_ble_device_from_address.assert_not_called()
+
+    async def test_cached_model_does_not_override_configured_or_advertised_model(self):
+        self._local_device_lookup(types.SimpleNamespace(details={"props": {
+            "ManufacturerData": {integration.MANUFACTURER_ID: b"\x94\x10"},
+        }}))
+        for configured, manufacturer_data, expected in (
+            ("DJI Power 1000", {}, "DJI Power 1000"),
+            ("DJI Power", {integration.MANUFACTURER_ID: b"\x97\x10"},
+             "DJI Power 1000 V2"),
+            ("DJI Power", {integration.MANUFACTURER_ID: b"\x94"},
+             "DJI Power 2000"),
+        ):
+            with self.subTest(configured=configured, expected=expected):
+                self.entry.data["model"] = configured
+                self.service_info.manufacturer_data = manufacturer_data
+                await integration._async_create_device(self.hass, self.entry)
+                self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
+                                 expected)
+
+    async def test_invalid_cached_model_does_not_guess_from_device_name(self):
+        self.entry.data["model"] = "DJI Power"
+        for manufacturer_data in (
+            None, [], {}, {1234: b"\x94\x10"},
+            {integration.MANUFACTURER_ID: b"\x94"},
+            {integration.MANUFACTURER_ID: "9410"},
+        ):
+            with self.subTest(manufacturer_data=manufacturer_data):
+                self._local_device_lookup(types.SimpleNamespace(
+                    name="DJI Power 2000", details={"props": {
+                        "Name": "DJI Power 2000",
+                        "ManufacturerData": manufacturer_data,
+                    }},
+                ))
+                await integration._async_create_device(self.hass, self.entry)
+                self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
+                                 "DJI Power")
+        self.hass.config_entries.async_update_entry.assert_not_called()
+
+    async def test_corrected_legacy_model_rebuilds_session_and_discovers_charger(self):
+        from tests import test_accessory_entities as accessories
+
+        self._local_device_lookup(self.ble_device)
+        self.entry.data["model"] = "DJI Power"
+        self.entry.options["keep_connection"] = True
+        self.device.can_retain_connection = True
+        self.device.matches_connection.side_effect = (
+            lambda *args, model, **kwargs: model == self.device.model
+        )
+        entities = []
+
+        async def setup_platforms(entry, platforms):
+            coordinator = accessories._Coordinator(self.device.model)
+            coordinator.entry = entry
+            coordinator.data = {
+                "car_chargers": [accessories._car(
+                    p_from_car_up=600, p_from_car_v=348,
+                    v_from_car_low=1150, v_from_car_v=1150,
+                )],
+                "power_switches": [{"type": 2, "seq": 1, "sw": 2}],
+            }
+            hass = types.SimpleNamespace(data={
+                integration.DOMAIN: {entry.entry_id: coordinator},
+            })
+            for platform in (accessories.switch, accessories.select,
+                             accessories.number):
+                await platform.async_setup_entry(hass, entry, entities.extend)
+
+        self.hass.config_entries.async_forward_entry_setups.side_effect = (
+            setup_platforms
+        )
+        await integration.async_setup_entry(self.hass, self.entry)
+        self.assertFalse(any(hasattr(entity, "_identity") for entity in entities))
+
+        # Reconfigure persists the model before its update listener runs.
+        self.entry.data = {**self.entry.data, "model": "DJI Power 2000"}
+        await integration._async_options_updated(self.hass, self.entry)
+        self.hass.config_entries.async_schedule_reload.assert_called_once_with(
+            self.entry.entry_id
+        )
+        await integration.async_unload_entry(self.hass, self.entry)
+        self.coordinator.async_disconnect.assert_awaited_once_with()
+        self.coordinator.async_release_device.assert_not_called()
+        entities.clear()
+        await integration.async_setup_entry(self.hass, self.entry)
+
+        self.assertEqual(integration.DjiPowerDevice.call_count, 2)
+        self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
+                         "DJI Power 2000")
+        chargers = [entity for entity in entities if hasattr(entity, "_identity")]
+        self.assertEqual(len(chargers), 4)
+        self.assertTrue(all(entity.available for entity in chargers))
+        self.assertTrue(all(entity._row_key == "car_chargers" for entity in chargers))
+        self.assertTrue(all(entity._attr_device_info["model"] == "DJI Power 2000"
+                            for entity in chargers))
+
     async def test_core_shutdown_uses_early_job_and_ordinary_unload_removes_it(self):
         await integration.async_setup_entry(self.hass, self.entry)
         job = self.hass.async_add_shutdown_job.call_args.args[0]
@@ -716,10 +826,14 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.coordinator.async_apply_options.assert_not_called()
 
-    async def test_options_update_without_loaded_entry_is_a_noop(self):
+    async def test_queued_model_update_reloads_after_coordinator_was_removed(self):
+        self.entry.data["model"] = "DJI Power 2000"
+
         await integration._async_options_updated(self.hass, self.entry)
 
-        self.hass.config_entries.async_schedule_reload.assert_not_called()
+        self.hass.config_entries.async_schedule_reload.assert_called_once_with(
+            self.entry.entry_id
+        )
         self.coordinator.async_apply_options.assert_not_called()
 
 

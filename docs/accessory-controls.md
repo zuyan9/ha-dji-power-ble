@@ -53,6 +53,13 @@ Newly attached accessories are discovered automatically. Missing, malformed, or 
 snapshots make the affected controls unavailable. Disconnection also makes them
 unavailable; reconnecting or reattaching the same reported accessory restores them.
 
+If an older installation shows the station model as **DJI Power** and the controls
+are missing, open the integration entry's menu in **Settings → Devices & services**,
+choose **Reconfigure**, and select the model printed on the station. Saving reloads
+the integration with that model and preserves the Bluetooth address, pair key, and
+options. On a selected local adapter, setup also uses cached Bluetooth manufacturer
+data to identify the model when Home Assistant has no advertisement available.
+
 Before each write, the integration reads the current configuration and checks the
 target's identity, mode, and applicable bounds. It requires a successful acknowledgement
 for every written key, then reads the configuration again to confirm the requested

@@ -59,12 +59,20 @@
         "data": {
           "device": "Device"
         }
+      },
+      "reconfigure": {
+        "title": "Station model",
+        "description": "Choose the actual model of your DJI Power station. Home Assistant uses it to enable the supported controls.",
+        "data": {
+          "model": "Station model"
+        }
       }
     },
     "error": {
       "invalid_pair_key": "Pair key must be exactly 32 hexadecimal characters.",
       "address_required": "A Bluetooth address is required.",
       "invalid_address": "Enter a valid Bluetooth address, such as AA:BB:CC:DD:EE:FF.",
+      "invalid_model": "Choose a station model from the list.",
       "email_required": "Enter your DJI account email.",
       "password_required": "Enter your DJI account password.",
       "invalid_code": "That verification code was not accepted. Try again.",
@@ -74,6 +82,7 @@
     },
     "abort": {
       "already_configured": "This station is already configured.",
+      "reconfigure_successful": "Station model updated.",
       "cannot_connect": "Could not reach the DJI cloud to fetch the pair key.",
       "no_devices": "No DJI devices with a local pair key were found on this account.",
       "setup_incomplete": "Setup information is missing. Start setup again."
