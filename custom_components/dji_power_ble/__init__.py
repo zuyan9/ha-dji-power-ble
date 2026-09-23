@@ -78,11 +78,13 @@ def _matches_connection(entry: ConfigEntry, device: DjiPowerDevice) -> bool:
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Apply ordinary options live; reconnect only when connection settings change."""
-    if coordinator := hass.data.get(DOMAIN, {}).get(entry.entry_id):
-        if _matches_connection(entry, coordinator.device):
-            coordinator.async_apply_options()
-        else:
-            hass.config_entries.async_schedule_reload(entry.entry_id)
+    if (
+        coordinator := hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    ) and _matches_connection(entry, coordinator.device):
+        coordinator.async_apply_options()
+        return
+    # An update listener can already be queued when unload removes its coordinator.
+    hass.config_entries.async_schedule_reload(entry.entry_id)
 
 
 def _start_retained_close(
@@ -247,14 +249,24 @@ def _model_from_discovery(
     configured = entry.data.get(CONF_MODEL)
     if isinstance(configured, str) and configured and configured != "DJI Power":
         return configured
-    if discovery_info is not None:
-        manufacturer_data = discovery_info.manufacturer_data.get(MANUFACTURER_ID)
-        if manufacturer_data:
-            try:
-                return parse_manufacturer_data(manufacturer_data).model
-            except ProtocolError:
-                pass
+    if discovery_info is not None and (
+        model := _model_from_manufacturer_data(discovery_info.manufacturer_data)
+    ):
+        return model
     return configured if isinstance(configured, str) and configured else "DJI Power"
+
+
+def _model_from_manufacturer_data(manufacturer_data: object) -> str | None:
+    """Resolve a model from DJI manufacturer bytes, including BlueZ's cache."""
+    if not isinstance(manufacturer_data, dict):
+        return None
+    value = manufacturer_data.get(MANUFACTURER_ID)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return parse_manufacturer_data(value).model
+        except ProtocolError:
+            pass
+    return None
 
 
 async def _async_create_device(
@@ -290,6 +302,16 @@ async def _async_create_device(
             raise ConfigEntryNotReady(
                 "Station unavailable on the selected local Bluetooth adapter"
             )
+        if model == "DJI Power":
+            # A retained BlueZ link may have manufacturer data even when HA
+            # has no advertisement. This device belongs to the selected adapter.
+            details = getattr(ble_device, "details", None)
+            props = details.get("props") if isinstance(details, dict) else None
+            if isinstance(props, dict):
+                model = (
+                    _model_from_manufacturer_data(props.get("ManufacturerData"))
+                    or model
+                )
         manager = get_manager()
         allocate_slot = manager.async_allocate_connection_slot
         release_slot = manager.async_release_connection_slot

@@ -144,6 +144,8 @@ class DjiPowerDevice:
         self._disconnect_callbacks: set[DisconnectCallback] = set()
         self._report_event = asyncio.Event()
         self._operation_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
+        self._settings_ack_tasks: set[asyncio.Task[None]] = set()
         self._expansion_refresh_task: asyncio.Task[None] | None = None
         self._disconnecting = False
         self.data: dict[str, object] = {}
@@ -231,6 +233,13 @@ class DjiPowerDevice:
 
         if packet.command_set != POWER_COMMAND_SET:
             return
+        if (
+            packet.command_id == TELEMETRY_COMMAND
+            and packet.destination == APP_SOURCE
+            and not packet.is_response
+            and packet.flags & 0x60
+        ):
+            self._queue_settings_ack(packet)
         try:
             if packet.command_id == REPORT_COMMAND:
                 update = parse_report(self._decode_payload(packet))
@@ -264,6 +273,68 @@ class DjiPowerDevice:
                 error,
             )
 
+    def _queue_settings_ack(self, packet: DumlPacket) -> None:
+        """Acknowledge settings reports without waiting on a GET/SET operation."""
+        client = self._client
+        characteristic = self._write_characteristic
+        if (
+            self._disconnecting
+            or client is None
+            or not client.is_connected
+            or characteristic is None
+        ):
+            return
+        task = asyncio.create_task(
+            self._acknowledge_settings(packet, client, characteristic)
+        )
+        self._settings_ack_tasks.add(task)
+        task.add_done_callback(self._settings_ack_tasks.discard)
+
+    async def _acknowledge_settings(
+        self,
+        report: DumlPacket,
+        client: BleakClient | LocalBleakClient,
+        characteristic: BleakGATTCharacteristic,
+    ) -> None:
+        """Reply on the report's connection, using the model's transport cipher."""
+        payload = b"\x01"
+        flags = 0x80
+        if self._encrypted_transport:
+            payload = encrypt_power_1000_payload(payload)
+            flags |= POWER_1000_ENCRYPTION_TYPE
+        ack = DumlPacket(
+            report.destination,
+            report.source,
+            report.sequence,
+            flags,
+            report.command_set,
+            report.command_id,
+            payload,
+            version=report.version,
+        )
+        try:
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                await self._write_packet(client, characteristic, ack)
+        except (DjiPowerError, BleakError, EOFError, OSError, TimeoutError) as error:
+            _LOGGER.debug("Settings report acknowledgement failed: %s", error)
+
+    async def _write_packet(
+        self,
+        client: BleakClient | LocalBleakClient,
+        characteristic: BleakGATTCharacteristic,
+        packet: DumlPacket,
+    ) -> None:
+        """Serialize GATT writes and reject queued writes from an old session."""
+        async with self._write_lock:
+            if (
+                client is not self._client
+                or characteristic is not self._write_characteristic
+                or not client.is_connected
+                or self._disconnecting
+            ):
+                raise DjiPowerDisconnectedError("Bluetooth connection changed")
+            await client.write_gatt_char(characteristic, packet.encode(), response=True)
+
     def _decode_payload(self, packet: DumlPacket) -> bytes:
         """Decode a wire payload before interpreting command-specific fields."""
         if packet.encryption_type == 0:
@@ -285,6 +356,8 @@ class DjiPowerDevice:
         self._write_characteristic = None
         if self._expansion_refresh_task is not None:
             self._expansion_refresh_task.cancel()
+        for task in self._settings_ack_tasks:
+            task.cancel()
         error = DjiPowerDisconnectedError(f"{self.address} disconnected")
         for _, _, future in self._pending.values():
             if not future.done():
@@ -462,6 +535,11 @@ class DjiPowerDevice:
                     DjiPowerDisconnectedError("Bluetooth client closed")
                 )
         self._pending.clear()
+        ack_tasks = tuple(self._settings_ack_tasks)
+        for ack_task in ack_tasks:
+            ack_task.cancel()
+        if ack_tasks:
+            await asyncio.gather(*ack_tasks, return_exceptions=True)
         task = self._expansion_refresh_task
         self._expansion_refresh_task = None
         if task is not None:
@@ -530,9 +608,7 @@ class DjiPowerDevice:
         self._pending[sequence] = (POWER_COMMAND_SET, command_id, future)
         try:
             async with asyncio.timeout(timeout):
-                await client.write_gatt_char(
-                    write_characteristic, packet.encode(), response=True
-                )
+                await self._write_packet(client, write_characteristic, packet)
                 return await future
         except TimeoutError as error:
             raise DjiPowerError(

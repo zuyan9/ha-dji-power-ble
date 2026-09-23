@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
+import voluptuous as vol
+
 from tests.test_cloud import cloud
 from tests.test_connection_options import _OptionsFlow, flow_module
 
@@ -53,6 +55,143 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
         ):
             setattr(flow, name, getattr(_OptionsFlow, name).__get__(flow))
         return flow
+
+    def reconfigure_flow(self, model="DJI Power", has_update_listener=True):
+        flow = self.flow()
+        entry = SimpleNamespace(
+            entry_id="station",
+            title="Existing station",
+            update_listeners=[Mock()] if has_update_listener else [],
+            data={
+                "address": ADDRESS,
+                "pair_key": PAIR_KEY,
+                "name": "Existing station",
+                "serial_number": "SN1",
+                "model": model,
+            },
+            options={"keep_connection": True, "connection_source": "adapter"},
+        )
+
+        def update_entry(target, *, data):
+            changed = target.data != data
+            target.data = data
+            return changed
+
+        flow._get_reconfigure_entry = Mock(return_value=entry)
+        flow.hass.config_entries = SimpleNamespace(
+            async_update_entry=Mock(side_effect=update_entry),
+            async_schedule_reload=Mock(),
+        )
+        return flow, entry
+
+    async def test_reconfigure_unresolved_model_has_no_accidental_default(self):
+        for configured in (None, "DJI Power", "DJI Power (0xFF)"):
+            for candidates in (
+                [],
+                [advertisement("AA:BB:CC:DD:EE:02")],
+                [advertisement(ADDRESS, b"\x94")],
+                [advertisement(ADDRESS, b"\xff\x10")],
+            ):
+                with self.subTest(configured=configured, candidates=candidates):
+                    flow, _ = self.reconfigure_flow(configured)
+                    with patch.object(
+                        flow_module, "async_discovered_service_info",
+                        return_value=candidates,
+                    ):
+                        result = await flow.async_step_reconfigure()
+                    self.assertEqual(result["step_id"], "reconfigure")
+                    schema = result["data_schema"]
+                    with self.assertRaises(vol.Invalid):
+                        schema({})
+                    field, selector = next(iter(schema.schema.items()))
+                    self.assertEqual(field.schema, "model")
+                    self.assertEqual(selector.config["mode"], "dropdown")
+                    self.assertEqual(
+                        selector.config["options"],
+                        list(flow_module.MODEL_NAMES.values()),
+                    )
+                    self.assertEqual(len(schema.schema), 1)
+                    flow.hass.config_entries.async_update_entry.assert_not_called()
+                    flow.hass.config_entries.async_schedule_reload.assert_not_called()
+        self.factory.assert_not_called()
+
+    async def test_reconfigure_defaults_to_existing_model_or_matching_advertisement(
+        self,
+    ):
+        for configured, candidates, expected in (
+            ("DJI Power 1000", [advertisement(ADDRESS)], "DJI Power 1000"),
+            ("DJI Power", [advertisement(ADDRESS.upper())], "DJI Power 2000"),
+            (None, [advertisement(ADDRESS, b"\x98\x10")], "DJI Power 1000 Mini"),
+        ):
+            with self.subTest(configured=configured, expected=expected):
+                flow, _ = self.reconfigure_flow(configured)
+                with patch.object(
+                    flow_module, "async_discovered_service_info",
+                    return_value=candidates,
+                ):
+                    result = await flow.async_step_reconfigure()
+                self.assertEqual(result["data_schema"]({}), {"model": expected})
+                flow.hass.config_entries.async_update_entry.assert_not_called()
+
+    async def test_reconfigure_preserves_credentials_and_options_with_one_reload_owner(
+        self,
+    ):
+        for has_listener in (False, True):
+            with self.subTest(has_listener=has_listener):
+                flow, entry = self.reconfigure_flow(has_update_listener=has_listener)
+                previous_data = dict(entry.data)
+                previous_options = dict(entry.options)
+                result = await flow.async_step_reconfigure({"model": "DJI Power 2000"})
+                self.assertEqual(
+                    result, {"type": "abort", "reason": "reconfigure_successful"}
+                )
+                self.assertEqual(
+                    entry.data, {**previous_data, "model": "DJI Power 2000"}
+                )
+                self.assertEqual(entry.options, previous_options)
+                self.assertEqual(entry.title, "Existing station")
+                flow.hass.config_entries.async_update_entry.assert_called_once_with(
+                    entry, data={**previous_data, "model": "DJI Power 2000"}
+                )
+                reload = flow.hass.config_entries.async_schedule_reload
+                if has_listener:
+                    reload.assert_not_called()  # The registered listener owns reload.
+                else:
+                    reload.assert_called_once_with(entry.entry_id)
+                flow.async_set_unique_id.assert_not_awaited()
+        self.factory.assert_not_called()
+
+    async def test_reconfigure_unchanged_model_reloads_without_listener_notification(
+        self,
+    ):
+        for has_listener in (False, True):
+            with self.subTest(has_listener=has_listener):
+                flow, entry = self.reconfigure_flow("DJI Power 2000", has_listener)
+                result = await flow.async_step_reconfigure({"model": "DJI Power 2000"})
+                self.assertEqual(result["reason"], "reconfigure_successful")
+                flow.hass.config_entries.async_schedule_reload.assert_called_once_with(
+                    entry.entry_id
+                )
+
+    async def test_reconfigure_allows_correcting_an_existing_specific_model(self):
+        flow, entry = self.reconfigure_flow("DJI Power 1000 V2")
+        result = await flow.async_step_reconfigure({"model": "DJI Power 2000"})
+        self.assertEqual(result["reason"], "reconfigure_successful")
+        self.assertEqual(entry.data["model"], "DJI Power 2000")
+
+    async def test_reconfigure_rejects_unknown_or_missing_model(self):
+        for submitted in ({}, {"model": ""}, {"model": "DJI Power"},
+                          {"model": "DJI Power 500"}, {"model": None}):
+            with self.subTest(submitted=submitted):
+                flow, entry = self.reconfigure_flow()
+                result = await flow.async_step_reconfigure(submitted)
+                self.assertEqual(result["errors"], {"model": "invalid_model"})
+                self.assertEqual(entry.data["model"], "DJI Power")
+                with self.assertRaises(vol.Invalid):
+                    result["data_schema"](submitted)
+                flow.hass.config_entries.async_update_entry.assert_not_called()
+                flow.hass.config_entries.async_schedule_reload.assert_not_called()
+        self.factory.assert_not_called()
 
     @staticmethod
     def input_for(step, address=ADDRESS):
@@ -282,6 +421,10 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
         strings = json.loads((component / "strings.json").read_text())
         english = json.loads((component / "translations/en.json").read_text())
         self.assertEqual(strings, english)
-        for key in ("invalid_address", "email_required", "password_required"):
+        for key in (
+            "invalid_address", "email_required", "password_required", "invalid_model"
+        ):
             self.assertTrue(strings["config"]["error"][key])
         self.assertTrue(strings["config"]["abort"]["setup_incomplete"])
+        self.assertTrue(strings["config"]["abort"]["reconfigure_successful"])
+        self.assertTrue(strings["config"]["step"]["reconfigure"]["data"]["model"])

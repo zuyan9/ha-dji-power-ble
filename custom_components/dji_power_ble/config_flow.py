@@ -38,6 +38,7 @@ from homeassistant.helpers.selector import (
     NumberSelectorMode,
     SelectSelector,
     SelectSelectorConfig,
+    SelectSelectorMode,
     TimeSelector,
 )
 
@@ -65,6 +66,7 @@ from .const import (
     MIN_UPDATE_INTERVAL,
 )
 from .duml import (
+    MODEL_NAMES,
     TIME_PERIOD_DAYS,
     ProtocolError,
     normalize_pair_key,
@@ -155,6 +157,50 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         """Let the user choose how to supply the pair key."""
         return self.async_show_menu(
             step_id="user", menu_options=["account", "token", "manual"]
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Correct the station model without changing its connection details."""
+        entry = self._get_reconfigure_entry()
+        models = list(MODEL_NAMES.values())
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            model = user_input.get(CONF_MODEL)
+            if model not in models:
+                errors[CONF_MODEL] = "invalid_model"
+            else:
+                has_update_listener = bool(entry.update_listeners)
+                changed = self.hass.config_entries.async_update_entry(
+                    entry, data={**entry.data, CONF_MODEL: model}
+                )
+                # A notified listener owns the reload; unchanged data notifies none.
+                if not changed or not has_update_listener:
+                    self.hass.config_entries.async_schedule_reload(entry.entry_id)
+                return self.async_abort(reason="reconfigure_successful")
+
+        current = entry.data.get(CONF_MODEL)
+        if current not in models:
+            current = self._model_for_address(entry.data[CONF_ADDRESS])
+        model_field = (
+            vol.Required(CONF_MODEL, default=current)
+            if current in models
+            else vol.Required(CONF_MODEL)
+        )
+        schema = vol.Schema(
+            {
+                model_field: SelectSelector(
+                    SelectSelectorConfig(
+                        options=models, mode=SelectSelectorMode.DROPDOWN
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(schema, user_input),
+            errors=errors,
         )
 
     def _discovered_stations(self) -> dict[str, str]:
