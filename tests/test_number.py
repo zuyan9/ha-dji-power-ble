@@ -45,6 +45,10 @@ class _HomeAssistantError(Exception):
     pass
 
 
+class _ServiceValidationError(_HomeAssistantError):
+    pass
+
+
 def _module(name: str, **attributes) -> types.ModuleType:
     module = types.ModuleType(name)
     module.__dict__.update(attributes)
@@ -91,7 +95,9 @@ def _load_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleTyp
             "homeassistant.core", HomeAssistant=object, callback=lambda method: method
         ),
         "homeassistant.exceptions": _module(
-            "homeassistant.exceptions", HomeAssistantError=_HomeAssistantError
+            "homeassistant.exceptions",
+            HomeAssistantError=_HomeAssistantError,
+            ServiceValidationError=_ServiceValidationError,
         ),
         "homeassistant.helpers": _module("homeassistant.helpers"),
         "homeassistant.helpers.entity_platform": _module(
@@ -158,6 +164,66 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
                     if controls:
                         self.assertFalse(controls[0].available)
                 self.assertEqual(len(entities), 4 if model == "DJI Power 2000" else 2)
+
+
+class LimitNumberTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.coordinator = types.SimpleNamespace(
+            entry=types.SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"}),
+            last_update_success=True,
+            data={"discharge_limit": 10, "recharge_limit": 80},
+            async_set_charge_limits=AsyncMock(),
+        )
+        self.entities = [
+            number.DjiPowerLimitNumber(
+                self.coordinator, "discharge_limit", "Discharge limit", 0, 15
+            ),
+            number.DjiPowerLimitNumber(
+                self.coordinator, "recharge_limit", "Recharge limit", 70, 100
+            ),
+        ]
+
+    def test_cleared_limits_are_unavailable_until_fresh_values_arrive(self) -> None:
+        for entity in self.entities:
+            with self.subTest(key=entity._key):
+                original = entity.native_value
+                self.assertTrue(entity.available)
+                self.coordinator.data[entity._key] = None
+                self.assertFalse(entity.available)
+                self.assertIsNone(entity.native_value)
+                self.coordinator.data[entity._key] = original
+                self.assertTrue(entity.available)
+
+    def test_missing_or_disconnected_state_is_unavailable(self) -> None:
+        original = self.coordinator.data
+        self.coordinator.data = {}
+        for entity in self.entities:
+            self.assertFalse(entity.available)
+        self.coordinator.data = original
+        self.coordinator.last_update_success = False
+        for entity in self.entities:
+            self.assertFalse(entity.available)
+
+    async def test_sets_whole_percentages_without_optimistic_changes(self) -> None:
+        for entity, value in zip(self.entities, (12.0, 90.0), strict=True):
+            with self.subTest(key=entity._key):
+                original = entity.native_value
+                setter = self.coordinator.async_set_charge_limits
+                setter.reset_mock()
+                await entity.async_set_native_value(value)
+                setter.assert_awaited_once_with(**{entity._key: int(value)})
+                self.assertEqual(entity.native_value, original)
+
+    async def test_fractional_limits_raise_service_validation_error(self) -> None:
+        for entity in self.entities:
+            with (
+                self.subTest(key=entity._key),
+                self.assertRaisesRegex(
+                    _ServiceValidationError, "whole-number percentage"
+                ),
+            ):
+                await entity.async_set_native_value(entity.native_value + 0.5)
+        self.coordinator.async_set_charge_limits.assert_not_awaited()
 
 
 class _PowerNumberTests:
@@ -243,7 +309,7 @@ class _PowerNumberTests:
         self.assertEqual(self.entity.native_value, 93)
 
     async def test_rejects_fractional_watts(self) -> None:
-        with self.assertRaisesRegex(ValueError, "whole number of watts"):
+        with self.assertRaisesRegex(_ServiceValidationError, "whole number of watts"):
             await self.entity.async_set_native_value(422.5)
         self.setter.assert_not_awaited()
 

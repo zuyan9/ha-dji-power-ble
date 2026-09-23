@@ -108,6 +108,15 @@ class ScheduleOptionsTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "station_unavailable")
         self.coordinator.async_set_time_periods.assert_not_awaited()
 
+    async def test_missing_draft_cannot_open_period_form(self):
+        with patch.object(
+            self.flow, "_async_load_periods", AsyncMock(return_value=None)
+        ):
+            result = await self.flow.async_step_add_period()
+
+        self.assertEqual(result, {"type": "abort", "reason": "station_unavailable"})
+        self.coordinator.async_set_time_periods.assert_not_awaited()
+
     async def test_editor_loads_once_and_shows_station_schedule(self):
         result = await self.flow.async_step_time_periods()
 

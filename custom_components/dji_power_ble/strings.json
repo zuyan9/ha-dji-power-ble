@@ -64,6 +64,9 @@
     "error": {
       "invalid_pair_key": "Pair key must be exactly 32 hexadecimal characters.",
       "address_required": "A Bluetooth address is required.",
+      "invalid_address": "Enter a valid Bluetooth address, such as AA:BB:CC:DD:EE:FF.",
+      "email_required": "Enter your DJI account email.",
+      "password_required": "Enter your DJI account password.",
       "invalid_code": "That verification code was not accepted. Try again.",
       "invalid_token": "That token was not accepted, or it has no devices with a pair key. Check the token and try again.",
       "rate_limited": "Too many verification attempts. Wait a while and try again.",
@@ -72,7 +75,8 @@
     "abort": {
       "already_configured": "This station is already configured.",
       "cannot_connect": "Could not reach the DJI cloud to fetch the pair key.",
-      "no_devices": "No DJI devices with a local pair key were found on this account."
+      "no_devices": "No DJI devices with a local pair key were found on this account.",
+      "setup_incomplete": "Setup information is missing. Start setup again."
     }
   },
   "options": {

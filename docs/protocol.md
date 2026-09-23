@@ -127,9 +127,12 @@ payloads begin with a 16-byte header:
 
 Each following record is `key:u8`, marker `0x10`, `length:u16`, and `value[length]`.
 GET requests contain operation `0x00` followed by requested key IDs plus `0x1000`,
-each encoded as a little-endian uint16. The integration retains its existing
-`0x01` and `0x04` reads and explicitly requests `0x18` on Power 2000 with
-`00 18 10`. It decodes these fields:
+each encoded as a little-endian uint16. Initial setup requests base information,
+network state, charge limits, energy reserve, display, power switches, and timezone
+in one GET for keys `0x00`, `0x02`, `0x05`, `0x06`, `0x0C`, `0x0D`, and `0x15`.
+Expansion batteries use a separate `0x01` read; Power 2000 also requests `0x18`
+and `0x16`. Each key selects one property, not a group or a complete configuration
+snapshot. It decodes these fields:
 
 | Key | Meaning | Exposed values |
 | --- | --- | --- |
@@ -195,6 +198,9 @@ Command `0x61` starts with the same 16-byte header and then uses nested records 
 An interface record identifies its group, one-based port sequence, type, switch state,
 output watts, and input watts. The known types are power, AC, USB-A, USB-C, SDC, SDC
 Lite, 12 V, and XT60. The codec exposes both aggregate and per-port values.
+
+Extended battery records include temperature at `0x3020[9:11]`, encoded as signed
+16-bit hundredths of a degree Celsius. Shorter records omit temperature.
 
 ### Battery time and charging
 
@@ -338,7 +344,7 @@ does not prove physical charging or switching behavior.
 
 ## Known limits
 
-- HMS `0x66` contents are not decoded because non-empty records have not been validated.
+- HMS `0x66` reports remain raw diagnostics; active-alarm entities are not implemented.
 - SDC voltage fields are not exposed without accessory-specific validation.
 - Cell-level BMS values are not present on the known app-facing BLE command path.
 - Writes remain experimental on models without model-specific hardware tests.

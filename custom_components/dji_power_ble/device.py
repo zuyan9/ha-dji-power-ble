@@ -20,6 +20,7 @@ from .duml import (
     CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
     ECO_MODE_KEY,
+    ENERGY_STORAGE_KEY,
     EXPANSION_BATTERIES_KEY,
     GATT_LAYOUTS,
     GET_COMMAND,
@@ -73,6 +74,15 @@ READBACK_RETRIES = 8
 READBACK_RETRY_INTERVAL = 2.0
 EXPANSION_REFRESH_INTERVAL = 30.0
 EXPANSION_MODELS = {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
+_INITIAL_CONFIG_KEYS = (
+    0x00,  # Firmware versions.
+    0x02,  # Network state.
+    CHARGE_LIMIT_KEY,
+    ENERGY_STORAGE_KEY,
+    0x0C,  # Display settings.
+    POWER_SWITCH_KEY,
+    0x15,  # Timezone.
+)
 
 
 class DjiPowerError(Exception):
@@ -528,6 +538,12 @@ class DjiPowerDevice:
             raise DjiPowerError(
                 f"timeout waiting for 0x{command_id:02x} response"
             ) from error
+        except (BleakError, EOFError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            raise DjiPowerError(
+                f"Bluetooth transport failed during 0x{command_id:02x} request"
+            ) from error
         finally:
             self._pending.pop(sequence, None)
             if not future.done():
@@ -598,7 +614,7 @@ class DjiPowerDevice:
     async def refresh_config(self) -> None:
         """Fetch and publish a keyed configuration snapshot."""
         await self._read_expansion_batteries()
-        await self._read_config(0x04)
+        await self._read_config(*_INITIAL_CONFIG_KEYS)
         if supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             try:
                 await self._read_eco_mode()
@@ -714,8 +730,12 @@ class DjiPowerDevice:
         if "expansion_batteries" not in update:
             self._merge_data({"expansion_batteries": None})
 
-    async def _read_config(self, key: int) -> dict[str, object]:
-        response = await self._request(GET_COMMAND, bytes((0x00, key, 0x10)))
+    async def _read_config(self, key: int, *additional_keys: int) -> dict[str, object]:
+        """Read one or more explicitly requested configuration keys."""
+        payload = b"\x00" + b"".join(
+            bytes((item, 0x10)) for item in (key, *additional_keys)
+        )
+        response = await self._request(GET_COMMAND, payload)
         try:
             update = parse_telemetry(self._decode_payload(response))
         except ProtocolError as error:
@@ -734,7 +754,9 @@ class DjiPowerDevice:
             # The disconnect callback already marks the coordinator unavailable.
             # Publishing state here would mark its last update successful again.
             raise
-        except DjiPowerError:
+        except (DjiPowerError, BleakError, EOFError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
             self._merge_data(
                 {
                     "key_18": None,
@@ -749,8 +771,34 @@ class DjiPowerDevice:
                     "discharge_power_max_w": None,
                 }
             )
-            raise
+            raise DjiPowerError(str(error)) from error
         return current
+
+    async def _read_charge_limits(self) -> dict[str, object]:
+        """Invalidate unreadable limits, returning only a fresh complete record."""
+        invalidated = {
+            "key_05": None, "recharge_limit": None, "discharge_limit": None
+        }
+        try:
+            update = await self._read_config(CHARGE_LIMIT_KEY)
+        except DjiPowerDisconnectedError:
+            raise
+        except DjiPowerError as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            self._merge_data(invalidated)
+            raise
+        if (
+            isinstance(update.get("key_05"), str)
+            and isinstance(update.get("recharge_limit"), int)
+            and isinstance(update.get("discharge_limit"), int)
+        ):
+            return update
+        if not self.is_connected:
+            raise DjiPowerDisconnectedError("Bluetooth connection lost")
+        self._merge_data(invalidated)
+        # An omitted or malformed record may settle on a later confirmation read.
+        return {}
 
     async def _wait_for_eco_mode_values(self, expected: dict[str, object]) -> None:
         for attempt in range(READBACK_RETRIES + 1):
@@ -831,14 +879,12 @@ class DjiPowerDevice:
         except ProtocolError as error:
             raise DjiPowerError(str(error)) from error
 
-    async def _wait_for_values(
-        self, expected: dict[str, object], *, config_key: int
-    ) -> None:
-        """Confirm from a fresh targeted read, delaying only subsequent attempts."""
+    async def _wait_for_charge_limits(self, expected: dict[str, int]) -> None:
+        """Confirm fresh limits, delaying only subsequent attempts."""
         for attempt in range(READBACK_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(READBACK_RETRY_INTERVAL)
-            update = await self._read_config(config_key)
+            update = await self._read_charge_limits()
             if all(
                 key in update and update[key] == value
                 for key, value in expected.items()
@@ -986,7 +1032,7 @@ class DjiPowerDevice:
     ) -> None:
         """Set one or both energy-management limits."""
         async with self._operation_lock:
-            update = await self._read_config(CHARGE_LIMIT_KEY)
+            update = await self._read_charge_limits()
             current = update.get("key_05")
             old_discharge = update.get("discharge_limit")
             old_recharge = update.get("recharge_limit")
@@ -1009,12 +1055,11 @@ class DjiPowerDevice:
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
             await self._set(payload, (CHARGE_LIMIT_KEY,))
-            await self._wait_for_values(
+            await self._wait_for_charge_limits(
                 {
                     "discharge_limit": requested_discharge,
                     "recharge_limit": requested_recharge,
                 },
-                config_key=CHARGE_LIMIT_KEY,
             )
 
     async def set_charge_power(self, watts: int) -> None:

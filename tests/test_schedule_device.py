@@ -7,7 +7,13 @@ import struct
 import unittest
 from unittest.mock import AsyncMock, call, patch
 
-from tests.test_device import FakeBleDevice, StationClient, device_module, duml
+from tests.test_device import (
+    FakeBleDevice,
+    StationClient,
+    device_module,
+    duml,
+    requested_config_keys,
+)
 from tests.test_duml import SYNTHETIC_ECO_MODE
 
 PEAK = {"type": "peak", "start": "17:00", "end": "20:00"}
@@ -33,13 +39,13 @@ class TimePeriodsClient(StationClient):
         request = duml.DumlPacket.decode(value)
         self.requests.append((request.command_id, request.payload))
         if request.command_id == duml.GET_COMMAND:
-            key = request.payload[1]
             entries = []
-            if key in self.values and not (self.did_set and self.omit_after_set):
-                current = self.values[key]
-                if key == 0x16 and self.did_set and self.invalid_after_set:
-                    current = b"\x16\x00\x0a\x00\x01"
-                entries = [(key, current)]
+            for key in requested_config_keys(request.payload):
+                if key in self.values and not (self.did_set and self.omit_after_set):
+                    current = self.values[key]
+                    if key == 0x16 and self.did_set and self.invalid_after_set:
+                        current = b"\x16\x00\x0a\x00\x01"
+                    entries.append((key, current))
             reply = bytes(4) + duml.build_keyed_set_payload(entries, timestamp_ms=1)
         elif request.command_id == duml.SET_COMMAND:
             requested = duml.parse_keyed_values(request.payload)
@@ -284,10 +290,10 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
             device_module.DjiPowerDisconnectedError("disconnected"),
         ):
 
-            async def read(key, error=error):
-                if key == 0x16:
+            async def read(*keys, error=error):
+                if keys == (0x16,):
                     raise error
-                return await original(key)
+                return await original(*keys)
 
             with (
                 self.subTest(error=error),

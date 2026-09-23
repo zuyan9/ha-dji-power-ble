@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 from tests.test_number import (
     _DjiPowerError,
     _HomeAssistantError,
+    _ServiceValidationError,
     coordinator_module,
     select,
 )
@@ -83,7 +84,7 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
         for mode in ("Unknown", "manual", ""):
             with (
                 self.subTest(mode=mode),
-                self.assertRaisesRegex(ValueError, "Manual or Automatic"),
+                self.assertRaisesRegex(_ServiceValidationError, "Manual or Automatic"),
             ):
                 await self.entity.async_select_option(mode)
         self.coordinator.async_set_power_adjustment.assert_not_awaited()

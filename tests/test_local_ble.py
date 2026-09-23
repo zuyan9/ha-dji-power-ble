@@ -307,11 +307,19 @@ if __name__ == "__main__":
 
         async def test_ordinary_disconnect_releases_the_station(self):
             client = await self.connect(retained=True)
+            bus_closed_during_callback = []
+
+            def disconnected(current):
+                self.callbacks.append(current)
+                bus_closed_during_callback.append(self.bus.closed)
+
+            client._disconnected_callback = disconnected
             await client.disconnect()
             self.assertEqual(self.members(), ["Disconnect"])
             self.assertFalse(self.manager.is_connected(DEVICE_PATH))
             self.assertTrue(self.bus.closed)
             self.assertEqual(self.callbacks, [client])
+            self.assertEqual(bus_closed_during_callback, [False])
 
         async def test_local_drain_error_does_not_undo_committed_detachment(self):
             client = await self.connect(retained=True)
@@ -363,6 +371,49 @@ if __name__ == "__main__":
             self.assertFalse(client.is_connected)
             self.assertFalse(client.connected_before_attach)
             self.assertEqual(self.manager.watchers, {})
+
+        async def test_missing_disconnect_state_keeps_bus_and_notifies_owner(self):
+            device = await local.async_local_device(ADAPTER, STATION)
+            client = local.LocalBleakClient(
+                device, disconnected_callback=self.callbacks.append
+            )
+            client._backend = SimpleNamespace(_bus=self.bus)
+            client.connected_before_attach = True
+
+            client._on_backend_disconnect()
+
+            self.assertFalse(self.bus.closed)
+            self.assertIs(client._backend._bus, self.bus)
+            self.assertFalse(client.connected_before_attach)
+            self.assertEqual(self.callbacks, [client])
+
+        async def test_missing_bus_still_notifies_owner(self):
+            device = await local.async_local_device(ADAPTER, STATION)
+            client = local.LocalBleakClient(
+                device, disconnected_callback=self.callbacks.append
+            )
+            client._backend = SimpleNamespace(_disconnecting_event=None)
+            client.connected_before_attach = True
+
+            client._on_backend_disconnect()
+
+            self.assertFalse(client.connected_before_attach)
+            self.assertEqual(self.callbacks, [client])
+
+        async def test_failed_bus_cleanup_still_notifies_owner(self):
+            client = await self.connect(retained=True)
+            with (
+                patch.object(self.bus, "disconnect", side_effect=OSError),
+                self.assertLogs(local.__name__, level="DEBUG"),
+            ):
+                self.manager.set_connected(False)
+
+            self.assertFalse(client.is_connected)
+            self.assertFalse(client.connected_before_attach)
+            self.assertEqual(self.callbacks, [client])
+            self.assertEqual(self.manager.watchers, {})
+            self.assertIs(client._backend._bus, self.bus)
+            self.bus.disconnect()
 
         async def test_unknown_monitor_shape_refuses_detachment(self):
             client = await self.connect(retained=True)

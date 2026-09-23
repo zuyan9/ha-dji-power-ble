@@ -111,6 +111,20 @@ def _module(name: str, **attributes) -> types.ModuleType:
     return module
 
 
+def _format_mac(value: str) -> str:
+    """Match HA's format-only helper, including its lack of validation."""
+    candidate = value
+    if len(candidate) == 17 and candidate.count(":") == 5:
+        return candidate.lower()
+    if len(candidate) == 17 and candidate.count("-") == 5:
+        candidate = candidate.replace("-", "")
+    elif len(candidate) == 14 and candidate.count(".") == 2:
+        candidate = candidate.replace(".", "")
+    if len(candidate) == 12:
+        return ":".join(candidate.lower()[index:index + 2] for index in range(0, 12, 2))
+    return value
+
+
 def _load_flow() -> types.ModuleType:
     selector = _module(
         "homeassistant.helpers.selector",
@@ -174,7 +188,7 @@ def _load_flow() -> types.ModuleType:
             async_get_clientsession=lambda hass: None,
         ),
         "homeassistant.helpers.device_registry": _module(
-            "homeassistant.helpers.device_registry", format_mac=str.upper
+            "homeassistant.helpers.device_registry", format_mac=_format_mac
         ),
     }
     spec = importlib.util.spec_from_file_location(

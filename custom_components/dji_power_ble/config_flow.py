@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import logging
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -78,6 +79,15 @@ _LOGGER = logging.getLogger(__name__)
 CONF_DEVICE = "device"
 CONF_CAPTCHA = "captcha_code"
 CONF_TOKEN = "member_token"
+
+
+def _normalize_address(value: str | None) -> str | None:
+    """Normalize a Bluetooth MAC address and reject malformed input."""
+    address = format_mac(value.strip()) if value else ""
+    if re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", address):
+        return address
+    return None
+
 
 OPTIONS_SCHEMA = vol.Schema(
     {
@@ -149,15 +159,35 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _discovered_stations(self) -> dict[str, str]:
         """Currently-advertising, not-yet-configured DJI Power stations."""
-        configured = {e.data.get(CONF_ADDRESS) for e in self._async_current_entries()}
+        configured = {
+            _normalize_address(entry.data.get(CONF_ADDRESS))
+            for entry in self._async_current_entries()
+        }
         out: dict[str, str] = {}
         for info in async_discovered_service_info(self.hass, connectable=True):
-            if info.address in configured:
+            if _normalize_address(info.address) in configured:
                 continue
             name = info.name or ""
             if MANUFACTURER_ID in (info.manufacturer_data or {}):
                 out[info.address] = f"{name or 'DJI Power'} ({info.address})"
         return out
+
+    def _model_for_address(self, address: str) -> str:
+        """Use only model information belonging to the submitted station."""
+        normalized = _normalize_address(address)
+        if (
+            self._discovered_model
+            and normalized == _normalize_address(self._discovered_address)
+        ):
+            return self._discovered_model
+        for info in async_discovered_service_info(self.hass, connectable=True):
+            if _normalize_address(info.address) != normalized:
+                continue
+            manufacturer_data = info.manufacturer_data.get(MANUFACTURER_ID)
+            if manufacturer_data:
+                with contextlib.suppress(ProtocolError):
+                    return parse_manufacturer_data(manufacturer_data).model
+        return "DJI Power"
 
     def _address_schema_part(self) -> dict:
         """Address field: prefilled if discovered, a dropdown if any station is
@@ -179,9 +209,9 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            address = format_mac(user_input[CONF_ADDRESS].strip())
-            if not address:
-                errors["base"] = "address_required"
+            address = _normalize_address(user_input[CONF_ADDRESS])
+            if address is None:
+                errors[CONF_ADDRESS] = "invalid_address"
             try:
                 normalize_pair_key(user_input[CONF_PAIR_KEY])
             except ProtocolError:
@@ -199,7 +229,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_NAME: user_input.get(CONF_NAME)
                         or self._discovered_name
                         or "DJI Power",
-                        CONF_MODEL: self._discovered_model or "DJI Power",
+                        CONF_MODEL: self._model_for_address(address),
                     },
                 )
 
@@ -212,7 +242,11 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 ): str,
             }
         )
-        return self.async_show_form(step_id="manual", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="manual",
+            data_schema=self.add_suggested_values_to_schema(schema, user_input),
+            errors=errors,
+        )
 
     # ------------------------------------------------------------------ token
     async def async_step_token(
@@ -225,11 +259,11 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         errors: dict[str, str] = {}
         if user_input is not None:
-            self._address = format_mac(user_input[CONF_ADDRESS].strip())
+            self._address = _normalize_address(user_input[CONF_ADDRESS])
             self._name = user_input.get(CONF_NAME) or self._discovered_name
             token = user_input[CONF_TOKEN].strip()
             if not self._address:
-                errors["base"] = "address_required"
+                errors[CONF_ADDRESS] = "invalid_address"
             else:
                 self._client = DjiCloudClient(async_get_clientsession(self.hass))
                 try:
@@ -252,7 +286,11 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 ): str,
             }
         )
-        return self.async_show_form(step_id="token", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="token",
+            data_schema=self.add_suggested_values_to_schema(schema, user_input),
+            errors=errors,
+        )
 
     # ---------------------------------------------------------------- account
     async def async_step_account(
@@ -261,12 +299,16 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         """Collect the BLE address and DJI account credentials."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            self._address = format_mac(user_input[CONF_ADDRESS].strip())
+            self._address = _normalize_address(user_input[CONF_ADDRESS])
             self._email = user_input[CONF_EMAIL].strip()
             self._password = user_input[CONF_PASSWORD]
             self._name = user_input.get(CONF_NAME) or self._discovered_name
             if not self._address:
-                errors["base"] = "address_required"
+                errors[CONF_ADDRESS] = "invalid_address"
+            if not self._email:
+                errors[CONF_EMAIL] = "email_required"
+            if not self._password.strip():
+                errors[CONF_PASSWORD] = "password_required"
             if not errors:
                 return await self.async_step_captcha()
 
@@ -281,7 +323,9 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             }
         )
         return self.async_show_form(
-            step_id="account", data_schema=schema, errors=errors
+            step_id="account",
+            data_schema=self.add_suggested_values_to_schema(schema, user_input),
+            errors=errors,
         )
 
     async def async_step_captcha(
@@ -292,12 +336,22 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         DJI serves a plain image captcha (no Google, no domain lock), so it can be
         rendered directly in the config flow. A wrong code just reloads a new image.
         """
+        if (
+            _normalize_address(self._address) is None
+            or not self._email
+            or not self._password
+            or not self._password.strip()
+            or (
+                user_input is not None
+                and (not self._srandom or self._client is None)
+            )
+        ):
+            return self.async_abort(reason="setup_incomplete")
         errors: dict[str, str] = {}
         if self._client is None:
             self._client = DjiCloudClient(async_get_clientsession(self.hass))
 
         if user_input is not None:
-            assert self._email and self._password and self._srandom
             try:
                 self._captcha_ticket = await self._client.exchange_image_captcha(
                     self._srandom, user_input[CONF_CAPTCHA].strip()
@@ -340,9 +394,17 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Ask for the email/2-step verification code and resubmit login."""
+        if (
+            self._client is None
+            or not self._email
+            or not self._password
+            or not self._password.strip()
+            or not self._captcha_ticket
+            or _normalize_address(self._address) is None
+        ):
+            return self.async_abort(reason="setup_incomplete")
         errors: dict[str, str] = {}
         if user_input is not None:
-            assert self._client and self._email and self._password
             try:
                 self._token = await self._client.login(
                     self._email,
@@ -370,8 +432,11 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Fetch devices with the token and create the entry."""
+        if _normalize_address(self._address) is None:
+            return self.async_abort(reason="setup_incomplete")
         if self._devices is None:
-            assert self._client and self._token
+            if self._client is None or not self._token:
+                return self.async_abort(reason="setup_incomplete")
             try:
                 self._devices = await self._client.list_devices(self._token)
             except DjiCloudError as err:
@@ -402,7 +467,8 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def _create_from_device(self, device: DjiDevice) -> FlowResult:
-        assert self._address
+        if _normalize_address(self._address) is None:
+            return self.async_abort(reason="setup_incomplete")
         await self.async_set_unique_id(
             format_mac(self._address), raise_on_progress=False
         )
@@ -413,7 +479,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_ADDRESS: self._address,
                 CONF_PAIR_KEY: device.pair_key,
                 CONF_NAME: self._name or device.name or "DJI Power",
-                CONF_MODEL: self._discovered_model or "DJI Power",
+                CONF_MODEL: self._model_for_address(self._address),
                 CONF_SERIAL_NUMBER: device.sn,
             },
         )
@@ -599,7 +665,8 @@ class DjiPowerOptionsFlow(OptionsFlow):
     ) -> FlowResult:
         if result := await self._async_load_periods():
             return result
-        assert self._periods is not None
+        if self._periods is None:
+            return self.async_abort(reason="station_unavailable")
         schema = vol.Schema(
             {
                 vol.Required("type"): SelectSelector(

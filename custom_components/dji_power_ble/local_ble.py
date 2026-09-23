@@ -151,11 +151,20 @@ class LocalBleakClient:
         self.connected_before_attach = False
         # Bleak 3 keeps the bus after its disconnect signal cleanup. An explicit
         # disconnect still needs that bus until its method reply has arrived.
-        if backend._disconnecting_event is None and backend._bus is not None:
-            backend._bus.disconnect()
-            backend._bus = None
-        if self._disconnected_callback is not None:
-            self._disconnected_callback(self)
+        try:
+            # Missing private state cannot establish that closing the bus is safe.
+            if (
+                getattr(backend, "_disconnecting_event", True) is None
+                and (bus := getattr(backend, "_bus", None)) is not None
+                and callable(disconnect := getattr(bus, "disconnect", None))
+            ):
+                disconnect()
+                backend._bus = None
+        except Exception:
+            _LOGGER.debug("Local Bluetooth disconnected; D-Bus cleanup did not finish")
+        finally:
+            if self._disconnected_callback is not None:
+                self._disconnected_callback(self)
 
     @property
     def is_connected(self) -> bool:
