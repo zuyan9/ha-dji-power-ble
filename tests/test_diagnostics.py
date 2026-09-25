@@ -10,7 +10,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.test_duml import SYNTHETIC_ECO_MODE, duml
+from tests.test_duml import (
+    SYNTHETIC_ECO_MODE,
+    accessory_input,
+    accessory_report,
+    duml,
+    group,
+    interface,
+    record,
+)
 
 COMPONENT = Path(__file__).parents[1] / "custom_components" / "dji_power_ble"
 PACKAGE = "_dji_power_diagnostics_tests"
@@ -181,6 +189,45 @@ class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["state"]["discharge_power_w"], 93)
                 self.assertEqual(state, original_state)
                 self.assertEqual(state["key_18"], raw.hex())
+
+    async def test_redacts_parallel_and_accessory_records_but_keeps_inputs(
+        self,
+    ) -> None:
+        serial = b"TEST-ACCESSORY01"
+        accessory = accessory_report(4, accessory_input(1, 0, 43, 0, 4012))
+        interfaces = record(
+            0x3031, group(4, interface(1, 5, 0, 43, accessory=accessory))
+        )
+        state = duml.parse_report(
+            record(0x3030, bytes.fromhex("00002b00") + interfaces)
+        )
+        state |= {
+            "key_03": (b"\x01" + b"TEST-PARALLEL-01" + bytes(16)).hex(),
+            "key_04": record(
+                0x1011, serial + b"\x04" + b"00.00.03.20".ljust(16, b"\x00")
+            ).hex(),
+        }
+        original_state = copy.deepcopy(state)
+        entry = types.SimpleNamespace(entry_id="station", data={}, options={})
+        coordinator = types.SimpleNamespace(
+            data=state, device=types.SimpleNamespace(is_connected=True)
+        )
+        hass = types.SimpleNamespace(
+            data={"dji_power_ble": {entry.entry_id: coordinator}}
+        )
+
+        result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+
+        self.assertEqual(
+            result["state"], state | {"key_03": REDACTED, "key_04": REDACTED}
+        )
+        self.assertEqual(result["state"]["interfaces"][0]["accessory_type"], 4)
+        self.assertEqual(
+            result["state"]["interfaces"][0]["accessory_inputs"][0]["input_w"], 43
+        )
+        for private in (serial.hex(), b"TEST-PARALLEL-01".hex(), "TEST-ACCESSORY"):
+            self.assertNotIn(private, repr(result))
+        self.assertEqual(state, original_state)
 
     async def test_missing_state_remains_exportable_while_disconnected(self) -> None:
         entry = types.SimpleNamespace(entry_id="station", data={}, options={})

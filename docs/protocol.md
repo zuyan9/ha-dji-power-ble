@@ -152,7 +152,8 @@ snapshot. It decodes these fields:
 | `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
 
 Raw keyed values are retained internally as `key_XX` hexadecimal state. Downloaded
-diagnostics redact records containing known private identifiers, including `key_01`.
+diagnostics redact records containing known private identifiers, including expansion
+packs (`key_01`), parallel devices (`key_03`), and accessories (`key_04`).
 
 ### Expansion batteries
 
@@ -199,10 +200,19 @@ Command `0x61` starts with the same 16-byte header and then uses nested records 
 | `0x3032` | Power, AC, USB, SDC, 12 V, or XT60 group |
 | `0x3034` | Individual interface record |
 | `0x3035` → `0x3036` | Input voltage when present |
+| `0x3038` → `0x3039` → `0x303A` | Attached accessory type and per-input rows when present |
 
 An interface record identifies its group, one-based port sequence, type, switch state,
 output watts, and input watts. The known types are power, AC, USB-A, USB-C, SDC, SDC
 Lite, 12 V, and XT60. The codec exposes both aggregate and per-port values.
+
+An SDC interface can also carry an accessory record. Its 17-byte head holds the
+accessory serial number, which the codec discards, followed by the accessory type,
+using the same values as car-charger rows. Each 13-byte `0x303A` row describes one
+accessory input: form (`1` solar, `2` car, `3` grid), output and input watts as u16 LE,
+then output and input voltage as u32 LE. Rows keep the station's order. Diagnostics
+list them per interface as `accessory_type` and `accessory_inputs`, with voltages left
+unscaled; they do not create entities.
 
 Extended battery records include temperature at `0x3020[9:11]`, encoded as signed
 16-bit hundredths of a degree Celsius. Shorter records omit temperature.

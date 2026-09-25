@@ -114,4 +114,6 @@ pair-key authentication. Treat captures as sensitive even when payloads are encr
 Never publish pair keys, DJI account tokens, passwords, serial numbers, BLE addresses,
 or raw captures containing them. Downloaded diagnostics redact the name, address, pair key,
 and serial number; account passwords and member tokens are transient and are not stored.
-Expansion-pack serial numbers and the raw keyed record containing them are also redacted.
+Expansion-pack serial numbers and the raw keyed records that carry pack, parallel-device,
+or accessory serial numbers are also redacted. Accessory serial numbers in telemetry
+reports are discarded during decoding.

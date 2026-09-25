@@ -28,15 +28,36 @@ def interface(
     input_w: int,
     *,
     input_voltage_mv: int | None = None,
+    accessory: bytes | None = None,
 ) -> bytes:
     value = bytes((sequence, interface_type, 0))
     value += output_w.to_bytes(2, "little")
     value += input_w.to_bytes(2, "little")
     value += b"\x00"
+    if accessory is not None:
+        value += record(0x3038, accessory)
     if input_voltage_mv is not None:
         voltage = b"\x01" + input_voltage_mv.to_bytes(2, "little") + b"\x00" * 6
         value += record(0x3035, record(0x3036, voltage))
     return record(0x3034, value)
+
+
+def accessory_input(
+    form: int, output_w: int, input_w: int, output_v: int, input_v: int
+) -> bytes:
+    row = bytes((form,)) + output_w.to_bytes(2, "little")
+    row += input_w.to_bytes(2, "little") + output_v.to_bytes(4, "little")
+    row += input_v.to_bytes(4, "little")
+    return record(0x303A, row)
+
+
+def accessory_report(
+    accessory_type: int, *rows: bytes, serial: bytes = b"TEST-ACCESSORY01"
+) -> bytes:
+    """Build a synthetic 0x3038 value: serial and type head, then nested rows."""
+    return serial.ljust(16, b"\x00") + bytes((accessory_type,)) + record(
+        0x3039, b"".join(rows)
+    )
 
 
 def group(group_type: int, *interfaces: bytes) -> bytes:
@@ -866,6 +887,144 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(parsed["usb_a_2_output_w"], 3)
         self.assertEqual(parsed["sdc_input_w"], 11)
         self.assertEqual(parsed["interfaces"][-1]["input_voltage_v"], 51.234)
+
+    def test_accessory_helper_matches_station_framing(self) -> None:
+        accessory = accessory_report(
+            4,
+            accessory_input(1, 0, 39, 0, 3890),
+            accessory_input(1, 0, 43, 0, 4012),
+        )
+
+        # Raw 17-byte head, then a nested 0x3039 list of 13-byte 0x303A rows.
+        self.assertEqual(
+            record(0x3038, accessory).hex(),
+            "38303700"
+            + b"TEST-ACCESSORY01".hex()
+            + "04"
+            + "39302200"
+            + "3a300d00" + "01" + "0000" + "2700" + "00000000" + "320f0000"
+            + "3a300d00" + "01" + "0000" + "2b00" + "00000000" + "ac0f0000",
+        )
+
+    def test_sdc_accessory_inputs_decode_without_serial(self) -> None:
+        accessory = accessory_report(
+            4,
+            accessory_input(1, 0, 43, 0, 4012),
+            accessory_input(1, 0, 39, 1, 3890),
+        )
+        interfaces = record(
+            0x3031,
+            group(2, interface(1, 2, 19, 0))
+            + group(
+                4,
+                interface(1, 5, 0, 82, accessory=accessory, input_voltage_mv=51234),
+            ),
+        )
+
+        parsed = duml.parse_report(
+            record(0x3030, bytes.fromhex("13005200") + interfaces)
+        )
+
+        ac, sdc = parsed["interfaces"]
+        self.assertNotIn("accessory_type", ac)
+        self.assertEqual(sdc["accessory_type"], 4)
+        self.assertEqual(
+            sdc["accessory_inputs"],
+            [
+                {
+                    "form": 1,
+                    "form_name": "solar",
+                    "output_w": 0,
+                    "input_w": 43,
+                    "output_v_raw": 0,
+                    "input_v_raw": 4012,
+                },
+                {
+                    "form": 1,
+                    "form_name": "solar",
+                    "output_w": 0,
+                    "input_w": 39,
+                    "output_v_raw": 1,
+                    "input_v_raw": 3890,
+                },
+            ],
+        )
+        self.assertEqual(sdc["input_voltage_v"], 51.234)
+        self.assertEqual(parsed["sdc_1_input_w"], 82)
+        self.assertNotIn("TEST-ACCESSORY", repr(parsed))
+
+    def test_accessory_rows_keep_order_forms_and_full_width_values(self) -> None:
+        accessory = accessory_report(
+            3,
+            accessory_input(2, 700, 0, 1380, 0),
+            accessory_input(3, 0, 0xFFFF, 0, 0xFFFFFFFF),
+            accessory_input(9, 1, 2, 3, 4),
+            serial=b"S" * 16,
+        )
+
+        parsed = duml.parse_report(
+            record(
+                0x3030,
+                bytes(4)
+                + record(0x3031, group(4, interface(2, 5, 0, 0, accessory=accessory))),
+            )
+        )
+
+        (sdc,) = parsed["interfaces"]
+        self.assertEqual(sdc["accessory_type"], 3)
+        self.assertEqual(
+            [
+                (row["form"], row["form_name"], row["output_w"], row["input_w"])
+                for row in sdc["accessory_inputs"]
+            ],
+            [(2, "car", 700, 0), (3, "grid", 0, 65535), (9, "unknown", 1, 2)],
+        )
+        self.assertEqual(sdc["accessory_inputs"][0]["output_v_raw"], 1380)
+        self.assertEqual(sdc["accessory_inputs"][1]["input_v_raw"], 0xFFFFFFFF)
+        self.assertNotIn("SSSS", repr(parsed))
+
+    def test_empty_or_malformed_accessory_records_do_not_hide_port_data(self) -> None:
+        valid_row = accessory_input(1, 0, 43, 0, 4012)
+        cases = {
+            "empty container": b"",
+            "short head": b"TEST-ACCESSORY01",
+            "head without rows": accessory_report(4)[:17],
+            "empty row list": accessory_report(4),
+            "short row": accessory_report(4, record(0x303A, bytes(12)), valid_row),
+            "unknown child": accessory_report(4) + record(0x3040, b"\x01"),
+            "truncated rows": accessory_report(4, valid_row)[:-3],
+        }
+        expected_inputs = {
+            "empty container": None,
+            "short head": None,
+            "head without rows": [],
+            "empty row list": [],
+            "short row": [43],
+            "unknown child": [],
+            "truncated rows": [],
+        }
+        for name, accessory in cases.items():
+            with self.subTest(name):
+                interfaces = record(
+                    0x3031, group(4, interface(1, 5, 0, 43, accessory=accessory))
+                )
+
+                parsed = duml.parse_report(
+                    record(0x3030, bytes.fromhex("00002b00") + interfaces)
+                )
+
+                (sdc,) = parsed["interfaces"]
+                self.assertEqual(parsed["sdc_1_input_w"], 43)
+                self.assertEqual(sdc["input_w"], 43)
+                if expected_inputs[name] is None:
+                    self.assertNotIn("accessory_type", sdc)
+                    self.assertNotIn("accessory_inputs", sdc)
+                else:
+                    self.assertEqual(sdc["accessory_type"], 4)
+                    self.assertEqual(
+                        [row["input_w"] for row in sdc["accessory_inputs"]],
+                        expected_inputs[name],
+                    )
 
     def test_battery_time_type_drives_charging_independent_of_power(self) -> None:
         for time_type, expected in ((0, False), (1, True), (2, False), (255, None)):

@@ -328,6 +328,39 @@ def _parse_input_voltage(port: bytes) -> float | None:
     return None
 
 
+ACCESSORY_INPUT_FORMS = {1: "solar", 2: "car", 3: "grid"}
+
+
+def _parse_accessory_inputs(port: bytes) -> tuple[int, list[dict[str, object]]] | None:
+    """Decode an attached accessory's type and per-input rows.
+
+    The 17-byte 0x3038 head starts with the accessory serial number, which is
+    discarded. Voltages stay unscaled until hardware reports confirm their unit.
+    """
+    if len(port) < 8:
+        return None
+    for container in _records(parse_tlvs(port[8:]), 0x3038):
+        if len(container) < 17:
+            continue
+        inputs: list[dict[str, object]] = []
+        for rows in _records(parse_tlvs(container[17:]), 0x3039):
+            for row in _records(parse_tlvs(rows), 0x303A):
+                if len(row) < 13:
+                    continue
+                inputs.append(
+                    {
+                        "form": row[0],
+                        "form_name": ACCESSORY_INPUT_FORMS.get(row[0], "unknown"),
+                        "output_w": int.from_bytes(row[1:3], "little"),
+                        "input_w": int.from_bytes(row[3:5], "little"),
+                        "output_v_raw": int.from_bytes(row[5:9], "little"),
+                        "input_v_raw": int.from_bytes(row[9:13], "little"),
+                    }
+                )
+        return container[16], inputs
+    return None
+
+
 def parse_report(payload: bytes) -> dict[str, object]:
     """Decode a firmware-proven ``0x5a/0x61`` battery and power push."""
     data: dict[str, object] = {}
@@ -393,6 +426,8 @@ def parse_report(payload: bytes) -> dict[str, object]:
                     }
                     if (input_voltage := _parse_input_voltage(port)) is not None:
                         item["input_voltage_v"] = input_voltage
+                    if (accessory := _parse_accessory_inputs(port)) is not None:
+                        item["accessory_type"], item["accessory_inputs"] = accessory
                     interfaces.append(item)
                     group_output[group_type] = (
                         group_output.get(group_type, 0) + output_w

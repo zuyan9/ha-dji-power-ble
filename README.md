@@ -90,7 +90,7 @@ acknowledgements.
 
 - `0x66` HMS alarm reports remain diagnostics-only; no active-alarm entity is
   implemented.
-- SDC output-voltage data is a subtype-dependent union and is not exposed until captures
-  with real accessories establish safe entity mappings.
+- SDC accessory per-input readings and output-voltage data appear only in diagnostics
+  until reports from real accessories confirm units and establish safe entity mappings.
 - Cell-level BMS values are not present on the known app-facing BLE command path.
 - DJI can change the optional account-login endpoints at any time.
