@@ -165,6 +165,31 @@ def async_discover_accessories(
     discover()
 
 
+def async_discover_backup_reserve(
+    coordinator,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+    factory: Callable[[], list[DjiPowerEntity]],
+) -> None:
+    """Add reserve controls once the station offers them for a solar accessory."""
+    if not supports_feature(coordinator.device.model, ModelFeature.RESERVE_CONTROL):
+        return
+    added = False
+
+    @callback
+    def discover() -> None:
+        nonlocal added
+        if added or not coordinator.last_update_success:
+            return
+        if (coordinator.data or {}).get("energy_reserve_available") is not True:
+            return
+        added = True
+        async_add_entities(factory())
+
+    entry.async_on_unload(coordinator.async_add_listener(discover))
+    discover()
+
+
 class DjiPowerAccessoryEntity(DjiPowerEntity):
     """A station entity tied to a reported interface and accessory identity."""
 

@@ -174,7 +174,8 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         await self._setup()
         self.assertEqual(len(self.entities), 6)  # Existing AC, TOU, limits and watts.
         self.assertEqual(self._accessories(), [])
-        self.assertEqual(len(self.coordinator.listeners), 3)
+        # Accessory discovery on three platforms, reserve discovery on two.
+        self.assertEqual(len(self.coordinator.listeners), 5)
         self.coordinator.publish(
             {
                 "car_chargers": [None, {}, _car(type=99), _car(seq=True), _car(sw=0)],
@@ -509,20 +510,24 @@ class UsbSwitchTests(unittest.IsolatedAsyncioTestCase):
 class BackupReserveEntityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.coordinator = _Coordinator("DJI Power 1000")
+        self.coordinator.data = {"energy_reserve_available": True}
         self.entry = types.SimpleNamespace(
             entry_id="station", async_on_unload=lambda unload: None
         )
         self.hass = types.SimpleNamespace(
             data={"dji_power_ble": {"station": self.coordinator}}
         )
+        self.added: list = []
 
     async def _entities(self) -> list:
-        entities = []
         for platform in (switch, number):
-            await platform.async_setup_entry(self.hass, self.entry, entities.extend)
+            await platform.async_setup_entry(self.hass, self.entry, self.added.extend)
+        return self._reserve_entities()
+
+    def _reserve_entities(self) -> list:
         return [
             entity
-            for entity in entities
+            for entity in self.added
             if isinstance(
                 entity,
                 (
@@ -539,8 +544,13 @@ class BackupReserveEntityTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(model=model):
                 self.coordinator.device.model = model
+                self.coordinator.listeners.clear()
+                self.added.clear()
                 entities = await self._entities()
-                self.assertEqual(len(entities), 2 if model == "DJI Power 1000" else 0)
+                self.assertEqual(
+                    len(entities),
+                    2 if model not in ("DJI Power 1000 Mini", "DJI Power") else 0,
+                )
                 if entities:
                     self.assertEqual(
                         {entity._attr_unique_id for entity in entities},
@@ -553,7 +563,32 @@ class BackupReserveEntityTests(unittest.IsolatedAsyncioTestCase):
                         {entity._attr_name for entity in entities},
                         {"Custom backup reserve level", "Backup reserve level"},
                     )
-                    self.assertTrue(all(not entity.available for entity in entities))
+                    self.assertFalse(any(entity.available for entity in entities))
+
+    async def test_created_once_when_the_station_first_offers_the_setting(
+        self,
+    ) -> None:
+        self.coordinator.data = {"energy_reserve_available": False}
+        self.assertEqual(await self._entities(), [])
+        for data in ({}, {"energy_reserve_available": None}):
+            self.coordinator.publish(data)
+            self.assertEqual(self._reserve_entities(), [])
+        self.coordinator.last_update_success = False
+        self.coordinator.publish({"energy_reserve_available": True})
+        self.assertEqual(self._reserve_entities(), [])
+        self.coordinator.last_update_success = True
+        self.coordinator.publish({"energy_reserve_available": True})
+        entities = self._reserve_entities()
+        self.assertEqual(
+            {type(entity) for entity in entities},
+            {switch.DjiPowerBackupReserveSwitch, number.DjiPowerBackupReserveNumber},
+        )
+        self.assertEqual(len(entities), 2)
+        # Later offers add nothing; a withdrawn offer keeps the entities unavailable.
+        self.coordinator.publish({"energy_reserve_available": True})
+        self.coordinator.publish({"energy_reserve_available": False})
+        self.assertEqual(self._reserve_entities(), entities)
+        self.assertFalse(any(entity.available for entity in entities))
 
     async def test_availability_follows_offer_switch_and_level(self) -> None:
         reserve_switch, level = await self._entities()

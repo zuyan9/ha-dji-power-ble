@@ -163,17 +163,15 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(controls), int(model == "DJI Power 2000"))
                     if controls:
                         self.assertFalse(controls[0].available)
-                reserve = [
-                    entity
-                    for entity in entities
-                    if isinstance(entity, number.DjiPowerBackupReserveNumber)
-                ]
-                self.assertEqual(len(reserve), int(model == "DJI Power 1000"))
-                if reserve:
-                    self.assertFalse(reserve[0].available)
+                # The reserve level waits until the station offers the setting.
+                self.assertFalse(
+                    any(
+                        isinstance(entity, number.DjiPowerBackupReserveNumber)
+                        for entity in entities
+                    )
+                )
                 self.assertEqual(
-                    len(entities),
-                    {"DJI Power 2000": 4, "DJI Power 1000": 3}.get(model, 2),
+                    len(entities), {"DJI Power 2000": 4}.get(model, 2)
                 )
 
 

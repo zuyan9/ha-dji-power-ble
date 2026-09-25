@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import struct
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from tests.test_accessory_device import AccessoryClient
 from tests.test_device import FakeBleDevice, device_module, duml
 
+RESERVE_MODELS = ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000")
 RESERVE_OFF = bytes.fromhex("01025000")
 # Recharge limit 90 %, discharge limit 5 %: DJI Home's reserve range is 10-90 %.
 CHARGE_LIMITS = struct.pack("<6I", 100, 70, 90, 15, 0, 5)
@@ -38,17 +40,20 @@ class BackupReserveDeviceTests(unittest.IsolatedAsyncioTestCase):
         return [command for command, _ in self.client.requests]
 
     async def test_write_uses_fresh_get_set_ack_and_readback(self):
-        for kwargs, written, expected in (
-            ({"enabled": True}, "01015000", {"energy_reserve_enabled": True}),
-            ({"percent": 35}, "01022300", {"energy_reserve": 35}),
+        for model, (kwargs, written, expected) in itertools.product(
+            RESERVE_MODELS,
             (
-                {"enabled": True, "percent": 90},
-                "01015a00",
-                {"energy_reserve_enabled": True, "energy_reserve": 90},
+                ({"enabled": True}, "01015000", {"energy_reserve_enabled": True}),
+                ({"percent": 35}, "01022300", {"energy_reserve": 35}),
+                (
+                    {"enabled": True, "percent": 90},
+                    "01015a00",
+                    {"energy_reserve_enabled": True, "energy_reserve": 90},
+                ),
             ),
         ):
-            with self.subTest(kwargs=kwargs):
-                self.reset_device()
+            with self.subTest(model=model, kwargs=kwargs):
+                self.reset_device(model)
                 with patch.object(device_module.asyncio, "sleep", AsyncMock()) as sleep:
                     await self.device.set_energy_reserve(**kwargs)
 
@@ -68,15 +73,16 @@ class BackupReserveDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(entries[duml.ENERGY_STORAGE_KEY].hex(), written)
                 for key, value in expected.items():
                     self.assertEqual(self.device.data[key], value)
+                encryption = 6 if model == "DJI Power 1000" else 0
                 self.assertTrue(
                     all(
-                        packet.encryption_type == 6
+                        packet.encryption_type == encryption
                         for packet in self.client.wire_requests
                     )
                 )
 
     async def test_unvalidated_models_are_rejected_without_requests(self):
-        for model in ("DJI Power 1000 V2", "DJI Power 2000", "DJI Power 1000 Mini"):
+        for model in ("DJI Power 1000 Mini", "DJI Power"):
             with self.subTest(model=model):
                 self.reset_device(model)
                 with self.assertRaises(device_module.DjiPowerError):
@@ -145,30 +151,27 @@ class BackupReserveDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.device.data["energy_reserve"], 80)
 
-    async def test_refresh_reads_accessory_list_and_reserve_on_power_1000(self):
-        self.client.values[duml.ACCESSORIES_KEY] = ACCESSORIES
-        await self.device._refresh_accessory_config()
-        self.assertEqual(
-            [payload for _, payload in self.client.requests],
-            [b"\x00\x0a\x10", b"\x00\x0d\x10", b"\x00\x04\x10", b"\x00\x06\x10"],
-        )
-        self.assertEqual(
-            self.device.data["accessories"], [{"type": 4, "firmware": "00.00.03.20"}]
-        )
-        self.assertIs(self.device.data["energy_reserve_available"], True)
-        self.assertIs(self.device.data["energy_reserve_enabled"], False)
-
-    async def test_other_sdc_models_refresh_accessories_but_not_reserve(self):
-        for model in ("DJI Power 1000 V2", "DJI Power 2000"):
+    async def test_refresh_reads_accessory_list_and_reserve_on_sdc_models(self):
+        for model in RESERVE_MODELS:
             with self.subTest(model=model):
                 self.reset_device(model)
                 self.client.values[duml.ACCESSORIES_KEY] = ACCESSORIES
                 await self.device._refresh_accessory_config()
                 self.assertEqual(
                     [payload for _, payload in self.client.requests],
-                    [b"\x00\x0a\x10", b"\x00\x0d\x10", b"\x00\x04\x10"],
+                    [
+                        b"\x00\x0a\x10",
+                        b"\x00\x0d\x10",
+                        b"\x00\x04\x10",
+                        b"\x00\x06\x10",
+                    ],
                 )
-                self.assertNotIn("energy_reserve_enabled", self.device.data)
+                self.assertEqual(
+                    self.device.data["accessories"],
+                    [{"type": 4, "firmware": "00.00.03.20"}],
+                )
+                self.assertIs(self.device.data["energy_reserve_available"], True)
+                self.assertIs(self.device.data["energy_reserve_enabled"], False)
 
     async def test_failed_optional_reads_are_isolated(self):
         self.client.values[duml.ACCESSORIES_KEY] = ACCESSORIES

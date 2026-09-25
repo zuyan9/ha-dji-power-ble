@@ -16,10 +16,11 @@ from .accessory import (
     DjiPowerAccessoryEntity,
     DjiPowerCarChargerEntity,
     async_discover_accessories,
+    async_discover_backup_reserve,
 )
 from .const import DOMAIN
 from .entity import DjiPowerEntity
-from .features import ModelFeature, supports_feature
+from .features import ModelFeature
 
 
 async def async_setup_entry(
@@ -27,8 +28,12 @@ async def async_setup_entry(
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([DjiPowerAcSwitch(coordinator)])
-    if supports_feature(coordinator.device.model, ModelFeature.RESERVE_CONTROL):
-        async_add_entities([DjiPowerBackupReserveSwitch(coordinator)])
+    async_discover_backup_reserve(
+        coordinator,
+        entry,
+        async_add_entities,
+        lambda: [DjiPowerBackupReserveSwitch(coordinator)],
+    )
     async_discover_accessories(
         coordinator,
         entry,

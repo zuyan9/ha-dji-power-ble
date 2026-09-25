@@ -20,7 +20,9 @@ _FEATURE_MODELS = {
         {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
     ),
     ModelFeature.USB_CONTROLS: frozenset({"DJI Power 1000 Mini"}),
-    ModelFeature.RESERVE_CONTROL: frozenset({"DJI Power 1000"}),
+    ModelFeature.RESERVE_CONTROL: frozenset(
+        {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
+    ),
 }
 
 

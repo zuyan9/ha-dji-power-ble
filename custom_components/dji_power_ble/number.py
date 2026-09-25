@@ -19,6 +19,7 @@ from .accessory import (
     AccessoryIdentity,
     DjiPowerCarChargerEntity,
     async_discover_accessories,
+    async_discover_backup_reserve,
 )
 from .const import DOMAIN
 from .duml import energy_reserve_bounds
@@ -41,9 +42,13 @@ async def async_setup_entry(
                 DjiPowerChargePowerNumber(coordinator),
             )
         )
-    if supports_feature(coordinator.device.model, ModelFeature.RESERVE_CONTROL):
-        entities.append(DjiPowerBackupReserveNumber(coordinator))
     async_add_entities(entities)
+    async_discover_backup_reserve(
+        coordinator,
+        entry,
+        async_add_entities,
+        lambda: [DjiPowerBackupReserveNumber(coordinator)],
+    )
     async_discover_accessories(
         coordinator,
         entry,

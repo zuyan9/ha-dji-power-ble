@@ -69,10 +69,11 @@ registry entries and history with unavailable sensors, including after a reload.
 
 On these same models, optional SDC switch, car-charger, and accessory-list
 configuration is first read in the background after setup, then refreshed with the
-packs every 30 seconds. Power 1000 also refreshes its backup reserve setting on this
-schedule. Power 1000 Mini reads its switch list on the same schedule for USB output
-switches, without pack reads. The entity platforms discover controls from supported reported rows,
-identified by interface, port sequence, and charger type. Missing or invalid snapshots invalidate
+packs every 30 seconds, together with the backup reserve setting. Power 1000 Mini
+reads its switch list on the same schedule for USB output switches, without pack
+reads. The entity platforms discover controls from supported reported rows,
+identified by interface, port sequence, and charger type, and add the backup reserve
+controls once the station offers that setting. Missing or invalid snapshots invalidate
 the affected controls without removing their entities. These controls remain on the
 station's device and use its existing connection.
 
@@ -84,8 +85,8 @@ values. Every SET must return a zero status for every requested key. The client 
 polls configuration until the requested state is observed, preventing a successful GATT
 write from being mistaken for an applied setting.
 
-Backup reserve writes on Power 1000 use keys `0x06` and `0x0E` and change only the
-requested switch or level after a fresh `0x06` read.
+Backup reserve writes use keys `0x06` and `0x0E` and change only the requested switch
+or level after a fresh `0x06` read.
 
 AC, SDC, and USB switches read and preserve the complete switch list before editing
 their own row. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of

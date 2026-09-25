@@ -248,12 +248,12 @@ AC output writes use keys `0x0D` and `0x0E`. Charge-limit writes use key `0x05`,
 six-value structure in which the integration changes only the recharge and discharge
 fields and preserves the other values from a fresh `0x05` read before writing.
 
-Backup reserve writes use keys `0x06` and `0x0E` on Power 1000. Key `0x06` holds
-availability (`1` offered), the switch (`1` on, `2` off), and the level as a u16 LE
-percentage. The integration writes only when the setting is offered, changes only
-the requested switch or level, and preserves any additional bytes. The station stores
-the level without checking it. Like DJI Home, the integration limits it to the
-discharge limit plus 5 % through the recharge limit, from a fresh `0x05` read.
+Backup reserve writes use keys `0x06` and `0x0E`. Key `0x06` holds availability
+(`1` offered), the switch (`1` on, `2` off), and the level as a u16 LE percentage.
+The integration writes only when the setting is offered, changes only the requested
+switch or level, and preserves any additional bytes. The station stores the level
+without checking it. Like DJI Home, the integration limits it to the discharge limit
+plus 5 % through the recharge limit, from a fresh `0x05` read.
 
 Power 2000 manual **Recharge power** and **Discharge power** writes use key `0x18`
 (`eco_mode`). The app-derived layout stores each setting as little-endian uint32
