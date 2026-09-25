@@ -17,17 +17,20 @@ used only during setup to retrieve the device's local credential.
 
 ## Features
 
-- AC output control; discharge and recharge limit controls
-- Battery level, remaining time, charging time, temperature, and charging status
-- Input, output, AC, USB, SDC, etc. power readings
-- Expansion battery devices with battery level and pack diagnostics
-- [SDC and car-charger controls](docs/accessory-controls.md) reported by the station
-- [SDC accessory type, firmware, and per-input solar and car readings](docs/accessory-controls.md#accessory-information-and-input-readings)
-- [Custom backup reserve level](docs/backup-reserve.md) control while a solar
-  accessory is attached
-- Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
-- Power 1000 Mini: individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs)
-- Firmware, timezone, display, reserve, and cloud-status diagnostics
+- Monitor:
+  - Battery level, remaining time, charging time, temperature, and charging status
+  - Input, output, AC, USB, SDC, etc. power readings
+  - Expansion battery devices with battery level and pack diagnostics
+  - Firmware, timezone, display, reserve, and cloud-status diagnostics
+- Control:
+  - AC output
+  - Discharge and recharge limit
+  - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
+  - SDC accessory [info and controls](docs/accessory-controls.md)
+- Model Specific:
+  - Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
+  - Power 1000 Mini: individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs)
+
 
 ## Requirements
 

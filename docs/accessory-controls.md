@@ -1,9 +1,8 @@
 # SDC accessories, car-charger, and USB output controls
 
-These entities use the station's existing Bluetooth connection. SDC accessory readings
-and SDC and car-charger controls are enabled on Power 1000, Power 1000 V2, and Power
-2000; USB output switches are enabled on Power 1000 Mini. They appear when the station
-reports a supported accessory or switch record.
+These use the existing Bluetooth connection. SDC accessory readings and SDC and car-charger 
+controls are enabled on Power 1000, Power 1000 V2, and Power 2000; USB output switches are
+enabled on Power 1000 Mini.
 
 ## Accessory information and input readings
 
@@ -18,16 +17,18 @@ named by its port:
 | Car recharge power, car charge power, car voltage | Car to station, station to car, and vehicle voltage |
 | Grid power, grid voltage | Grid-connection output |
 
-Recognized accessories are the Car Power Outlet to SDC Power Cable (12V/24V), the Solar
-Panel Adapter Module (MPPT), the 1kW Car Charger, the 1.8kW Solar/Car Charger, and the
-SDC to PoE Power Cable.
+Recognized accessories:
+- Car Power Outlet to SDC Power Cable (12V/24V)
+- Solar Panel Adapter Module (MPPT)
+- 1kW Car Charger
+- 1.8kW Solar/Car Charger
+- SDC to PoE Power Cable
 
-The station does not identify an input's physical connector. Inputs are numbered
-within their kind in the station's order: the 1.8 kW charger lists its dedicated solar
-input before its shared Car/Solar input. Input sensors are added when the station
-first reports that input. While the accessory stays attached, an input that carries no
-power reads 0 W and its voltage is unknown. All accessory sensors become unavailable
-when the accessory is removed.
+Inputs are numbered within their kind in the station's order: the 1.8 kW charger lists
+its dedicated solar input before its shared Car/Solar input. Input sensors are added 
+when the station first reports that input. While the accessory stays attached, an input
+that carries no power reads 0 W and its voltage is unknown. All accessory sensors 
+become unavailable when the accessory is removed.
 
 ## Car chargers
 
