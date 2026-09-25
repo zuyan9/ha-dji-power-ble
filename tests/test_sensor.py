@@ -68,6 +68,8 @@ def _load_sensor() -> types.ModuleType:
                 TEMPERATURE="temperature",
                 DURATION="duration",
                 ENERGY_STORAGE="energy_storage",
+                ENUM="enum",
+                VOLTAGE="voltage",
             ),
             SensorStateClass=types.SimpleNamespace(MEASUREMENT="measurement"),
         ),
@@ -79,6 +81,7 @@ def _load_sensor() -> types.ModuleType:
             CONF_ADDRESS="address",
             PERCENTAGE="%",
             EntityCategory=types.SimpleNamespace(DIAGNOSTIC="diagnostic"),
+            UnitOfElectricPotential=types.SimpleNamespace(VOLT="V"),
             UnitOfEnergy=types.SimpleNamespace(WATT_HOUR="Wh"),
             UnitOfPower=types.SimpleNamespace(WATT="W"),
             UnitOfTemperature=types.SimpleNamespace(CELSIUS="°C"),
@@ -551,7 +554,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=20, firmware="01.00.00.00")
         await self.setup([pack])
         unique_ids = {entity._attr_unique_id for entity in self.packs()}
-        self.assertEqual(len(self.listeners), 1)
+        # Expansion packs and SDC accessories each keep one discovery listener.
+        self.assertEqual(len(self.listeners), 2)
         for callback in self.unload_callbacks:
             callback()
         self.assertEqual(self.listeners, [])
@@ -644,3 +648,226 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.data = {}
         self.assertFalse(entity.available)
         self.assertNotIn("timezone_offset_min", entity.extra_state_attributes)
+
+
+def _solar(input_w: int, volts: float) -> dict:
+    return {
+        "form": 1, "form_name": "solar", "output_w": 0, "input_w": input_w,
+        "output_voltage_v": 0.0, "input_voltage_v": volts,
+    }
+
+
+def _sdc(*rows: dict, seq: int = 1, interface_type: int = 5, **values) -> dict:
+    return {
+        "group_type": 4, "group_name": "sdc", "seq": seq, "type": interface_type,
+        "type_name": "sdc", "switch_state": 0, "enabled": None, "output_w": 0,
+        "input_w": sum(row["input_w"] for row in rows), "accessory_type": 4,
+        "accessory_inputs": list(rows), **values,
+    }
+
+
+class SdcAccessorySensorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.listeners = []
+        self.unload_callbacks = []
+        self.entry = types.SimpleNamespace(
+            entry_id="station",
+            title="Power station",
+            data={"address": ADDRESS},
+            async_on_unload=self.unload_callbacks.append,
+        )
+        self.coordinator = types.SimpleNamespace(
+            entry=self.entry,
+            device=types.SimpleNamespace(
+                address=ADDRESS, model="DJI Power 1000", serial_number=None
+            ),
+            data={},
+            last_update_success=True,
+            async_add_listener=self.add_listener,
+        )
+        self.hass = types.SimpleNamespace(
+            data={DOMAIN: {self.entry.entry_id: self.coordinator}},
+            entity_registry=_EntityRegistry(),
+            device_registry=_DeviceRegistry(),
+        )
+        self.entities = []
+
+    def add_listener(self, listener):
+        self.listeners.append(listener)
+        return lambda: self.listeners.remove(listener)
+
+    def publish(self, **data) -> None:
+        self.coordinator.data = data
+        for listener in self.listeners.copy():
+            listener()
+
+    def sdc_entities(self) -> dict:
+        return {
+            entity._attr_unique_id.removeprefix(f"{ADDRESS}_"): entity
+            for entity in self.entities
+            if isinstance(entity, sensor._DjiPowerSdcSensor)
+        }
+
+    async def setup(self, **data) -> None:
+        self.coordinator.data = data
+        await sensor.async_setup_entry(self.hass, self.entry, self.entities.extend)
+
+    async def test_charger_identity_firmware_and_both_solar_inputs(self) -> None:
+        await self.setup(
+            interfaces=[_sdc(_solar(39, 38.9), _solar(43, 40.12))],
+            accessories=[{"type": 4, "firmware": "00.00.03.20"}],
+        )
+
+        entities = self.sdc_entities()
+        self.assertEqual(
+            {key: entity._attr_name for key, entity in entities.items()},
+            {
+                "5_1_accessory": "SDC 1 accessory",
+                "5_1_accessory_firmware": "SDC 1 accessory firmware",
+                "5_1_solar_1_power": "SDC 1 solar 1 power",
+                "5_1_solar_1_voltage": "SDC 1 solar 1 voltage",
+                "5_1_solar_2_power": "SDC 1 solar 2 power",
+                "5_1_solar_2_voltage": "SDC 1 solar 2 voltage",
+            },
+        )
+        self.assertEqual(
+            {key: entity.native_value for key, entity in entities.items()},
+            {
+                "5_1_accessory": "solar_car_charger_1_8kw",
+                "5_1_accessory_firmware": "00.00.03.20",
+                "5_1_solar_1_power": 39,
+                "5_1_solar_1_voltage": 38.9,
+                "5_1_solar_2_power": 43,
+                "5_1_solar_2_voltage": 40.12,
+            },
+        )
+        self.assertTrue(all(entity.available for entity in entities.values()))
+        accessory = entities["5_1_accessory"]
+        self.assertEqual(accessory._attr_device_class, "enum")
+        self.assertEqual(accessory._attr_entity_category, "diagnostic")
+        self.assertEqual(
+            accessory._attr_options, list(sensor.SDC_ACCESSORY_NAMES.values())
+        )
+        power, voltage = entities["5_1_solar_1_power"], entities["5_1_solar_1_voltage"]
+        self.assertEqual(
+            (power._attr_device_class, power._attr_native_unit_of_measurement),
+            ("power", "W"),
+        )
+        self.assertEqual(
+            (voltage._attr_device_class, voltage._attr_native_unit_of_measurement),
+            ("voltage", "V"),
+        )
+        self.assertEqual(power._attr_state_class, "measurement")
+        self.assertEqual(power.device_info["identifiers"], {(DOMAIN, ADDRESS)})
+
+    async def test_idle_input_reads_zero_and_missing_accessory_is_unavailable(self):
+        await self.setup(interfaces=[_sdc(_solar(39, 38.9), _solar(43, 40.12))])
+        entities = self.sdc_entities()
+        self.publish(interfaces=[_sdc(_solar(12, 37.5))])
+        self.assertEqual(entities["5_1_solar_1_power"].native_value, 12)
+        self.assertEqual(entities["5_1_solar_2_power"].native_value, 0)
+        self.assertIsNone(entities["5_1_solar_2_voltage"].native_value)
+        self.assertTrue(entities["5_1_solar_2_power"].available)
+        self.publish(interfaces=[_sdc()])
+        self.assertEqual(entities["5_1_solar_1_power"].native_value, 0)
+        self.assertTrue(entities["5_1_accessory"].available)
+        for interfaces in (
+            [],
+            [_sdc(accessory_type=0)],
+            [{key: value for key, value in _sdc().items() if key != "accessory_type"}],
+            [_sdc(), _sdc()],
+        ):
+            with self.subTest(interfaces=interfaces):
+                self.publish(interfaces=interfaces)
+                self.assertTrue(
+                    all(not entity.available for entity in entities.values())
+                )
+        self.publish(interfaces=[_sdc(_solar(5, 30.0))])
+        self.assertEqual(self.sdc_entities(), entities)
+        self.coordinator.last_update_success = False
+        self.assertTrue(all(not entity.available for entity in entities.values()))
+
+    async def test_car_and_grid_inputs_are_added_when_reported(self) -> None:
+        car = {
+            "form": 2, "form_name": "car", "output_w": 0, "input_w": 600,
+            "output_voltage_v": 13.8, "input_voltage_v": 13.8,
+        }
+        grid = {
+            "form": 3, "form_name": "grid", "output_w": 300, "input_w": 0,
+            "output_voltage_v": 230.0, "input_voltage_v": 0.0,
+        }
+        await self.setup(interfaces=[_sdc(_solar(39, 38.9))])
+        self.publish(interfaces=[_sdc(car, grid, _solar(39, 38.9))])
+        values = {
+            key: entity.native_value for key, entity in self.sdc_entities().items()
+        }
+        self.assertEqual(values["5_1_car_1_recharge_power"], 600)
+        self.assertEqual(values["5_1_car_1_charge_power"], 0)
+        self.assertEqual(values["5_1_car_1_voltage"], 13.8)
+        self.assertEqual(values["5_1_grid_1_power"], 300)
+        self.assertEqual(values["5_1_grid_1_voltage"], 230.0)
+        self.assertEqual(values["5_1_solar_1_power"], 39)
+        self.assertEqual(
+            self.sdc_entities()["5_1_car_1_recharge_power"]._attr_name,
+            "SDC 1 car recharge power",
+        )
+        cable = car | {"output_voltage_v": 0.0, "input_voltage_v": 12.4}
+        self.publish(interfaces=[_sdc(cable, accessory_type=1)])
+        self.assertEqual(self.sdc_entities()["5_1_car_1_voltage"].native_value, 12.4)
+        self.assertEqual(
+            self.sdc_entities()["5_1_accessory"].native_value, "car_power_outlet_cable"
+        )
+
+    async def test_firmware_matches_ports_by_type_and_order_only_when_unambiguous(
+        self,
+    ) -> None:
+        await self.setup(
+            interfaces=[
+                _sdc(), _sdc(seq=2, accessory_type=3), _sdc(seq=1, interface_type=6)
+            ],
+            accessories=[
+                {"type": 4, "firmware": "A"},
+                {"type": 3, "firmware": "B"},
+                {"type": 4, "firmware": "C"},
+            ],
+        )
+        entities = self.sdc_entities()
+        self.assertEqual(entities["5_1_accessory_firmware"].native_value, "A")
+        self.assertEqual(entities["5_2_accessory_firmware"].native_value, "B")
+        self.assertEqual(entities["6_1_accessory_firmware"].native_value, "C")
+        self.assertEqual(entities["6_1_accessory"]._attr_name, "SDC Lite 1 accessory")
+        for accessories in (
+            None, [], [{"type": 4, "firmware": "A"}], [{"type": 3, "firmware": None}]
+        ):
+            with self.subTest(accessories=accessories):
+                self.coordinator.data = self.coordinator.data | {
+                    "accessories": accessories
+                }
+                self.assertFalse(entities["5_2_accessory_firmware"].available)
+
+    async def test_other_models_and_unrecognized_ports_create_no_entities(self) -> None:
+        interfaces = [_sdc(_solar(39, 38.9))]
+        for model in ("DJI Power 1000 Mini", "DJI Power 500", "DJI Power"):
+            with self.subTest(model=model):
+                self.entities.clear()
+                self.coordinator.device.model = model
+                await self.setup(interfaces=interfaces)
+                self.assertEqual(self.sdc_entities(), {})
+        self.coordinator.device.model = "DJI Power 2000"
+        self.entities.clear()
+        await self.setup(
+            interfaces=[
+                _sdc(accessory_type=0),
+                _sdc(seq=2, accessory_type=9),
+                {"type": 2, "seq": 1, "accessory_type": 4},
+            ]
+        )
+        self.assertEqual(self.sdc_entities(), {})
+
+    async def test_accessory_states_are_translated(self) -> None:
+        import json
+
+        strings = json.loads((COMPONENT / "strings.json").read_text())
+        states = strings["entity"]["sensor"]["sdc_accessory"]["state"]
+        self.assertEqual(set(states), set(sensor.SDC_ACCESSORY_NAMES.values()))
+        self.assertEqual(states["solar_car_charger_1_8kw"], "1.8kW Solar/Car Charger")

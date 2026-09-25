@@ -1,4 +1,4 @@
-"""AC output, reported USB output, and reported SDC accessory switches."""
+"""AC output, backup reserve, and reported USB and SDC accessory switches."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.const import CONF_ADDRESS, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -19,7 +19,7 @@ from .accessory import (
 )
 from .const import DOMAIN
 from .entity import DjiPowerEntity
-from .features import ModelFeature
+from .features import ModelFeature, supports_feature
 
 
 async def async_setup_entry(
@@ -27,6 +27,8 @@ async def async_setup_entry(
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([DjiPowerAcSwitch(coordinator)])
+    if supports_feature(coordinator.device.model, ModelFeature.RESERVE_CONTROL):
+        async_add_entities([DjiPowerBackupReserveSwitch(coordinator)])
     async_discover_accessories(
         coordinator,
         entry,
@@ -71,6 +73,39 @@ class DjiPowerAcSwitch(DjiPowerEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_ac(False)
+
+
+class DjiPowerBackupReserveSwitch(DjiPowerEntity, SwitchEntity):
+    """Enable the custom backup reserve level while the station offers it."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_name = "Custom backup reserve level"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_custom_backup_reserve"
+        )
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data or {}
+        return (
+            super().available
+            and data.get("energy_reserve_available") is True
+            and self.is_on is not None
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        value = (self.coordinator.data or {}).get("energy_reserve_enabled")
+        return value if isinstance(value, bool) else None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_energy_reserve(enabled=True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_energy_reserve(enabled=False)
 
 
 class DjiPowerCarRechargingSwitch(DjiPowerCarChargerEntity, SwitchEntity):

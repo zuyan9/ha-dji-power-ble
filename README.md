@@ -22,6 +22,8 @@ used only during setup to retrieve the device's local credential.
 - Input, output, AC, USB, SDC, etc. power readings
 - Expansion battery devices with battery level and pack diagnostics
 - [SDC and car-charger controls](docs/accessory-controls.md) reported by the station
+- [SDC accessory type, firmware, and per-input solar and car readings](docs/accessory-controls.md#accessory-information-and-input-readings)
+- Power 1000: [custom backup reserve level](docs/backup-reserve.md) control
 - Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
 - Power 1000 Mini: individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs)
 - Firmware, timezone, display, reserve, and cloud-status diagnostics
@@ -90,7 +92,7 @@ acknowledgements.
 
 - `0x66` HMS alarm reports remain diagnostics-only; no active-alarm entity is
   implemented.
-- SDC accessory per-input readings and output-voltage data appear only in diagnostics
-  until reports from real accessories confirm units and establish safe entity mappings.
+- SDC rows other than recognized accessory inputs, such as drone-battery charging,
+  appear only in diagnostics until their meaning is established.
 - Cell-level BMS values are not present on the known app-facing BLE command path.
 - DJI can change the optional account-login endpoints at any time.

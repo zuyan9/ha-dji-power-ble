@@ -936,16 +936,16 @@ class ReportTests(unittest.TestCase):
                     "form_name": "solar",
                     "output_w": 0,
                     "input_w": 43,
-                    "output_v_raw": 0,
-                    "input_v_raw": 4012,
+                    "output_voltage_v": 0.0,
+                    "input_voltage_v": 40.12,
                 },
                 {
                     "form": 1,
                     "form_name": "solar",
                     "output_w": 0,
                     "input_w": 39,
-                    "output_v_raw": 1,
-                    "input_v_raw": 3890,
+                    "output_voltage_v": 0.01,
+                    "input_voltage_v": 38.9,
                 },
             ],
         )
@@ -979,8 +979,10 @@ class ReportTests(unittest.TestCase):
             ],
             [(2, "car", 700, 0), (3, "grid", 0, 65535), (9, "unknown", 1, 2)],
         )
-        self.assertEqual(sdc["accessory_inputs"][0]["output_v_raw"], 1380)
-        self.assertEqual(sdc["accessory_inputs"][1]["input_v_raw"], 0xFFFFFFFF)
+        self.assertEqual(sdc["accessory_inputs"][0]["output_voltage_v"], 13.8)
+        self.assertEqual(
+            sdc["accessory_inputs"][1]["input_voltage_v"], 0xFFFFFFFF / 100
+        )
         self.assertNotIn("SSSS", repr(parsed))
 
     def test_empty_or_malformed_accessory_records_do_not_hide_port_data(self) -> None:
@@ -1071,6 +1073,172 @@ class ReportTests(unittest.TestCase):
                 self.assertNotIn("charging", parsed)
                 self.assertNotIn("battery_time_type", parsed)
                 self.assertNotIn("runtime_min", parsed)
+
+
+def keyed(key: int, value: bytes) -> bytes:
+    return duml.build_keyed_set_payload([(key, value)], timestamp_ms=0)
+
+
+def accessory_row(
+    accessory_type: int,
+    firmware: bytes = b"00.00.03.20",
+    serial: bytes = b"TEST-ACCESSORY01",
+) -> bytes:
+    return record(
+        0x1011, serial.ljust(16, b"\x00") + bytes((accessory_type,))
+        + firmware.ljust(16, b"\x00")
+    )
+
+
+class AccessoryListTests(unittest.TestCase):
+    def test_types_and_firmware_decode_in_order_without_serials(self) -> None:
+        value = accessory_row(4) + accessory_row(0) + accessory_row(3, b"01.02.03.04")
+
+        parsed = duml.parse_telemetry(keyed(duml.ACCESSORIES_KEY, value))
+
+        self.assertEqual(
+            parsed["accessories"],
+            [
+                {"type": 4, "firmware": "00.00.03.20"},
+                {"type": 3, "firmware": "01.02.03.04"},
+            ],
+        )
+        self.assertEqual(parsed["key_04"], value.hex())
+        del parsed["key_04"]
+        self.assertNotIn("TEST-ACCESSORY", repr(parsed))
+
+    def test_empty_list_clears_and_missing_key_preserves(self) -> None:
+        self.assertEqual(
+            duml.parse_telemetry(keyed(duml.ACCESSORIES_KEY, b""))["accessories"], []
+        )
+        self.assertNotIn("accessories", duml.parse_telemetry(CAPTURED_KEYED_CONFIG))
+
+    def test_malformed_list_invalidates_only_accessories(self) -> None:
+        for value in (
+            record(0x1011, bytes(32)),
+            accessory_row(4)[:-1],
+            accessory_row(4) + b"\x00",
+        ):
+            with self.subTest(value=value.hex()):
+                payload = duml.build_keyed_set_payload(
+                    [(duml.ACCESSORIES_KEY, value), (0x02, b"\x01")],
+                    timestamp_ms=0,
+                )
+
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertIsNone(parsed["accessories"])
+                self.assertTrue(parsed["cloud_connected"])
+
+    def test_unreadable_firmware_is_unknown(self) -> None:
+        for firmware in (b"", b"\xff\xfe"):
+            with self.subTest(firmware=firmware):
+                parsed = duml.parse_telemetry(
+                    keyed(duml.ACCESSORIES_KEY, accessory_row(4, firmware))
+                )
+
+                self.assertEqual(parsed["accessories"], [{"type": 4, "firmware": None}])
+
+
+class EnergyReserveTests(unittest.TestCase):
+    def test_reserve_state_decodes_availability_switch_and_level(self) -> None:
+        for value, available, enabled in (
+            ("01015000", True, True),
+            ("01025000", True, False),
+            ("00022300", False, False),
+            ("01035000", True, None),
+            ("02015000", None, True),
+        ):
+            with self.subTest(value=value):
+                parsed = duml.parse_telemetry(
+                    keyed(duml.ENERGY_STORAGE_KEY, bytes.fromhex(value))
+                )
+
+                self.assertIs(parsed["energy_reserve_available"], available)
+                self.assertIs(parsed["energy_reserve_enabled"], enabled)
+                self.assertEqual(parsed["energy_reserve"], bytes.fromhex(value)[2])
+
+    def test_short_record_clears_controls_but_keeps_existing_level_rule(self) -> None:
+        parsed = duml.parse_telemetry(
+            keyed(duml.ENERGY_STORAGE_KEY, bytes.fromhex("010150"))
+        )
+        self.assertIsNone(parsed["energy_reserve_available"])
+        self.assertIsNone(parsed["energy_reserve_enabled"])
+        self.assertEqual(parsed["energy_reserve"], 80)
+        self.assertNotIn(
+            "energy_reserve_enabled", duml.parse_telemetry(keyed(0x02, b"\x01"))
+        )
+
+    def test_range_follows_discharge_margin_and_recharge_limit(self) -> None:
+        for discharge, recharge, expected in (
+            (5, 90, (10, 90)),
+            (0, 70, (5, 70)),
+            (15, 100, (20, 100)),
+            (15, 20, (20, 20)),
+            (15, 19, None),
+            (5, 101, None),
+            (-10, 90, None),
+            (None, 90, None),
+            (5, True, None),
+            (5.0, 90, None),
+        ):
+            with self.subTest(discharge=discharge, recharge=recharge):
+                self.assertEqual(
+                    duml.energy_reserve_bounds(discharge, recharge), expected
+                )
+
+    def test_set_changes_only_requested_fields_and_carries_rules(self) -> None:
+        current = "01025000ffee"
+        for kwargs, expected in (
+            ({"enabled": True}, "01015000ffee"),
+            ({"enabled": False}, "01025000ffee"),
+            ({"percent": 10}, "01020a00ffee"),
+            ({"percent": 90}, "01025a00ffee"),
+            ({"enabled": True, "percent": 35}, "01012300ffee"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                payload = duml.build_energy_reserve_set_payload(
+                    current, bounds=(10, 90), timestamp_ms=0, **kwargs
+                )
+
+                entries = duml.parse_keyed_values(payload)
+                self.assertEqual(entries[duml.ENERGY_STORAGE_KEY].hex(), expected)
+                self.assertEqual(entries[duml.RULES_KEY], b"\x0a\x00" + b"1800efffff")
+                self.assertEqual(
+                    list(entries), [duml.ENERGY_STORAGE_KEY, duml.RULES_KEY]
+                )
+                self.assertEqual(payload[:16], duml.build_keyed_header(0))
+
+    def test_set_rejects_unoffered_unknown_or_out_of_range_changes(self) -> None:
+        for current, kwargs in (
+            ("00025000", {"enabled": True}),
+            ("02025000", {"percent": 50}),
+            ("01035000", {"percent": 50}),
+            ("01025000", {}),
+            ("01025000", {"percent": 9}),
+            ("01025000", {"percent": 91}),
+            ("01025000", {"percent": 50.0}),
+            ("01025000", {"percent": True}),
+            ("01025000", {"percent": 50, "bounds": None}),
+            ("01025000", {"percent": 60, "bounds": (20, 55)}),
+            ("010250", {"enabled": True}),
+            ("zz025000", {"enabled": True}),
+        ):
+            with (
+                self.subTest(current=current, kwargs=kwargs),
+                self.assertRaises(duml.ProtocolError),
+            ):
+                duml.build_energy_reserve_set_payload(
+                    current, **({"bounds": (10, 90)} | kwargs)
+                )
+
+    def test_explicit_switch_replaces_an_unknown_reported_state(self) -> None:
+        payload = duml.build_energy_reserve_set_payload(
+            bytes.fromhex("01035000"), enabled=False, timestamp_ms=0
+        )
+        self.assertEqual(
+            duml.parse_keyed_values(payload)[duml.ENERGY_STORAGE_KEY].hex(), "01025000"
+        )
 
 
 class AdvertisementTests(unittest.TestCase):

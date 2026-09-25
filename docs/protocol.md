@@ -144,8 +144,9 @@ snapshot. It decodes these fields:
 | `0x00` | Base information | Primary and secondary firmware |
 | `0x01` | Expansion batteries | Per-pack battery percentage, cycles, rated capacity, optional temperature and firmware |
 | `0x02` | Network state | Cloud connected |
+| `0x04` | Accessories | Type and firmware of each attached accessory; serial numbers are discarded |
 | `0x05` | Charge limits | Recharge and discharge limits |
-| `0x06` | Energy storage | Energy reserve |
+| `0x06` | Energy storage | Backup reserve availability, switch, and level |
 | `0x0C` | Display | Display timeout |
 | `0x0D` | Power switch | AC output state; Power 1000 Mini USB output states |
 | `0x15` | Timezone | UTC offset in minutes |
@@ -207,12 +208,13 @@ output watts, and input watts. The known types are power, AC, USB-A, USB-C, SDC,
 Lite, 12 V, and XT60. The codec exposes both aggregate and per-port values.
 
 An SDC interface can also carry an accessory record. Its 17-byte head holds the
-accessory serial number, which the codec discards, followed by the accessory type,
-using the same values as car-charger rows. Each 13-byte `0x303A` row describes one
-accessory input: form (`1` solar, `2` car, `3` grid), output and input watts as u16 LE,
-then output and input voltage as u32 LE. Rows keep the station's order. Diagnostics
-list them per interface as `accessory_type` and `accessory_inputs`, with voltages left
-unscaled; they do not create entities.
+accessory serial number, which the codec discards, followed by the accessory type:
+`1` car power outlet cable, `2` solar panel adapter, `3` 1 kW car charger, `4` 1.8 kW
+Solar/Car charger, and `5` PoE cable. Each 13-byte `0x303A` row describes one accessory
+input: form (`1` solar, `2` car, `3` grid), output and input watts as u16 LE, then
+output and input voltage as u32 LE hundredths of a volt. Rows keep the station's order
+and omit inputs that carry no power. The integration exposes recognized forms as
+sensors; other rows appear only in diagnostics as part of `accessory_inputs`.
 
 Extended battery records include temperature at `0x3020[9:11]`, encoded as signed
 16-bit hundredths of a degree Celsius. Shorter records omit temperature.
@@ -245,6 +247,13 @@ a distinct sustaining state. Primary battery runtime is a separate reading.
 AC output writes use keys `0x0D` and `0x0E`. Charge-limit writes use key `0x05`, a
 six-value structure in which the integration changes only the recharge and discharge
 fields and preserves the other values from a fresh `0x05` read before writing.
+
+Backup reserve writes use keys `0x06` and `0x0E` on Power 1000. Key `0x06` holds
+availability (`1` offered), the switch (`1` on, `2` off), and the level as a u16 LE
+percentage. The integration writes only when the setting is offered, changes only
+the requested switch or level, and preserves any additional bytes. The station stores
+the level without checking it. Like DJI Home, the integration limits it to the
+discharge limit plus 5 % through the recharge limit, from a fresh `0x05` read.
 
 Power 2000 manual **Recharge power** and **Discharge power** writes use key `0x18`
 (`eco_mode`). The app-derived layout stores each setting as little-endian uint32
@@ -316,6 +325,11 @@ Manual discharge control has been reported working on hardware.
 Optional SDC controls are enabled for Power 1000, Power 1000 V2, and Power 2000
 when their configuration reports supported rows. A telemetry interface alone is
 insufficient to create a switch.
+
+Key `0x04` (`accessories`) lists attached accessories in 33-byte rows: a 16-byte
+serial number, the accessory type, and a 16-byte ASCII firmware version. The
+integration keeps only the type and firmware and matches each row to a reported port
+by type and port order. It reads this key with the charger settings every 30 seconds.
 
 Key `0x0A` (`car_charges`) contains nested charger rows with a 65-byte fixed prefix:
 

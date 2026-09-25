@@ -21,6 +21,7 @@ from .accessory import (
     async_discover_accessories,
 )
 from .const import DOMAIN
+from .duml import energy_reserve_bounds
 from .entity import DjiPowerEntity
 from .features import ModelFeature, supports_feature
 
@@ -40,6 +41,8 @@ async def async_setup_entry(
                 DjiPowerChargePowerNumber(coordinator),
             )
         )
+    if supports_feature(coordinator.device.model, ModelFeature.RESERVE_CONTROL):
+        entities.append(DjiPowerBackupReserveNumber(coordinator))
     async_add_entities(entities)
     async_discover_accessories(
         coordinator,
@@ -85,6 +88,65 @@ class DjiPowerLimitNumber(DjiPowerEntity, NumberEntity):
         if limit != value:
             raise ServiceValidationError("limit must be a whole-number percentage")
         await self.coordinator.async_set_charge_limits(**{self._key: limit})
+
+
+class DjiPowerBackupReserveNumber(DjiPowerEntity, NumberEntity):
+    """Battery level above which only solar recharging is used.
+
+    DJI Home bounds it by the discharge limit plus a margin and the recharge limit.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_name = "Backup reserve level"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_native_step = 1
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_backup_reserve_level"
+        )
+
+    def _bounds(self) -> tuple[int, int] | None:
+        data = self.coordinator.data or {}
+        return energy_reserve_bounds(
+            data.get("discharge_limit"), data.get("recharge_limit")
+        )
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data or {}
+        return (
+            super().available
+            and data.get("energy_reserve_available") is True
+            and data.get("energy_reserve_enabled") is True
+            and isinstance(self.native_value, int)
+            and self._bounds() is not None
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        return (self.coordinator.data or {}).get("energy_reserve")
+
+    @property
+    def native_min_value(self) -> int:
+        # HA requires numeric bounds even while this entity is unavailable.
+        bounds = self._bounds()
+        return bounds[0] if bounds is not None else 0
+
+    @property
+    def native_max_value(self) -> int:
+        bounds = self._bounds()
+        return bounds[1] if bounds is not None else 100
+
+    async def async_set_native_value(self, value: float) -> None:
+        percent = int(value)
+        if percent != value:
+            raise ServiceValidationError(
+                "backup reserve must be a whole-number percentage"
+            )
+        await self.coordinator.async_set_energy_reserve(percent=percent)
 
 
 class _DjiPowerWattNumber(DjiPowerEntity, NumberEntity):

@@ -39,6 +39,13 @@ CONTROL_WRITES = (
         {"discharge_limit": 10, "recharge_limit": 80},
     ),
     (
+        "set_energy_reserve",
+        (),
+        {"enabled": True, "percent": 40},
+        {"energy_reserve_enabled": False, "energy_reserve": 80},
+        {"energy_reserve_enabled": True, "energy_reserve": 40},
+    ),
+    (
         "set_discharge_power",
         (422,),
         {},
