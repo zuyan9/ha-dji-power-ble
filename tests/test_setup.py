@@ -461,8 +461,16 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
                          "DJI Power 2000")
         chargers = [entity for entity in entities if hasattr(entity, "_identity")]
-        self.assertEqual(len(chargers), 4)
-        self.assertTrue(all(entity.available for entity in chargers))
+        self.assertEqual(len(chargers), 7)
+        # Recharge mode offers its own numbers; Charge and Auto numbers wait.
+        self.assertEqual(
+            [entity._attr_name for entity in chargers if not entity.available],
+            [
+                "SDC 1 car charging power",
+                "SDC 1 car charging voltage",
+                "SDC 1 car auto switching voltage",
+            ],
+        )
         self.assertTrue(all(entity._row_key == "car_chargers" for entity in chargers))
         self.assertTrue(all(entity._attr_device_info["model"] == "DJI Power 2000"
                             for entity in chargers))

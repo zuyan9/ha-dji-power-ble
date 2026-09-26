@@ -69,7 +69,8 @@ registry entries and history with unavailable sensors, including after a reload.
 
 On these same models, optional SDC switch, car-charger, and accessory-list
 configuration is first read in the background after setup, then refreshed with the
-packs every 30 seconds, together with the backup reserve setting. Power 1000 Mini
+packs every 30 seconds, together with the backup reserve setting and, while a car
+charger is reported, the station rules that pick its Auto layout. Power 1000 Mini
 reads its switch list on the same schedule for USB output switches, without pack
 reads. The entity platforms discover controls from supported reported rows,
 identified by interface, port sequence, and charger type, and add the backup reserve
@@ -90,7 +91,8 @@ or level after a fresh `0x06` read.
 
 AC, SDC, and USB switches read and preserve the complete switch list before editing
 their own row. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
-chargers, and validate the selected setting against fresh reported bounds. All three
+chargers, and validate the selected setting against fresh reported bounds and the
+modes that use it; in Auto, the station's last-read rules decide. All three
 paths require a fresh matching row after the keyed acknowledgement. Optional reads
 and writes share the operation lock, including the confirmation period.
 

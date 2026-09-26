@@ -150,6 +150,80 @@ class AccessoryParsingTests(unittest.TestCase):
                 self.assertIsNone(parsed["ac_enabled"])
 
 
+def rules_value(text: bytes) -> bytes:
+    return len(text).to_bytes(2, "little") + text
+
+
+class StationRulesTests(unittest.TestCase):
+    def test_rule_count_and_little_endian_mask_are_decoded(self) -> None:
+        for text, expected in (
+            # The Power 1000 V2 reports its rules with a trailing NUL.
+            (b"11000f7001\x00", (17, 0x01700F)),
+            (b"1e00efffff3f", (30, 0x3FFFFFEF)),
+            (b"0200fe", (2, 0xFE)),
+            (b"0100", (1, 0)),
+            # DJI Home reads text shorter than a count as no rules.
+            (b"", (0, 0)),
+            (b"ab\x00", (0, 0)),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(duml.parse_station_rules(rules_value(text)), expected)
+
+    def test_rule_zero_selects_the_auto_threshold_layout(self) -> None:
+        for text, expected in (
+            (b"11000f7001\x00", True),
+            (b"1e00efffff3f", True),
+            (b"0200fe", False),
+            (b"0000ff", False),
+            (b"0100", False),
+            (b"", False),
+        ):
+            with self.subTest(text=text):
+                parsed = duml.parse_telemetry(record(0x100E, rules_value(text)))
+                self.assertIs(parsed["car_auto_threshold"], expected)
+
+    def test_malformed_rules_are_unknown_without_hiding_other_state(self) -> None:
+        for value in (
+            b"",
+            b"\x01",
+            b"\x05\x00" + b"0200",
+            b"\x04\x00" + b"0200fe",
+            b"\x05\x00" + b"0200f",
+            b"\x06\x00" + b"02zzfe",
+            b"\x06\x00" + "0200é".encode(),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(duml.ProtocolError):
+                    duml.parse_station_rules(value)
+                parsed = duml.parse_telemetry(
+                    record(0x100E, value) + record(0x1002, b"\x01")
+                )
+                self.assertIsNone(parsed["car_auto_threshold"])
+                self.assertTrue(parsed["cloud_connected"])
+
+    def test_missing_rules_preserve_the_previous_layout(self) -> None:
+        self.assertNotIn(
+            "car_auto_threshold", duml.parse_telemetry(record(0x1002, b"\x01"))
+        )
+
+    def test_numbers_follow_dji_home_mode_layouts(self) -> None:
+        for mode, rule, expected in (
+            (1, True, ("p_from_car", "p_to_car", "v_auto")),
+            (1, False, ("p_from_car", "p_to_car", "v_from_car", "v_to_car")),
+            (1, None, ("p_from_car", "p_to_car")),
+            (2, True, ("p_from_car", "v_from_car")),
+            (2, None, ("p_from_car", "v_from_car")),
+            (3, False, ("p_to_car", "v_to_car")),
+            (0, True, ()),
+            (4, True, ()),
+            (True, True, ()),
+            (None, True, ()),
+            (1, 1, ("p_from_car", "p_to_car")),
+        ):
+            with self.subTest(mode=mode, rule=rule):
+                self.assertEqual(duml.car_charger_numbers(mode, rule), expected)
+
+
 class CarChargerBuilderTests(unittest.TestCase):
     def test_reported_zero_sequence_is_preserved(self) -> None:
         payload = duml.build_car_charger_set_payload(
@@ -184,6 +258,28 @@ class CarChargerBuilderTests(unittest.TestCase):
                     value, record(0x1012, unknown) + record(0x1012, before)
                 )
 
+    def test_charge_and_auto_numbers_edit_only_their_setting(self) -> None:
+        other = car_row(interface_type=6, seq=2, tail=b"other")
+        for mode, setting, offset, raw in (
+            (3, {"charge_power_w": 300}, 25, 300),
+            (1, {"charge_power_w": 600}, 25, 600),
+            (1, {"recharge_power_w": 100}, 13, 100),
+            (3, {"charge_voltage_v": 13.45}, 49, 1345),
+            (1, {"charge_voltage_v": 14.5, "auto_threshold": False}, 49, 1450),
+            (1, {"minimum_voltage_v": 12.5, "auto_threshold": False}, 37, 1250),
+            (1, {"auto_voltage_v": 12.6, "auto_threshold": True}, 61, 1260),
+        ):
+            with self.subTest(mode=mode, setting=setting):
+                before = car_row(mode=mode, tail=b"target-tail")
+                value = record(0x1012, other) + record(0x1012, before)
+                result = duml.parse_keyed_values(edit_car(value, **setting))
+                self.assertEqual(result[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f")
+                records = duml.parse_tlvs(result[0x0A], strict=True)
+                self.assertEqual(records[0].value, other)
+                expected = bytearray(before)
+                expected[offset : offset + 4] = raw.to_bytes(4, "little")
+                self.assertEqual(records[1].value, expected)
+
     def test_both_known_accessories_and_sdc_interfaces_are_supported(self) -> None:
         for interface_type in (5, 6):
             for accessory_type in (3, 4):
@@ -210,9 +306,16 @@ class CarChargerBuilderTests(unittest.TestCase):
             {},
             {"enabled": True, "mode": 2},
             {"mode": 2, "recharge_power_w": 400},
+            {"recharge_power_w": 400, "minimum_voltage_v": 12.5},
+            {"charge_power_w": 300, "auto_voltage_v": 12.5},
+            {"recharge_power_w": None},
+            {"unknown_w": 400},
+            {"enabled": True, "unknown_w": None},
         ):
             with self.subTest(settings=settings), self.assertRaises(duml.ProtocolError):
                 edit_car(**settings)
+        # Omitted numbers can be passed as None alongside the single change.
+        edit_car(enabled=False, charge_power_w=None)
 
     def test_target_must_be_reported_known_and_unambiguous(self) -> None:
         for value in (
@@ -229,14 +332,39 @@ class CarChargerBuilderTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(duml.ProtocolError):
                 edit_car(value, enabled=True)
 
-    def test_numbers_require_enabled_recharge_mode(self) -> None:
-        for state in ({"sw": 2}, {"mode": 1}, {"mode": 3}):
-            for setting in ({"recharge_power_w": 500}, {"minimum_voltage_v": 12.5}):
+    def test_numbers_require_an_enabled_mode_that_offers_them(self) -> None:
+        powers = ({"recharge_power_w": 500}, {"charge_power_w": 300})
+        voltages = (
+            {"minimum_voltage_v": 12.5},
+            {"charge_voltage_v": 13},
+            {"auto_voltage_v": 12.5},
+        )
+        for setting in powers + voltages:
+            for rule in (True, False, None):
                 with (
-                    self.subTest(state=state, setting=setting),
-                    self.assertRaises(duml.ProtocolError),
+                    self.subTest(setting=setting, rule=rule),
+                    self.assertRaisesRegex(duml.ProtocolError, "enable the car"),
                 ):
-                    edit_car(car_value(**state), **setting)
+                    edit_car(car_value(sw=2), auto_threshold=rule, **setting)
+        for mode, rule, setting in (
+            (2, True, {"charge_power_w": 300}),
+            (2, False, {"charge_voltage_v": 13}),
+            (2, True, {"auto_voltage_v": 12.5}),
+            (3, None, {"recharge_power_w": 500}),
+            (3, False, {"minimum_voltage_v": 12.5}),
+            (3, True, {"auto_voltage_v": 12.5}),
+            (1, True, {"minimum_voltage_v": 12.5}),
+            (1, True, {"charge_voltage_v": 13}),
+            (1, False, {"auto_voltage_v": 12.5}),
+            (1, None, {"minimum_voltage_v": 12.5}),
+            (1, None, {"charge_voltage_v": 13}),
+            (1, None, {"auto_voltage_v": 12.5}),
+        ):
+            with (
+                self.subTest(mode=mode, rule=rule, setting=setting),
+                self.assertRaisesRegex(duml.ProtocolError, "mode does not use"),
+            ):
+                edit_car(car_value(mode=mode), auto_threshold=rule, **setting)
 
     def test_invalid_argument_types_states_and_precision_are_rejected(self) -> None:
         for settings in (
@@ -252,6 +380,11 @@ class CarChargerBuilderTests(unittest.TestCase):
             {"minimum_voltage_v": 12.345},
             {"minimum_voltage_v": float("inf")},
             {"minimum_voltage_v": float("nan")},
+            {"charge_power_w": True},
+            {"charge_power_w": 300.0},
+            {"charge_voltage_v": "13"},
+            {"charge_voltage_v": 13.001},
+            {"auto_voltage_v": float("-inf")},
         ):
             with self.subTest(settings=settings), self.assertRaises(duml.ProtocolError):
                 edit_car(**settings)
@@ -277,15 +410,36 @@ class CarChargerBuilderTests(unittest.TestCase):
         # A malformed unrelated control must not disable this control.
         edit_car(car_value(v_from_car_up=0), recharge_power_w=400)
 
+    def test_charge_and_auto_bounds_are_validated_per_field(self) -> None:
+        for mode, settings in (
+            (3, {"charge_power_w": 49}),
+            (3, {"charge_power_w": 601}),
+            (3, {"charge_voltage_v": 11.99}),
+            (3, {"charge_voltage_v": 14.51}),
+            (1, {"auto_voltage_v": 11.99, "auto_threshold": True}),
+            (1, {"auto_voltage_v": 14.01, "auto_threshold": True}),
+        ):
+            with self.subTest(settings=settings), self.assertRaises(duml.ProtocolError):
+                edit_car(car_value(mode=mode), **settings)
+        for fields in ({"p_to_car_up": 0}, {"p_to_car_v": 49}, {"p_to_car_low": 700}):
+            with self.subTest(fields=fields), self.assertRaises(duml.ProtocolError):
+                edit_car(car_value(mode=3, **fields), charge_power_w=300)
+        # A malformed recharge control must not disable the charge controls.
+        edit_car(car_value(mode=3, p_from_car_up=0), charge_power_w=300)
+
     def test_reported_boundaries_are_inclusive(self) -> None:
-        for settings in (
-            {"recharge_power_w": 100},
-            {"recharge_power_w": 600},
-            {"minimum_voltage_v": 11.5},
-            {"minimum_voltage_v": 14},
+        for mode, settings in (
+            (2, {"recharge_power_w": 100}),
+            (2, {"recharge_power_w": 600}),
+            (2, {"minimum_voltage_v": 11.5}),
+            (2, {"minimum_voltage_v": 14}),
+            (3, {"charge_power_w": 50}),
+            (3, {"charge_voltage_v": 14.5}),
+            (1, {"auto_voltage_v": 12, "auto_threshold": True}),
+            (1, {"auto_voltage_v": 14, "auto_threshold": True}),
         ):
             with self.subTest(settings=settings):
-                edit_car(**settings)
+                edit_car(car_value(mode=mode), **settings)
 
 
 class SdcSwitchBuilderTests(unittest.TestCase):

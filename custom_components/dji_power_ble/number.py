@@ -22,7 +22,7 @@ from .accessory import (
     async_discover_backup_reserve,
 )
 from .const import DOMAIN
-from .duml import energy_reserve_bounds
+from .duml import CAR_CHARGER_NUMBERS, car_charger_numbers, energy_reserve_bounds
 from .entity import DjiPowerEntity
 from .features import ModelFeature, supports_feature
 
@@ -57,6 +57,9 @@ async def async_setup_entry(
             "car_chargers": lambda identity: [
                 DjiPowerCarRechargePowerNumber(coordinator, identity),
                 DjiPowerCarMinimumVoltageNumber(coordinator, identity),
+                DjiPowerCarChargePowerNumber(coordinator, identity),
+                DjiPowerCarChargingVoltageNumber(coordinator, identity),
+                DjiPowerCarAutoVoltageNumber(coordinator, identity),
             ]
         },
     )
@@ -232,12 +235,22 @@ class DjiPowerChargePowerNumber(_DjiPowerWattNumber):
 
 
 class _DjiPowerCarNumber(DjiPowerCarChargerEntity, NumberEntity):
-    """A car recharger value with independent, device-reported bounds."""
+    """A car-charger value with independent, device-reported bounds.
 
-    _field: str
-    _scale = 1
+    It is available only in the modes where DJI Home offers it.
+    """
+
+    _setting: str
     _attr_entity_category = EntityCategory.CONFIG
     _attr_mode = NumberMode.BOX
+
+    @property
+    def _field(self) -> str:
+        return CAR_CHARGER_NUMBERS[self._setting][0]
+
+    @property
+    def _scale(self) -> int:
+        return CAR_CHARGER_NUMBERS[self._setting][1]
 
     def _bounds(self) -> tuple[int, int, int] | None:
         row = self.row or {}
@@ -252,12 +265,14 @@ class _DjiPowerCarNumber(DjiPowerCarChargerEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        mode = (self.row or {}).get("mode")
+        numbers = car_charger_numbers(
+            (self.row or {}).get("mode"),
+            (self.coordinator.data or {}).get("car_auto_threshold"),
+        )
         return (
             super().available
             and self.charger_enabled
-            and type(mode) is int
-            and mode == 2
+            and self._field in numbers
             and self._bounds() is not None
         )
 
@@ -277,36 +292,48 @@ class _DjiPowerCarNumber(DjiPowerCarChargerEntity, NumberEntity):
         return bounds[2] / self._scale if bounds is not None else 0
 
 
-class DjiPowerCarRechargePowerNumber(_DjiPowerCarNumber):
-    """Set power transferred from the car into the station."""
+class _DjiPowerCarPowerNumber(_DjiPowerCarNumber):
+    """A car-charger power in whole watts."""
 
-    _field = "p_from_car"
     _attr_device_class = NumberDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_native_step = 1
+
+    async def async_set_native_value(self, value: float) -> None:
+        watts = int(value)
+        if watts != value:
+            raise ServiceValidationError(
+                f"{self._attr_name} must be a whole number of watts"
+            )
+        await self.async_set_charger(**{self._setting: watts})
+
+
+class _DjiPowerCarVoltageNumber(_DjiPowerCarNumber):
+    """A vehicle voltage in hundredths of a volt."""
+
+    _attr_device_class = NumberDeviceClass.VOLTAGE
+    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+    _attr_native_step = 0.01
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.async_set_charger(**{self._setting: value})
+
+
+class DjiPowerCarRechargePowerNumber(_DjiPowerCarPowerNumber):
+    """Set power transferred from the car into the station."""
+
+    _setting = "recharge_power_w"
 
     def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
         super().__init__(
             coordinator, identity, "car_recharge_power", "car recharge power"
         )
 
-    async def async_set_native_value(self, value: float) -> None:
-        watts = int(value)
-        if watts != value:
-            raise ServiceValidationError(
-                "car recharge power must be a whole number of watts"
-            )
-        await self.async_set_charger(recharge_power_w=watts)
 
-
-class DjiPowerCarMinimumVoltageNumber(_DjiPowerCarNumber):
+class DjiPowerCarMinimumVoltageNumber(_DjiPowerCarVoltageNumber):
     """Set the minimum vehicle voltage for recharging the station."""
 
-    _field = "v_from_car"
-    _scale = 100
-    _attr_device_class = NumberDeviceClass.VOLTAGE
-    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
-    _attr_native_step = 0.01
+    _setting = "minimum_voltage_v"
 
     def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
         super().__init__(
@@ -316,5 +343,41 @@ class DjiPowerCarMinimumVoltageNumber(_DjiPowerCarNumber):
             "minimum car recharging voltage",
         )
 
-    async def async_set_native_value(self, value: float) -> None:
-        await self.async_set_charger(minimum_voltage_v=value)
+
+class DjiPowerCarChargePowerNumber(_DjiPowerCarPowerNumber):
+    """Set power transferred from the station into the car."""
+
+    _setting = "charge_power_w"
+
+    def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
+        super().__init__(
+            coordinator, identity, "car_charge_power", "car charging power"
+        )
+
+
+class DjiPowerCarChargingVoltageNumber(_DjiPowerCarVoltageNumber):
+    """Set DJI Home's Voltage of Car Charging for charging the car."""
+
+    _setting = "charge_voltage_v"
+
+    def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
+        super().__init__(
+            coordinator, identity, "car_charge_voltage", "car charging voltage"
+        )
+
+
+class DjiPowerCarAutoVoltageNumber(_DjiPowerCarVoltageNumber):
+    """Set the vehicle voltage at or below which Auto mode charges the car.
+
+    Above it, Auto mode recharges the station from the car.
+    """
+
+    _setting = "auto_voltage_v"
+
+    def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
+        super().__init__(
+            coordinator,
+            identity,
+            "car_auto_voltage",
+            "car auto switching voltage",
+        )

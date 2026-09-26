@@ -17,6 +17,7 @@ from .duml import (
     ACCESSORIES_KEY,
     APP_SOURCE,
     AUTH_COMMAND,
+    CAR_CHARGER_NUMBERS,
     CAR_CHARGERS_KEY,
     CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
@@ -93,6 +94,7 @@ _RESERVE_INVALIDATION = {
     "energy_reserve_available": None,
     "energy_reserve_enabled": None,
 }
+_RULES_INVALIDATION = {"key_0e": None, "car_auto_threshold": None}
 
 
 class DjiPowerError(Exception):
@@ -271,6 +273,7 @@ class DjiPowerDevice:
                     invalidated.update(
                         car_chargers=None, key_0a=None, accessories=None, key_04=None
                     )
+                    invalidated.update(_RULES_INVALIDATION)
                 if supports_feature(self.model, ModelFeature.RESERVE_CONTROL):
                     invalidated.update(_RESERVE_INVALIDATION)
                 if self._reads_power_switches:
@@ -773,6 +776,16 @@ class DjiPowerDevice:
                 raise
             except DjiPowerError as error:
                 _LOGGER.debug("Accessory configuration unavailable: %s", error)
+        # The rules only choose the Auto layout of a reported car charger.
+        if self.data.get("car_chargers") and supports_feature(
+            self.model, ModelFeature.SDC_CONTROLS
+        ):
+            try:
+                await self._read_station_rules()
+            except DjiPowerDisconnectedError:
+                raise
+            except DjiPowerError as error:
+                _LOGGER.debug("Station rules unavailable: %s", error)
         if supports_feature(self.model, ModelFeature.RESERVE_CONTROL):
             try:
                 await self._read_energy_reserve()
@@ -920,6 +933,24 @@ class DjiPowerDevice:
                 f"cannot read backup reserve configuration: {str(error) or 'timed out'}"
             ) from error
         return current
+
+    async def _read_station_rules(self) -> None:
+        """Read the rules that choose DJI Home's Auto car-charger layout."""
+        try:
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                update = await self._read_config(RULES_KEY)
+        except DjiPowerDisconnectedError:
+            raise
+        except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            self._merge_data(_RULES_INVALIDATION)
+            raise DjiPowerError(
+                f"cannot read station rules: {str(error) or 'timed out'}"
+            ) from error
+        if "key_0e" not in update:
+            # Without rules, DJI Home shows both direction voltages in Auto.
+            self._merge_data({"key_0e": None, "car_auto_threshold": False})
 
     async def _wait_for_energy_reserve(self, expected: dict[str, object]) -> None:
         """Confirm the reserve from fresh reads, delaying only later attempts."""
@@ -1118,10 +1149,13 @@ class DjiPowerDevice:
         *,
         enabled: bool | None = None,
         mode: int | None = None,
-        recharge_power_w: int | None = None,
-        minimum_voltage_v: float | None = None,
+        **numbers: float | None,
     ) -> None:
-        """Edit one reported charger setting and confirm its addressed row."""
+        """Edit one reported charger setting and confirm its addressed row.
+
+        ``numbers`` takes a ``CAR_CHARGER_NUMBERS`` keyword, such as
+        ``charge_power_w``.
+        """
         if not supports_feature(self.model, ModelFeature.SDC_CONTROLS):
             raise DjiPowerError("car-charger controls are not supported on this model")
         identity = {
@@ -1132,23 +1166,21 @@ class DjiPowerDevice:
             try:
                 payload = build_car_charger_set_payload(
                     update["key_0a"], interface_type, seq, accessory_type,
-                    enabled=enabled, mode=mode, recharge_power_w=recharge_power_w,
-                    minimum_voltage_v=minimum_voltage_v,
+                    enabled=enabled, mode=mode,
+                    auto_threshold=self.data.get("car_auto_threshold"), **numbers,
                 )
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
             requested = self._accessory_row(
                 parse_telemetry(payload), "car_chargers", identity
             )
-            fields = [
-                field for field, value in (
-                    ("sw", enabled), ("mode", mode),
-                    ("p_from_car_v", recharge_power_w),
-                    ("v_from_car_v", minimum_voltage_v),
-                ) if value is not None
-            ]
-            if recharge_power_w is not None or minimum_voltage_v is not None:
-                fields.extend(("sw", "mode"))
+            # The builder accepted exactly one change.
+            changed = [name for name, value in numbers.items() if value is not None]
+            if changed:
+                # A number also depends on the enabled mode that offers it.
+                fields = ["sw", "mode", f"{CAR_CHARGER_NUMBERS[changed[0]][0]}_v"]
+            else:
+                fields = ["sw"] if enabled is not None else ["mode"]
             expected = {field: requested[field] for field in fields}
             await self._set(payload, tuple(parse_keyed_values(payload)))
             await self._wait_for_accessory_values(

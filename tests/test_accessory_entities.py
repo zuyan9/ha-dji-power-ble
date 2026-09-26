@@ -108,7 +108,7 @@ number, select, switch = (modules[name] for name in ("number", "select", "switch
 
 
 def _car(**values) -> dict:
-    """A synthetic report with independently bounded recharge settings."""
+    """A synthetic report with independently bounded settings for each mode."""
     return {
         "interface_type": 5,
         "seq": 1,
@@ -121,6 +121,15 @@ def _car(**values) -> dict:
         "v_from_car_low": 1100,
         "v_from_car_v": 1250,
         "v_from_car_up": 1400,
+        "p_to_car_low": 50,
+        "p_to_car_v": 150,
+        "p_to_car_up": 600,
+        "v_to_car_low": 1200,
+        "v_to_car_v": 1300,
+        "v_to_car_up": 1450,
+        "v_auto_low": 1150,
+        "v_auto_v": 1280,
+        "v_auto_up": 1400,
         **values,
     }
 
@@ -197,13 +206,22 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             "power_switches": [{"type": 5, "seq": 1, "sw": 2}],
         }
         await self._setup()
-        self.assertEqual(len(self._accessories()), 5)
+        self.assertEqual(len(self._accessories()), 8)
         for entity in self._accessories():
-            self.assertTrue(entity.available)
             self.assertEqual(
                 entity._attr_device_info["identifiers"], {("dji_power_ble", ADDRESS)}
             )
             self.assertIn("SDC 1", entity._attr_name)
+        # Recharge mode offers its own numbers; Charge and Auto numbers wait.
+        waiting = [entity for entity in self._accessories() if not entity.available]
+        self.assertEqual(
+            [entity._attr_name for entity in waiting],
+            [
+                "SDC 1 car charging power",
+                "SDC 1 car charging voltage",
+                "SDC 1 car auto switching voltage",
+            ],
+        )
         self.assertEqual(
             len({entity._attr_unique_id for entity in self.entities}),
             len(self.entities),
@@ -212,7 +230,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_zero_sequence_is_preserved_when_reported(self) -> None:
         await self._setup()
         self.coordinator.publish({"car_chargers": [_car(seq=0)]})
-        self.assertEqual(len(self._accessories()), 4)
+        self.assertEqual(len(self._accessories()), 7)
         entity = self._accessories()[0]
         self.assertTrue(entity.available)
         await entity.async_turn_on()
@@ -228,14 +246,15 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         }
         self.coordinator.publish(report)
         original = list(self._accessories())
-        self.assertEqual(len(original), 5)
-        self.assertTrue(all(entity.available for entity in original))
+        self.assertEqual(len(original), 8)
+        offered = [entity for entity in original if entity.available]
+        self.assertEqual(len(offered), 5)  # Recharge mode, plus the SDC switch.
         self.assertTrue(all("SDC Lite 7" in entity._attr_name for entity in original))
         self.coordinator.publish({"car_chargers": [], "power_switches": []})
         self.assertTrue(all(not entity.available for entity in original))
         self.coordinator.publish(report)
         self.assertEqual(self._accessories(), original)
-        self.assertTrue(all(entity.available for entity in original))
+        self.assertTrue(all(entity.available for entity in offered))
         self.coordinator.last_update_success = False
         self.assertTrue(all(not entity.available for entity in original))
         self.coordinator.publish({"car_chargers": [_car(seq=42)]})
@@ -244,7 +263,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.publish(
             report | {"car_chargers": [_car(interface_type=6, seq=7)]}
         )
-        self.assertEqual(len(self._accessories()), 9)
+        self.assertEqual(len(self._accessories()), 15)
         old_car = [entity for entity in original if entity._row_key == "car_chargers"]
         self.assertTrue(all(not entity.available for entity in old_car))
 
@@ -255,7 +274,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.publish({"car_chargers": [_car(), _car(mode=1)]})
         self.assertEqual(self._accessories(), [])
         self.coordinator.publish({"car_chargers": [_car()]})
-        self.assertEqual(len(self._accessories()), 4)
+        self.assertEqual(len(self._accessories()), 7)
         self.coordinator.publish({"car_chargers": [_car(), _car()]})
         self.assertTrue(all(not entity.available for entity in self._accessories()))
 
@@ -328,7 +347,26 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
         self.voltage = number.DjiPowerCarMinimumVoltageNumber(
             self.coordinator, (5, 1, 4)
         )
+        self.charge_power = number.DjiPowerCarChargePowerNumber(
+            self.coordinator, (5, 1, 4)
+        )
+        self.charge_voltage = number.DjiPowerCarChargingVoltageNumber(
+            self.coordinator, (5, 1, 4)
+        )
+        self.auto_voltage = number.DjiPowerCarAutoVoltageNumber(
+            self.coordinator, (5, 1, 4)
+        )
+        self.numbers = {
+            "p_from_car": self.power,
+            "v_from_car": self.voltage,
+            "p_to_car": self.charge_power,
+            "v_to_car": self.charge_voltage,
+            "v_auto": self.auto_voltage,
+        }
         self.sdc = switch.DjiPowerSdcSwitch(self.coordinator, (5, 1, 0))
+
+    def offered(self) -> set[str]:
+        return {field for field, entity in self.numbers.items() if entity.available}
 
     def test_mode_and_enabled_state_gate_only_dependent_controls(self) -> None:
         for mode, label in ((1, "Auto"), (2, "Recharge"), (3, "Charge")):
@@ -337,15 +375,43 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(self.master.available)
                 self.assertTrue(self.mode.available)
                 self.assertEqual(self.mode.current_option, label)
-                self.assertEqual(self.power.available, mode == 2)
-                self.assertEqual(self.voltage.available, mode == 2)
         self.row["sw"] = 2
-        self.assertTrue(self.master.available)
-        self.assertFalse(self.master.is_on)
-        self.assertFalse(self.mode.available)
-        self.assertFalse(self.power.available)
-        self.assertFalse(self.voltage.available)
+        for rule in (True, False, None):
+            for mode in (1, 2, 3):
+                with self.subTest(rule=rule, mode=mode):
+                    self.coordinator.data["car_auto_threshold"] = rule
+                    self.row["mode"] = mode
+                    self.assertTrue(self.master.available)
+                    self.assertFalse(self.master.is_on)
+                    self.assertFalse(self.mode.available)
+                    self.assertEqual(self.offered(), set())
         self.assertTrue(self.sdc.available)
+
+    def test_numbers_follow_dji_home_layout_for_each_mode(self) -> None:
+        for mode, rule, offered in (
+            (2, None, {"p_from_car", "v_from_car"}),
+            (2, True, {"p_from_car", "v_from_car"}),
+            (3, None, {"p_to_car", "v_to_car"}),
+            (3, False, {"p_to_car", "v_to_car"}),
+            (1, True, {"p_from_car", "p_to_car", "v_auto"}),
+            (1, False, {"p_from_car", "v_from_car", "p_to_car", "v_to_car"}),
+            # Unknown rules leave only the settings both Auto layouts share.
+            (1, None, {"p_from_car", "p_to_car"}),
+        ):
+            with self.subTest(mode=mode, rule=rule):
+                self.row["mode"] = mode
+                self.coordinator.data["car_auto_threshold"] = rule
+                self.assertEqual(self.offered(), offered)
+
+    def test_new_numbers_have_stable_names_and_ids(self) -> None:
+        for entity, key, name in (
+            (self.charge_power, "car_charge_power", "car charging power"),
+            (self.charge_voltage, "car_charge_voltage", "car charging voltage"),
+            (self.auto_voltage, "car_auto_voltage", "car auto switching voltage"),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(entity._attr_name, f"SDC 1 {name}")
+                self.assertEqual(entity._attr_unique_id, f"{ADDRESS}_5_1_4_{key}")
 
     def test_invalid_switch_or_mode_values_are_not_valid_capabilities(self) -> None:
         for value in (None, True, "1", 0, 3):
@@ -389,16 +455,48 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.voltage.native_min_value, 0)
         self.assertEqual(self.voltage.native_max_value, 0)
 
+    def test_charge_and_auto_numbers_use_their_own_bounds_and_scaling(self) -> None:
+        for entity, expected in (
+            (self.charge_power, (150, 50, 600)),
+            (self.charge_voltage, (13, 12, 14.5)),
+            (self.auto_voltage, (12.8, 11.5, 14)),
+        ):
+            with self.subTest(entity=entity._attr_name):
+                self.assertEqual(
+                    (
+                        entity.native_value,
+                        entity.native_min_value,
+                        entity.native_max_value,
+                    ),
+                    expected,
+                )
+        self.row["mode"] = 1
+        self.coordinator.data["car_auto_threshold"] = False
+        self.row.update(p_from_car_up=0, v_from_car_low=1300, v_auto_v=-1)
+        self.assertEqual(self.offered(), {"p_to_car", "v_to_car"})
+        self.row.update(p_to_car_v=601, v_to_car_up=0)
+        self.assertEqual(self.offered(), set())
+        self.assertIsNone(self.charge_power.native_value)
+        self.coordinator.data["car_auto_threshold"] = True
+        self.row.update(v_auto_v=1150)
+        self.assertEqual(self.offered(), {"v_auto"})
+        self.assertEqual(self.auto_voltage.native_value, 11.5)
+
     def test_missing_or_malformed_rows_clear_controls(self) -> None:
         for rows in (None, [], [{"seq": 1}], "invalid"):
             with self.subTest(rows=rows):
-                self.coordinator.data = {"car_chargers": rows, "power_switches": rows}
+                self.coordinator.data = {
+                    "car_chargers": rows,
+                    "power_switches": rows,
+                    "car_auto_threshold": True,
+                }
                 for entity in (
-                    self.master, self.mode, self.power, self.voltage, self.sdc
+                    self.master, self.mode, self.sdc, *self.numbers.values()
                 ):
                     self.assertFalse(entity.available)
                 self.assertIsNone(self.power.native_value)
                 self.assertEqual(self.power.native_max_value, 0)
+                self.assertIsNone(self.auto_voltage.native_value)
 
     def test_zero_numeric_capability_is_not_writable(self) -> None:
         self.row.update(p_from_car_low=0, p_from_car_v=0, p_from_car_up=0)
@@ -416,6 +514,12 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
             (self.mode.async_select_option("Charge"), {"mode": 3}),
             (self.power.async_set_native_value(750), {"recharge_power_w": 750}),
             (self.voltage.async_set_native_value(12.8), {"minimum_voltage_v": 12.8}),
+            (self.charge_power.async_set_native_value(300), {"charge_power_w": 300}),
+            (
+                self.charge_voltage.async_set_native_value(13.2),
+                {"charge_voltage_v": 13.2},
+            ),
+            (self.auto_voltage.async_set_native_value(12.9), {"auto_voltage_v": 12.9}),
         ):
             setter.reset_mock()
             await action
@@ -435,8 +539,15 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
             _ServiceValidationError, "Auto, Recharge or Charge"
         ):
             await self.mode.async_select_option("Unknown")
-        with self.assertRaisesRegex(_ServiceValidationError, "whole number of watts"):
-            await self.power.async_set_native_value(750.5)
+        for entity in (self.power, self.charge_power):
+            with (
+                self.subTest(entity=entity._attr_name),
+                self.assertRaisesRegex(
+                    _ServiceValidationError,
+                    f"{entity._attr_name} must be a whole number of watts",
+                ),
+            ):
+                await entity.async_set_native_value(750.5)
         self.coordinator.async_set_car_charger.assert_not_awaited()
 
 

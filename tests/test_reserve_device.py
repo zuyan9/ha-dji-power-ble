@@ -163,6 +163,7 @@ class BackupReserveDeviceTests(unittest.IsolatedAsyncioTestCase):
                         b"\x00\x0a\x10",
                         b"\x00\x0d\x10",
                         b"\x00\x04\x10",
+                        b"\x00\x0e\x10",  # Rules, for the reported car charger.
                         b"\x00\x06\x10",
                     ],
                 )

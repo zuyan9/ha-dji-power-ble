@@ -149,6 +149,7 @@ snapshot. It decodes these fields:
 | `0x06` | Energy storage | Backup reserve availability, switch, and level |
 | `0x0C` | Display | Display timeout |
 | `0x0D` | Power switch | AC output state; Power 1000 Mini USB output states |
+| `0x0E` | Rules | Auto car-charger layout (rule 0) |
 | `0x15` | Timezone | UTC offset in minutes |
 | `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
 
@@ -376,9 +377,24 @@ Switch values are `1` enabled and `2` disabled. Modes are `1` Auto, `2` Recharge
 (car to station), and `3` Charge (station to car). Supported charger types are
 `3` (1 kW) and `4` (1.8 kW Solar/Car); supported interfaces are `5` (SDC) and
 `6` (SDC Lite). The sequence is taken from the reported row, including zero.
-The implementation exposes the switch, mode, car-to-station watts, and minimum
-car-to-station voltage. Numeric writes require enabled Recharge mode and valid
-bounds for that particular field.
+The implementation exposes the switch, the mode, and all five settings. A setting
+is available and writable only while the charger is enabled in a mode where DJI Home
+shows it, and only with valid bounds for that field:
+
+| Mode | Settings |
+| --- | --- |
+| `2` Recharge | Car-to-station power and voltage |
+| `3` Charge | Station-to-car power and voltage |
+| `1` Auto, rule 0 set | Both powers and the Auto voltage |
+| `1` Auto, rule 0 clear or no rules | Both powers and both direction voltages |
+
+A GET of key `0x0E` (`rules`) returns the station's own rules, which differ from the
+client record sent with writes. The value is a u16 LE text length followed by ASCII
+hex, which the station can end with NUL. The hex decodes to a u16 LE rule count and
+a little-endian mask; rule *n* is set when *n* is below the count and mask bit *n*
+is `1`. As in DJI Home, text shorter than four characters means no rules. The
+integration reads `0x0E` while a charger is reported. Malformed rules or a failed
+read leave the Auto layout unknown, and Auto then offers only the two powers.
 
 Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
 `type, sequence, switch`. AC is type `2`, sequence `1`; USB-A and USB-C use
