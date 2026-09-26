@@ -232,8 +232,8 @@
       "sdc_accessory": {
         "name": "Accessory",
         "state": {
-          "car_power_outlet_cable": "Car Power Outlet to SDC Power Cable (12V/24V)",
-          "solar_panel_adapter": "Solar Panel Adapter Module (MPPT)",
+          "car_power_outlet_cable": "DJI Power Car Power Outlet to SDC Power Cable (12V/24V)",
+          "solar_panel_adapter": "DJI Power Solar Panel Adapter Module (MPPT)",
           "car_charger_1kw": "1kW Car Charger",
           "solar_car_charger_1_8kw": "1.8kW Solar/Car Charger",
           "poe_cable": "SDC to PoE Power Cable"

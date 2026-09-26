@@ -18,8 +18,8 @@ named by its port:
 | Grid power, grid voltage | Grid-connection output |
 
 Recognized accessories:
-- Car Power Outlet to SDC Power Cable (12V/24V)
-- Solar Panel Adapter Module (MPPT)
+- DJI Power Car Power Outlet to SDC Power Cable (12V/24V)
+- DJI Power Solar Panel Adapter Module (MPPT)
 - 1kW Car Charger
 - 1.8kW Solar/Car Charger
 - SDC to PoE Power Cable
