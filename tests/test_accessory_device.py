@@ -429,7 +429,7 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
                     written = duml.parse_keyed_values(self.client.requests[1][1])
                     self.assertEqual(set(written), {0x0D, 0x0E})
                     self.assertEqual(
-                        written[0x0E], bytes.fromhex("0a00") + b"1800efffff"
+                        written[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f"
                     )
 
     async def test_usb_write_preserves_ac_and_other_usb_rows(self):

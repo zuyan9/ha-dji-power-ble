@@ -64,7 +64,8 @@ TIME_PERIOD_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 # DJI Home keeps the backup reserve this far above the discharge limit.
 ENERGY_RESERVE_MARGIN = 5
 
-_SET_STATE_RULES = (RULES_KEY, bytes.fromhex("0a00") + b"1800efffff")
+# The client rules record DJI Home 1.6.9 sends with each SET.
+_SET_STATE_RULES = (RULES_KEY, bytes.fromhex("0c00") + b"1e00efffff3f")
 
 
 class ProtocolError(ValueError):

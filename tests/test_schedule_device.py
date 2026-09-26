@@ -50,7 +50,7 @@ class TimePeriodsClient(StationClient):
         elif request.command_id == duml.SET_COMMAND:
             requested = duml.parse_keyed_values(request.payload)
             assert set(requested) == {0x16, 0x0E}
-            assert requested[0x0E] == b"\x0a\x00" + b"1800efffff"
+            assert requested[0x0E] == b"\x0c\x00" + b"1e00efffff3f"
             self.did_set = True
             if self.apply_set and self.ack == {0x16: bytes(4), 0x0E: bytes(4)}:
                 self.values.update(requested)

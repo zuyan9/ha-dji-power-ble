@@ -1203,7 +1203,7 @@ class EnergyReserveTests(unittest.TestCase):
 
                 entries = duml.parse_keyed_values(payload)
                 self.assertEqual(entries[duml.ENERGY_STORAGE_KEY].hex(), expected)
-                self.assertEqual(entries[duml.RULES_KEY], b"\x0a\x00" + b"1800efffff")
+                self.assertEqual(entries[duml.RULES_KEY], b"\x0c\x00" + b"1e00efffff3f")
                 self.assertEqual(
                     list(entries), [duml.ENERGY_STORAGE_KEY, duml.RULES_KEY]
                 )
