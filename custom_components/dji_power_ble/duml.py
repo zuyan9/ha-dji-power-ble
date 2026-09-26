@@ -785,6 +785,12 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
             data["firmware"] = firmware
         if bms_firmware:
             data["firmware_secondary"] = bms_firmware
+    if len(base) >= 46:
+        data["battery_cycle_count"] = int.from_bytes(base[44:46], "little")
+    if len(base) >= 53:
+        # DJI Home: 1 normal, 2 maintenance charge to 100% despite the charge
+        # limit. The original Power 1000 sends a shorter record without it.
+        data["maintenance_charging"] = {1: False, 2: True}.get(base[52])
 
     if network := keyed.get(0x02):
         data["cloud_connected"] = bool(network[0])

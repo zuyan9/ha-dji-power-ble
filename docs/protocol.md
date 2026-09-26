@@ -141,7 +141,7 @@ snapshot. It decodes these fields:
 
 | Key | Meaning | Exposed values |
 | --- | --- | --- |
-| `0x00` | Base information | Primary and secondary firmware |
+| `0x00` | Base information | Primary and secondary firmware, battery cycle count, maintenance charging |
 | `0x01` | Expansion batteries | Per-pack battery percentage, cycles, rated capacity, optional temperature and firmware |
 | `0x02` | Network state | Cloud connected |
 | `0x04` | Accessories | Type and firmware of each attached accessory; serial numbers are discarded |
@@ -155,6 +155,33 @@ snapshot. It decodes these fields:
 Raw keyed values are retained internally as `key_XX` hexadecimal state. Downloaded
 diagnostics redact records containing known private identifiers, including expansion
 packs (`key_01`), parallel devices (`key_03`), and accessories (`key_04`).
+
+### Base information
+
+Key `0x00` is read at connection and pushed by the station when its contents change.
+The Power 1000 V2 sends 53 bytes; the original Power 1000 sends the first 47.
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| `0` | 4 | Region code, ASCII; not exposed |
+| `4` | 2 | Device type; not exposed |
+| `6` | 1 | Version status; not exposed |
+| `7` | 16 | Primary firmware, ASCII |
+| `23` | 1 | Mode; not exposed |
+| `24` | 16 | Secondary firmware, ASCII |
+| `40` | 4 | Capacity in Wh; not exposed |
+| `44` | 2 | Built-in battery cycle count |
+| `46` | 1 | Grid connection status; not exposed |
+| `47` | 4 | Upgrade time; not exposed |
+| `51` | 1 | Lock status; not exposed |
+| `52` | 1 | Charge type: 0 unknown, 1 normal, 2 maintenance |
+
+A maintenance charge fills the battery to 100% regardless of the recharge limit, which
+DJI Home shows as "Battery maintenance in progress". **Battery maintenance charging** is
+on for type 2, off for type 1, and unknown otherwise. It is created only for stations
+whose record includes the charge type, so the original Power 1000 does not have it.
+Type 2 is decoded as DJI Home interprets it; it has not yet been captured from a
+station.
 
 ### Expansion batteries
 

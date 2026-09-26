@@ -362,6 +362,21 @@ class BatteryTimeSensorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(self.entities[active_key].available)
                 self.assertEqual(self.entities[active_key].native_value, 120)
 
+    def test_battery_cycle_count_is_a_station_diagnostic(self) -> None:
+        description = next(
+            item for item in sensor.DESCRIPTIONS if item.key == "battery_cycle_count"
+        )
+        entity = sensor.DjiPowerSensor(self.coordinator, description)
+
+        self.assertEqual(entity._attr_unique_id, f"{ADDRESS}_battery_cycle_count")
+        self.assertEqual(description.translation_key, "battery_cycle_count")
+        self.assertEqual(description.entity_category, "diagnostic")
+        self.assertTrue(description.entity_registry_enabled_default)
+        self.assertIsNone(entity.native_value)
+        for count in (0, 19):
+            self.coordinator.data = {"battery_cycle_count": count}
+            self.assertEqual(entity.native_value, count)
+
     def test_primary_runtime_remains_an_independent_disabled_sensor(self) -> None:
         description = next(
             item for item in sensor.DESCRIPTIONS if item.key == "primary_runtime_min"
@@ -590,10 +605,16 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         strings = json.loads((COMPONENT / "strings.json").read_text())
         translated = json.loads((COMPONENT / "translations/en.json").read_text())
         self.assertEqual(strings, translated)
-        for description in sensor.EXPANSION_DESCRIPTIONS:
+        for description in (*sensor.DESCRIPTIONS, *sensor.EXPANSION_DESCRIPTIONS):
+            if description.translation_key is None:
+                continue
             self.assertTrue(
                 strings["entity"]["sensor"][description.translation_key]["name"]
             )
+        self.assertEqual(
+            strings["entity"]["sensor"]["battery_cycle_count"]["name"],
+            "Battery cycle count",
+        )
         self.assertEqual(
             strings["entity"]["sensor"]["time_periods"]["name"],
             "Electricity price time periods",

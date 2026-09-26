@@ -213,7 +213,15 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "maintenance_charging": {
+        "name": "Battery maintenance charging"
+      }
+    },
     "sensor": {
+      "battery_cycle_count": {
+        "name": "Battery cycle count"
+      },
       "expansion_battery": {
         "name": "Battery"
       },
