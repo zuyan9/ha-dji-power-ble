@@ -98,6 +98,12 @@ CAPTURED_KEYED_CONFIG = bytes.fromhex(
     "0014100300020102151002005cfe"
 )
 
+# Power 1000 V2 key 0x00 on firmware 01.00.1200: 19 cycles, normal charge type.
+CAPTURED_V2_BASE_INFO = bytes.fromhex(
+    "434e00000f010130312e30302e313230300000000000000130332e30332e30303030"
+    "00000000000000040000130000840300000001"
+)
+
 CAPTURED_REPORT = bytes.fromhex(
     "0100100059f2f2779e010000000000004030090007003035303031330010302600"
     "0000343931353037622d616435382d346164372d626539322d3264323138306430"
@@ -219,6 +225,63 @@ class KeyedConfigTests(unittest.TestCase):
         self.assertEqual(parsed["display_timeout_s"], 0)
         self.assertEqual(parsed["timezone_offset_min"], -420)
         self.assertFalse(parsed["ac_enabled"])
+        # This firmware reports its charge type as unknown.
+        self.assertEqual(parsed["battery_cycle_count"], 0)
+        self.assertIsNone(parsed["maintenance_charging"])
+
+    def parse_base_info(self, value: bytes) -> dict[str, object]:
+        return duml.parse_telemetry(duml.build_keyed_set_payload([(0x00, value)]))
+
+    def test_base_info_cycle_count_and_normal_charge_type(self) -> None:
+        parsed = self.parse_base_info(CAPTURED_V2_BASE_INFO)
+
+        self.assertEqual(parsed["firmware"], "01.00.1200")
+        self.assertEqual(parsed["firmware_secondary"], "03.03.0000")
+        self.assertEqual(parsed["battery_cycle_count"], 19)
+        self.assertIs(parsed["maintenance_charging"], False)
+
+    def test_base_info_charge_type_maps_only_known_values(self) -> None:
+        cases = {0: None, 1: False, 2: True, 3: None, 0xFF: None}
+        for charge_type, expected in cases.items():
+            with self.subTest(charge_type=charge_type):
+                value = CAPTURED_V2_BASE_INFO[:52] + bytes((charge_type,))
+                parsed = self.parse_base_info(value)
+                self.assertIn("maintenance_charging", parsed)
+                self.assertIs(parsed["maintenance_charging"], expected)
+
+    def test_base_info_cycle_count_is_little_endian_u16(self) -> None:
+        for count in (0, 1, 0x0102, 0xFFFF):
+            with self.subTest(count=count):
+                value = bytearray(CAPTURED_V2_BASE_INFO)
+                value[44:46] = count.to_bytes(2, "little")
+                parsed = self.parse_base_info(bytes(value))
+                self.assertEqual(parsed["battery_cycle_count"], count)
+
+    def test_short_base_info_omits_fields_it_does_not_carry(self) -> None:
+        # The original Power 1000 ends its record after grid connection status.
+        original = self.parse_base_info(CAPTURED_V2_BASE_INFO[:47])
+        self.assertEqual(original["battery_cycle_count"], 19)
+        self.assertNotIn("maintenance_charging", original)
+
+        for length in (40, 45, 52):
+            with self.subTest(length=length):
+                parsed = self.parse_base_info(CAPTURED_V2_BASE_INFO[:length])
+                self.assertEqual(parsed["firmware"], "01.00.1200")
+                self.assertEqual("battery_cycle_count" in parsed, length >= 46)
+                self.assertNotIn("maintenance_charging", parsed)
+
+    def test_push_without_base_info_preserves_maintenance_state(self) -> None:
+        maintenance = CAPTURED_V2_BASE_INFO[:52] + b"\x02"
+        current = self.parse_base_info(maintenance)
+        timezone = duml.parse_telemetry(
+            duml.build_keyed_set_payload([(0x15, (60).to_bytes(2, "little"))])
+        )
+
+        self.assertNotIn("battery_cycle_count", timezone)
+        self.assertNotIn("maintenance_charging", timezone)
+        current.update(timezone)
+        self.assertIs(current["maintenance_charging"], True)
+        self.assertEqual(current["battery_cycle_count"], 19)
 
     def test_header_uses_real_u64_millisecond_timestamp(self) -> None:
         self.assertEqual(

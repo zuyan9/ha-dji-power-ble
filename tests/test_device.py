@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, call, patch
 
 from tests.test_duml import (
     CAPTURED_KEYED_CONFIG,
+    CAPTURED_V2_BASE_INFO,
     SYNTHETIC_ECO_MODE,
     expansion_battery,
     record,
@@ -1794,6 +1795,8 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.requests, requests)
                 self.assertEqual(device.data["firmware"], "01.00.1100")
                 self.assertEqual(device.data["firmware_secondary"], "03.03.0000")
+                self.assertEqual(device.data["battery_cycle_count"], 0)
+                self.assertIsNone(device.data["maintenance_charging"])
                 self.assertTrue(device.data["cloud_connected"])
                 self.assertEqual(device.data["recharge_limit"], 100)
                 self.assertEqual(device.data["discharge_limit"], 0)
@@ -1880,6 +1883,42 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(updates[1]["runtime_min"], 120)
         self.assertTrue(updates[1]["charging"])
+
+
+class BaseInfoPushTests(unittest.IsolatedAsyncioTestCase):
+    """Station base-info pushes carry the battery maintenance state."""
+
+    def setUp(self) -> None:
+        self.device = device_module.DjiPowerDevice(
+            FakeBleDevice(), "ab" * 16, name="Test station", model="DJI Power 2000"
+        )
+        self.published: list[dict] = []
+        self.device.add_state_listener(self.published.append)
+
+    def push(self, *records: tuple[int, bytes]) -> None:
+        self.device._handle_packet(
+            duml.DumlPacket(
+                0xAB, 2, 1, 0, duml.POWER_COMMAND_SET, duml.TELEMETRY_COMMAND,
+                duml.build_keyed_set_payload(list(records), timestamp_ms=1),
+            )
+        )
+
+    async def test_charge_type_pushes_update_and_unrelated_pushes_preserve(self):
+        base = bytearray(CAPTURED_V2_BASE_INFO)
+        base[52] = 2
+        self.push((0x00, bytes(base)))
+        self.assertIs(self.device.data["maintenance_charging"], True)
+        self.assertEqual(self.device.data["battery_cycle_count"], 19)
+        self.assertIs(self.published[-1]["maintenance_charging"], True)
+
+        self.push((0x15, b"\x3c\x00"))
+        self.assertIs(self.device.data["maintenance_charging"], True)
+
+        base[52], base[44] = 1, 20
+        self.push((0x00, bytes(base)))
+        self.assertIs(self.device.data["maintenance_charging"], False)
+        self.assertEqual(self.device.data["battery_cycle_count"], 20)
+        self.assertIs(self.published[-1]["maintenance_charging"], False)
 
 
 class ExpansionBatteryTests(unittest.IsolatedAsyncioTestCase):

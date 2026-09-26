@@ -1,4 +1,4 @@
-"""Connectivity binary sensor."""
+"""Connectivity, charging, and battery maintenance binary sensors."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -26,6 +26,23 @@ async def async_setup_entry(
             DjiPowerCloudConnected(coordinator),
         ]
     )
+    added = False
+
+    @callback
+    def async_discover_maintenance_charging() -> None:
+        """Add the maintenance state once the station's base info reports it."""
+        nonlocal added
+        if added or not coordinator.last_update_success:
+            return
+        if "maintenance_charging" not in (coordinator.data or {}):
+            return
+        added = True
+        async_add_entities([DjiPowerMaintenanceCharging(coordinator)])
+
+    entry.async_on_unload(
+        coordinator.async_add_listener(async_discover_maintenance_charging)
+    )
+    async_discover_maintenance_charging()
 
 
 class DjiPowerCharging(DjiPowerEntity, BinarySensorEntity):
@@ -39,6 +56,23 @@ class DjiPowerCharging(DjiPowerEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         return (self.coordinator.data or {}).get("charging")
+
+
+class DjiPowerMaintenanceCharging(DjiPowerEntity, BinarySensorEntity):
+    """Whether the station is charging to 100% to maintain its battery."""
+
+    _attr_icon = "mdi:battery-heart-variant"
+    _attr_translation_key = "maintenance_charging"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_maintenance_charging"
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        return (self.coordinator.data or {}).get("maintenance_charging")
 
 
 class DjiPowerConnected(DjiPowerEntity, BinarySensorEntity):

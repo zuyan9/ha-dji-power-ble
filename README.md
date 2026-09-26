@@ -21,7 +21,8 @@ used only during setup to retrieve the device's local credential.
   - Battery level, remaining time, charging time, temperature, and charging status
   - Input, output, AC, USB, SDC, etc. power readings
   - Expansion battery devices with battery level and pack diagnostics
-  - Firmware, timezone, display, reserve, and cloud-status diagnostics
+  - Firmware, battery cycle, timezone, display, reserve, and cloud-status
+    diagnostics
 - Control:
   - AC output
   - Discharge and recharge limit

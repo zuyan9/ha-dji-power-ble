@@ -174,6 +174,11 @@ DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SensorEntityDescription(
+        key="battery_cycle_count",
+        translation_key="battery_cycle_count",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    SensorEntityDescription(
         key="primary_battery_percent",
         name="Primary battery",
         device_class=SensorDeviceClass.BATTERY,
