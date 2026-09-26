@@ -707,6 +707,34 @@ _CAR_CHARGER_FIELDS = (
     "v_to_car",
     "v_auto",
 )
+# Keyword, row field, and raw units per unit of each editable car-charger number.
+CAR_CHARGER_NUMBERS = {
+    "recharge_power_w": ("p_from_car", 1),
+    "charge_power_w": ("p_to_car", 1),
+    "minimum_voltage_v": ("v_from_car", 100),
+    "charge_voltage_v": ("v_to_car", 100),
+    "auto_voltage_v": ("v_auto", 100),
+}
+# Numbers DJI Home shows in modes 1 Auto, 2 Recharge, and 3 Charge.
+_CAR_MODE_NUMBERS = {
+    1: ("p_from_car", "p_to_car"),
+    2: ("p_from_car", "v_from_car"),
+    3: ("p_to_car", "v_to_car"),
+}
+
+
+def car_charger_numbers(mode: object, auto_threshold: object) -> tuple[str, ...]:
+    """Return the row fields DJI Home lets the user edit in a charger mode.
+
+    In Auto, station rule 0 selects one switching voltage; without it, DJI Home
+    shows the voltage of each direction. Unknown rules leave only the powers.
+    """
+    if type(mode) is not int:
+        return ()
+    numbers = _CAR_MODE_NUMBERS.get(mode, ())
+    if mode == 1 and type(auto_threshold) is bool:
+        numbers += ("v_auto",) if auto_threshold else ("v_from_car", "v_to_car")
+    return numbers
 
 
 def parse_accessories(value: bytes) -> list[dict[str, object]]:
@@ -760,6 +788,25 @@ def parse_power_switches(value: bytes) -> list[dict[str, int]]:
         identities.add(identity)
         switches.append({"type": row[0], "seq": row[1], "sw": row[2]})
     return switches
+
+
+def parse_station_rules(value: bytes) -> tuple[int, int]:
+    """Decode the station's rule count and little-endian rule mask.
+
+    The value is a u16 LE text length and ASCII hex, which can end with NUL. The
+    hex holds a u16 LE rule count, then the mask. Like DJI Home, text shorter
+    than a count means no rules.
+    """
+    if len(value) < 2 or len(value) != 2 + int.from_bytes(value[:2], "little"):
+        raise ProtocolError("rules record length does not match its text")
+    text = value[2:].split(b"\x00", 1)[0]
+    if len(text) < 4:
+        return 0, 0
+    try:
+        rules = bytes.fromhex(text.decode("ascii"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ProtocolError("rules record is not hexadecimal text") from error
+    return int.from_bytes(rules[:2], "little"), int.from_bytes(rules[2:], "little")
 
 
 def parse_telemetry(payload: bytes) -> dict[str, object]:
@@ -834,6 +881,13 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
                     and switch["sw"] in (1, 2)
                 ):
                     data["ac_enabled"] = switch["sw"] == 1
+
+    if RULES_KEY in keyed:
+        # Rule 0 selects DJI Home's Auto car-charger layout with one threshold.
+        data["car_auto_threshold"] = None
+        with contextlib.suppress(ProtocolError):
+            count, mask = parse_station_rules(keyed[RULES_KEY])
+            data["car_auto_threshold"] = count > 0 and bool(mask & 1)
 
     if len(timezone := keyed.get(0x15, b"")) == 2:
         data["timezone_offset_min"] = int.from_bytes(timezone, "little", signed=True)
@@ -993,9 +1047,30 @@ def _replace_accessory_row(
     return bytes(output)
 
 
-def _car_charger_number(row: dict[str, int], field: str, value: int) -> None:
-    if row["sw"] != 1 or row["mode"] != 2:
-        raise ProtocolError("enable the car charger in Recharge mode before editing it")
+def _car_charger_raw(value: object, scale: int) -> int:
+    """Convert whole watts, or volts to the station's 0.01 V units."""
+    if scale == 1:
+        if type(value) is not int:
+            raise ProtocolError("car-charger power must be a whole number of watts")
+        return value
+    if type(value) not in (int, float):
+        raise ProtocolError("car-charger voltage must be a finite number")
+    try:
+        scaled = Decimal(str(value)) * scale
+        if not scaled.is_finite() or scaled != scaled.to_integral_value():
+            raise ProtocolError("car-charger voltage must use 0.01 V increments")
+        return int(scaled)
+    except InvalidOperation as error:
+        raise ProtocolError("car-charger voltage is invalid") from error
+
+
+def _car_charger_number(
+    row: dict[str, int], field: str, value: int, auto_threshold: bool | None
+) -> None:
+    if row["sw"] != 1:
+        raise ProtocolError("enable the car charger before editing its settings")
+    if field not in car_charger_numbers(row["mode"], auto_threshold):
+        raise ProtocolError("the car charger's current mode does not use this setting")
     minimum, maximum, current = (row[f"{field}_{part}"] for part in ("low", "up", "v"))
     if maximum == 0 or not minimum <= current <= maximum:
         raise ProtocolError("car charger reported invalid control bounds or setpoint")
@@ -1011,21 +1086,22 @@ def build_car_charger_set_payload(
     *,
     enabled: bool | None = None,
     mode: int | None = None,
-    recharge_power_w: int | None = None,
-    minimum_voltage_v: float | None = None,
+    auto_threshold: bool | None = None,
     timestamp_ms: int | None = None,
+    **numbers: float | None,
 ) -> bytes:
-    """Edit one reported car-charger setting and preserve the complete list."""
+    """Edit one reported car-charger setting and preserve the complete list.
+
+    ``numbers`` takes a ``CAR_CHARGER_NUMBERS`` keyword. ``auto_threshold`` is
+    the station's Auto layout rule, which decides the voltages Auto mode uses.
+    """
     _validate_sdc_identity(interface_type, seq)
     if type(accessory_type) is not int or accessory_type not in (3, 4):
         raise ProtocolError("car-charger controls require a 1 kW or 1.8 kW accessory")
-    if (
-        sum(
-            setting is not None
-            for setting in (enabled, mode, recharge_power_w, minimum_voltage_v)
-        )
-        != 1
-    ):
+    if unknown := sorted(numbers.keys() - CAR_CHARGER_NUMBERS.keys()):
+        raise ProtocolError(f"unknown car-charger setting {unknown[0]}")
+    numbers = {name: value for name, value in numbers.items() if value is not None}
+    if sum(setting is not None for setting in (enabled, mode)) + len(numbers) != 1:
         raise ProtocolError("change exactly one car-charger setting at a time")
     value = _accessory_snapshot(current_value)
     rows = parse_car_chargers(value)
@@ -1053,23 +1129,14 @@ def build_car_charger_set_payload(
         if row["sw"] != 1:
             raise ProtocolError("enable the car charger before changing its mode")
         offset, replacement = 4, bytes((mode,))
-    elif recharge_power_w is not None:
-        if type(recharge_power_w) is not int:
-            raise ProtocolError("car-recharging power must be a whole number of watts")
-        _car_charger_number(row, "p_from_car", recharge_power_w)
-        offset, replacement = 13, recharge_power_w.to_bytes(4, "little")
     else:
-        if type(minimum_voltage_v) not in (int, float):
-            raise ProtocolError("car-recharging voltage must be a finite number")
-        try:
-            scaled = Decimal(str(minimum_voltage_v)) * 100
-            if not scaled.is_finite() or scaled != scaled.to_integral_value():
-                raise ProtocolError("car-recharging voltage must use 0.01 V increments")
-            voltage = int(scaled)
-        except InvalidOperation as error:
-            raise ProtocolError("car-recharging voltage is invalid") from error
-        _car_charger_number(row, "v_from_car", voltage)
-        offset, replacement = 37, voltage.to_bytes(4, "little")
+        ((name, number),) = numbers.items()
+        field, scale = CAR_CHARGER_NUMBERS[name]
+        raw = _car_charger_raw(number, scale)
+        _car_charger_number(row, field, raw, auto_threshold)
+        # Each field's setting follows its maximum and minimum.
+        offset = 5 + _CAR_CHARGER_FIELDS.index(field) * 12 + 8
+        replacement = raw.to_bytes(4, "little")
     updated = _replace_accessory_row(
         value, CAR_CHARGERS_KEY, index, offset, replacement
     )

@@ -87,14 +87,19 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         return self.device.data["car_chargers"][0]
 
     async def test_controls_use_fresh_get_set_ack_and_immediate_targeted_readback(self):
-        for kwargs, field, expected in (
-            ({"enabled": False}, "sw", 2),
-            ({"mode": 1}, "mode", 1),
-            ({"recharge_power_w": 450}, "p_from_car_v", 450),
-            ({"minimum_voltage_v": 12.75}, "v_from_car_v", 1275),
+        for mode, rule, kwargs, field, expected in (
+            (2, None, {"enabled": False}, "sw", 2),
+            (2, None, {"mode": 1}, "mode", 1),
+            (2, None, {"recharge_power_w": 450}, "p_from_car_v", 450),
+            (2, None, {"minimum_voltage_v": 12.75}, "v_from_car_v", 1275),
+            (3, None, {"charge_power_w": 450}, "p_to_car_v", 450),
+            (3, None, {"charge_voltage_v": 12.5}, "v_to_car_v", 1250),
+            (1, True, {"auto_voltage_v": 12}, "v_auto_v", 1200),
         ):
             with self.subTest(kwargs=kwargs):
                 self.reset_device()
+                self.client.values[0x0A] = charger_value(mode=mode)
+                self.device.data["car_auto_threshold"] = rule
                 with patch.object(device_module.asyncio, "sleep", AsyncMock()) as sleep:
                     await self.device.set_car_charger(5, 1, 4, **kwargs)
                 sleep.assert_not_awaited()
@@ -168,6 +173,77 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
             [command for command, _ in self.client.requests],
             [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND] * 2,
         )
+
+    async def test_auto_voltages_follow_the_station_rule(self):
+        self.client.values[0x0A] = charger_value(mode=1)
+        for rule, offered in (
+            (True, {"auto_voltage_v"}),
+            (False, {"minimum_voltage_v", "charge_voltage_v"}),
+            (None, set()),
+        ):
+            for name in ("auto_voltage_v", "minimum_voltage_v", "charge_voltage_v"):
+                with self.subTest(rule=rule, name=name):
+                    self.device.data["car_auto_threshold"] = rule
+                    self.client.requests.clear()
+                    if name in offered:
+                        await self.device.set_car_charger(5, 1, 4, **{name: 12})
+                        self.assertEqual(len(self.client.requests), 3)
+                        continue
+                    with self.assertRaisesRegex(
+                        device_module.DjiPowerError, "mode does not use"
+                    ):
+                        await self.device.set_car_charger(5, 1, 4, **{name: 12})
+                    self.assertEqual(
+                        self.client.requests, [(duml.GET_COMMAND, b"\x00\x0a\x10")]
+                    )
+        # Both powers stay editable in Auto, whatever the rules.
+        await self.device.set_car_charger(5, 1, 4, recharge_power_w=500)
+        await self.device.set_car_charger(5, 1, 4, charge_power_w=500)
+        self.assertEqual(
+            (self.car_row()["p_from_car_v"], self.car_row()["p_to_car_v"]), (500, 500)
+        )
+
+    async def test_refresh_reads_station_rules_for_reported_chargers(self):
+        for value, expected in (
+            (bytes.fromhex("0b00") + b"11000f7001\x00", True),
+            (bytes.fromhex("0600") + b"0200fe", False),
+            (None, False),  # DJI Home also treats omitted rules as rule 0 off.
+            (b"bad", None),
+        ):
+            with self.subTest(value=value):
+                self.reset_device()
+                if value is not None:
+                    self.client.values[0x0E] = value
+                await self.device._refresh_accessory_config()
+                self.assertEqual(
+                    [payload[1] for _, payload in self.client.requests][:4],
+                    [0x0A, 0x0D, 0x04, 0x0E],
+                )
+                self.assertIs(self.device.data["car_auto_threshold"], expected)
+
+    async def test_rules_are_read_only_while_a_charger_is_reported(self):
+        self.client.values[0x0A] = b""
+        self.client.values[0x0E] = bytes.fromhex("0600") + b"010001"
+        await self.device._refresh_accessory_config()
+        self.assertNotIn((duml.GET_COMMAND, b"\x00\x0e\x10"), self.client.requests)
+        self.assertNotIn("car_auto_threshold", self.device.data)
+
+    async def test_failed_rules_read_clears_the_previous_layout(self):
+        self.client.values[0x0E] = bytes.fromhex("0600") + b"010001"
+        await self.device._refresh_accessory_config()
+        self.assertIs(self.device.data["car_auto_threshold"], True)
+        read = self.device._read_config
+
+        async def fail_rules(key, *additional_keys):
+            if key == duml.RULES_KEY:
+                raise device_module.DjiPowerError("rejected")
+            return await read(key, *additional_keys)
+
+        with patch.object(self.device, "_read_config", side_effect=fail_rules):
+            await self.device._refresh_accessory_config()
+        self.assertIsNone(self.device.data["car_auto_threshold"])
+        self.assertIsNone(self.device.data["key_0e"])
+        self.assertEqual(self.car_row()["sw"], 1)
 
     async def test_write_uses_latest_bounds_and_mode_instead_of_cached_state(self):
         await self.device._refresh_accessory_config()
@@ -373,11 +449,26 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["accessories", "sleep", "packs", "accessories"])
 
     def test_malformed_push_invalidates_accessories_and_clears_stale_controls(self):
-        self.device.data.update(car_chargers=[{}], power_switches=[{}], key_0a="old")
+        self.device.data.update(
+            car_chargers=[{}], power_switches=[{}], key_0a="old",
+            key_0e="old", car_auto_threshold=True,
+        )
         self.client.send(duml.TELEMETRY_COMMAND, b"\x0a\x10\x41\x00\x01")
         self.assertIsNone(self.device.data["car_chargers"])
         self.assertIsNone(self.device.data["power_switches"])
         self.assertIsNone(self.device.data["key_0a"])
+        self.assertIsNone(self.device.data["key_0e"])
+        self.assertIsNone(self.device.data["car_auto_threshold"])
+
+    def test_pushed_rules_update_the_auto_layout(self):
+        self.client.send(
+            duml.TELEMETRY_COMMAND,
+            duml.build_keyed_set_payload(
+                [(duml.RULES_KEY, bytes.fromhex("0b00") + b"11000f7001\x00")],
+                timestamp_ms=1,
+            ),
+        )
+        self.assertIs(self.device.data["car_auto_threshold"], True)
 
 
 class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
