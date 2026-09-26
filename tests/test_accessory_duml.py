@@ -173,7 +173,7 @@ class CarChargerBuilderTests(unittest.TestCase):
         for setting, offset, replacement in edits:
             with self.subTest(setting=setting):
                 result = duml.parse_keyed_values(edit_car(value.hex(), **setting))
-                self.assertEqual(result[0x0E], bytes.fromhex("0a00") + b"1800efffff")
+                self.assertEqual(result[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f")
                 records = duml.parse_tlvs(result[0x0A], strict=True)
                 self.assertEqual([row.tag for row in records], [0x000A, 0x000A])
                 self.assertEqual(records[0].value, unknown)
@@ -305,7 +305,7 @@ class SdcSwitchBuilderTests(unittest.TestCase):
             [row.value for row in duml.parse_tlvs(result[0x0D], strict=True)],
             [rows[0], b"\x02\x01\x01ac-tail", rows[2]],
         )
-        self.assertEqual(result[0x0E], bytes.fromhex("0a00") + b"1800efffff")
+        self.assertEqual(result[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f")
 
     def test_ac_edit_requires_valid_reported_ac_when_snapshot_supplied(self) -> None:
         for value in (
@@ -322,7 +322,7 @@ class SdcSwitchBuilderTests(unittest.TestCase):
         value = b"".join(record(0x1014, row) for row in rows)
         payload = duml.build_sdc_switch_set_payload(value, 5, 2, True, timestamp_ms=0)
         result = duml.parse_keyed_values(payload)
-        self.assertEqual(result[0x0E], bytes.fromhex("0a00") + b"1800efffff")
+        self.assertEqual(result[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f")
         records = duml.parse_tlvs(result[0x0D], strict=True)
         self.assertEqual([row.tag for row in records], [0x000D] * 3)
         self.assertEqual(
@@ -391,7 +391,7 @@ class UsbSwitchBuilderTests(unittest.TestCase):
                     )
                     result = duml.parse_keyed_values(payload)
                     self.assertEqual(
-                        result[0x0E], bytes.fromhex("0a00") + b"1800efffff"
+                        result[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f"
                     )
                     records = duml.parse_tlvs(result[0x0D], strict=True)
                     self.assertEqual([row.tag for row in records], [0x000D] * 5)

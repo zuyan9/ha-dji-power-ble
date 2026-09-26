@@ -244,9 +244,11 @@ a distinct sustaining state. Primary battery runtime is a separate reading.
 
 ## Writes and acknowledgement
 
-AC output writes use keys `0x0D` and `0x0E`. Charge-limit writes use key `0x05`, a
-six-value structure in which the integration changes only the recharge and discharge
-fields and preserves the other values from a fresh `0x05` read before writing.
+AC output writes use keys `0x0D` and `0x0E`. Key `0x0E` carries the client rules record
+that DJI Home 1.6.9 sends with its writes: a u16 LE length followed by the ASCII hex
+string `1e00efffff3f`. Charge-limit writes use key `0x05`, a six-value structure in
+which the integration changes only the recharge and discharge fields and preserves the
+other values from a fresh `0x05` read before writing.
 
 Backup reserve writes use keys `0x06` and `0x0E`. Key `0x06` holds availability
 (`1` offered), the switch (`1` on, `2` off), and the level as a u16 LE percentage.

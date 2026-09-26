@@ -191,7 +191,7 @@ class TimePeriodCodecTests(unittest.TestCase):
             "16101c00"
             "16000a000102450000001100151e"
             "16000a0002017f000000001e051e"
-            "0e100c000a0031383030656666666666",
+            "0e100e000c00316530306566666666663366",
         )
         self.assertEqual(
             set(duml.parse_keyed_values(payload)),
@@ -254,7 +254,7 @@ class TimePeriodCodecTests(unittest.TestCase):
         self.assertEqual(
             payload,
             duml.build_keyed_header(0)
-            + bytes.fromhex("161000000e100c000a0031383030656666666666"),
+            + bytes.fromhex("161000000e100e000c00316530306566666666663366"),
         )
         self.assertEqual(duml.parse_keyed_values(payload)[duml.TIME_PERIODS_KEY], b"")
         self.assertEqual(duml.parse_telemetry(payload)["time_periods"], [])
