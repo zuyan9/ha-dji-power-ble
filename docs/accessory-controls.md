@@ -1,15 +1,43 @@
-# SDC, car-charger, and USB output controls
+# SDC accessories, car-charger, and USB output controls
 
-These controls use the station's existing Bluetooth connection. SDC and car-charger
-controls are enabled on Power 1000, Power 1000 V2, and Power 2000; USB output
-switches are enabled on Power 1000 Mini. They appear when the station reports
-a supported accessory or switch record.
+These use the existing Bluetooth connection. SDC accessory readings and SDC and car-charger 
+controls are enabled on Power 1000, Power 1000 V2, and Power 2000; USB output switches are
+enabled on Power 1000 Mini.
+
+## Accessory information and input readings
+
+Each accessory reported on an SDC or SDC Lite port adds sensors to the station's device,
+named by its port:
+
+| Sensor | Value |
+| --- | --- |
+| Accessory | Accessory type, as DJI Home names it |
+| Accessory firmware | Firmware version from the station's accessory list |
+| Solar 1 power, solar 1 voltage | One solar input; a second input adds solar 2 |
+| Car recharge power, car charge power, car voltage | Car to station, station to car, and vehicle voltage |
+| Grid power, grid voltage | Grid-connection output |
+
+Recognized accessories:
+- DJI Power Car Power Outlet to SDC Power Cable (12V/24V)
+- DJI Power Solar Panel Adapter Module (MPPT)
+- 1kW Car Charger
+- 1.8kW Solar/Car Charger
+- SDC to PoE Power Cable
+
+Inputs are numbered within their kind in the station's order: the 1.8 kW charger lists
+its dedicated solar input before its shared Car/Solar input. Input sensors are added 
+when the station first reports that input. While the accessory stays attached, an input
+that carries no power reads 0 W and its voltage is unknown. All accessory sensors 
+become unavailable when the accessory is removed.
 
 ## Car chargers
 
 The integration recognizes the 1 kW Car Charger and 1.8 kW Solar/Car Charger.
 Each reported charger adds controls to its station's device, named by its SDC or
-SDC Lite port:
+SDC Lite port. The station reports car settings only while the charger's Car/Solar
+input detects a 12 V or 24 V vehicle system, as established from Power 1000 firmware.
+With solar panels on that input, the station reports no car settings and no car
+controls appear; the solar readings above remain available.
 
 | Control | Behavior |
 | --- | --- |
@@ -33,7 +61,8 @@ threshold remain configurable through DJI Home.
 
 An **SDC power** or **SDC Lite power** switch appears for each port with an explicit
 supported switch record. SDC power readings alone do not establish switch support.
-The port switch and the car-recharging switch are separate settings.
+The port switch and the car-recharging switch are separate settings. The original
+Power 1000 reports only its AC switch, so it has no SDC power switch.
 
 ## USB outputs
 
@@ -47,7 +76,9 @@ addressed switch.
 ## Discovery and confirmation
 
 Accessory discovery runs after connection setup and refreshes every 30 seconds,
-alongside expansion-pack refreshes where supported. Device pushes can update the
+alongside expansion-pack refreshes where supported. The refresh reads the charger
+settings, the switch list, and the accessory list. Telemetry reports update the
+accessory type and input readings as they arrive. Device pushes can update the
 controls sooner.
 Newly attached accessories are discovered automatically. Missing, malformed, or failed
 snapshots make the affected controls unavailable. Disconnection also makes them

@@ -137,6 +137,7 @@ class _Coordinator:
         self.async_set_car_charger = AsyncMock()
         self.async_set_sdc = AsyncMock()
         self.async_set_usb = AsyncMock()
+        self.async_set_energy_reserve = AsyncMock()
 
     def async_add_listener(self, listener):
         self.listeners.append(listener)
@@ -173,7 +174,8 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         await self._setup()
         self.assertEqual(len(self.entities), 6)  # Existing AC, TOU, limits and watts.
         self.assertEqual(self._accessories(), [])
-        self.assertEqual(len(self.coordinator.listeners), 3)
+        # Accessory discovery on three platforms, reserve discovery on two.
+        self.assertEqual(len(self.coordinator.listeners), 5)
         self.coordinator.publish(
             {
                 "car_chargers": [None, {}, _car(type=99), _car(seq=True), _car(sw=0)],
@@ -503,3 +505,166 @@ class UsbSwitchTests(unittest.IsolatedAsyncioTestCase):
                 setter.assert_awaited_once_with(interface_type, seq, True)
                 self.assertEqual(entity.is_on, seq == 1)
         self.coordinator.async_set_sdc.assert_not_awaited()
+
+
+class BackupReserveEntityTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.coordinator = _Coordinator("DJI Power 1000")
+        self.coordinator.data = {"energy_reserve_available": True}
+        self.entry = types.SimpleNamespace(
+            entry_id="station", async_on_unload=lambda unload: None
+        )
+        self.hass = types.SimpleNamespace(
+            data={"dji_power_ble": {"station": self.coordinator}}
+        )
+        self.added: list = []
+
+    async def _entities(self) -> list:
+        for platform in (switch, number):
+            await platform.async_setup_entry(self.hass, self.entry, self.added.extend)
+        return self._reserve_entities()
+
+    def _reserve_entities(self) -> list:
+        return [
+            entity
+            for entity in self.added
+            if isinstance(
+                entity,
+                (
+                    switch.DjiPowerBackupReserveSwitch,
+                    number.DjiPowerBackupReserveNumber,
+                ),
+            )
+        ]
+
+    async def test_created_only_for_validated_model_with_stable_identity(self) -> None:
+        for model in (
+            "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
+            "DJI Power 1000 Mini", "DJI Power",
+        ):
+            with self.subTest(model=model):
+                self.coordinator.device.model = model
+                self.coordinator.listeners.clear()
+                self.added.clear()
+                entities = await self._entities()
+                self.assertEqual(
+                    len(entities),
+                    2 if model not in ("DJI Power 1000 Mini", "DJI Power") else 0,
+                )
+                if entities:
+                    self.assertEqual(
+                        {entity._attr_unique_id for entity in entities},
+                        {
+                            f"{ADDRESS}_custom_backup_reserve",
+                            f"{ADDRESS}_backup_reserve_level",
+                        },
+                    )
+                    self.assertEqual(
+                        {entity._attr_name for entity in entities},
+                        {"Custom backup reserve level", "Backup reserve level"},
+                    )
+                    self.assertFalse(any(entity.available for entity in entities))
+
+    async def test_created_once_when_the_station_first_offers_the_setting(
+        self,
+    ) -> None:
+        self.coordinator.data = {"energy_reserve_available": False}
+        self.assertEqual(await self._entities(), [])
+        for data in ({}, {"energy_reserve_available": None}):
+            self.coordinator.publish(data)
+            self.assertEqual(self._reserve_entities(), [])
+        self.coordinator.last_update_success = False
+        self.coordinator.publish({"energy_reserve_available": True})
+        self.assertEqual(self._reserve_entities(), [])
+        self.coordinator.last_update_success = True
+        self.coordinator.publish({"energy_reserve_available": True})
+        entities = self._reserve_entities()
+        self.assertEqual(
+            {type(entity) for entity in entities},
+            {switch.DjiPowerBackupReserveSwitch, number.DjiPowerBackupReserveNumber},
+        )
+        self.assertEqual(len(entities), 2)
+        # Later offers add nothing; a withdrawn offer keeps the entities unavailable.
+        self.coordinator.publish({"energy_reserve_available": True})
+        self.coordinator.publish({"energy_reserve_available": False})
+        self.assertEqual(self._reserve_entities(), entities)
+        self.assertFalse(any(entity.available for entity in entities))
+
+    async def test_availability_follows_offer_switch_and_level(self) -> None:
+        reserve_switch, level = await self._entities()
+        limits = {"discharge_limit": 5, "recharge_limit": 90}
+        for data, switch_available, is_on, level_available in (
+            ({}, False, None, False),
+            (
+                {"energy_reserve_available": False, "energy_reserve_enabled": True,
+                 "energy_reserve": 80},
+                False, True, False,
+            ),
+            (
+                {"energy_reserve_available": True, "energy_reserve_enabled": False,
+                 "energy_reserve": 80},
+                True, False, False,
+            ),
+            (
+                {"energy_reserve_available": True, "energy_reserve_enabled": True,
+                 "energy_reserve": 80},
+                True, True, True,
+            ),
+            (
+                {"energy_reserve_available": True, "energy_reserve_enabled": None,
+                 "energy_reserve": 80},
+                False, None, False,
+            ),
+            (
+                {"energy_reserve_available": True, "energy_reserve_enabled": True,
+                 "energy_reserve": None},
+                True, True, False,
+            ),
+        ):
+            with self.subTest(data=data):
+                self.coordinator.data = data | limits
+                self.assertEqual(reserve_switch.available, switch_available)
+                self.assertIs(reserve_switch.is_on, is_on)
+                self.assertEqual(level.available, level_available)
+        self.assertEqual(level.native_value, None)
+        reserve = {
+            "energy_reserve_available": True,
+            "energy_reserve_enabled": True,
+            "energy_reserve": 80,
+        }
+        self.coordinator.data = reserve | limits
+        self.assertEqual(level.native_value, 80)
+        self.assertEqual((level.native_min_value, level.native_max_value), (10, 90))
+        self.coordinator.data = reserve | {"discharge_limit": 15, "recharge_limit": 100}
+        self.assertEqual((level.native_min_value, level.native_max_value), (20, 100))
+        for missing in (
+            {}, {"discharge_limit": 15, "recharge_limit": 19},
+            {"discharge_limit": None, "recharge_limit": 90},
+        ):
+            with self.subTest(limits=missing):
+                self.coordinator.data = reserve | missing
+                self.assertFalse(level.available)
+                self.assertEqual(
+                    (level.native_min_value, level.native_max_value), (0, 100)
+                )
+        self.coordinator.data = reserve | limits
+        self.coordinator.last_update_success = False
+        self.assertFalse(reserve_switch.available)
+        self.assertFalse(level.available)
+
+    async def test_services_route_only_the_requested_change(self) -> None:
+        reserve_switch, level = await self._entities()
+        await reserve_switch.async_turn_on()
+        await reserve_switch.async_turn_off()
+        await level.async_set_native_value(35.0)
+        self.assertEqual(
+            self.coordinator.async_set_energy_reserve.await_args_list,
+            [
+                unittest.mock.call(enabled=True),
+                unittest.mock.call(enabled=False),
+                unittest.mock.call(percent=35),
+            ],
+        )
+        with self.assertRaises(_ServiceValidationError):
+            await level.async_set_native_value(35.5)
+        self.assertEqual(self.coordinator.async_set_energy_reserve.await_count, 3)

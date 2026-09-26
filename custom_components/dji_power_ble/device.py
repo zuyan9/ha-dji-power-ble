@@ -14,6 +14,7 @@ from bleak.exc import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from .duml import (
+    ACCESSORIES_KEY,
     APP_SOURCE,
     AUTH_COMMAND,
     CAR_CHARGERS_KEY,
@@ -43,12 +44,14 @@ from .duml import (
     build_charge_limits_set_payload,
     build_charge_power_set_payload,
     build_discharge_power_set_payload,
+    build_energy_reserve_set_payload,
     build_power_adjustment_set_payload,
     build_sdc_switch_set_payload,
     build_time_periods_set_payload,
     build_usb_switch_set_payload,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
+    energy_reserve_bounds,
     normalize_pair_key,
     normalize_time_periods,
     parse_keyed_values,
@@ -83,6 +86,13 @@ _INITIAL_CONFIG_KEYS = (
     POWER_SWITCH_KEY,
     0x15,  # Timezone.
 )
+
+
+_RESERVE_INVALIDATION = {
+    "key_06": None,
+    "energy_reserve_available": None,
+    "energy_reserve_enabled": None,
+}
 
 
 class DjiPowerError(Exception):
@@ -258,7 +268,11 @@ class DjiPowerDevice:
             if packet.command_id == TELEMETRY_COMMAND:
                 invalidated = {"expansion_batteries": None}
                 if supports_feature(self.model, ModelFeature.SDC_CONTROLS):
-                    invalidated.update(car_chargers=None, key_0a=None)
+                    invalidated.update(
+                        car_chargers=None, key_0a=None, accessories=None, key_04=None
+                    )
+                if supports_feature(self.model, ModelFeature.RESERVE_CONTROL):
+                    invalidated.update(_RESERVE_INVALIDATION)
                 if self._reads_power_switches:
                     invalidated.update(
                         power_switches=None, key_0d=None, ac_enabled=None
@@ -750,6 +764,8 @@ class DjiPowerDevice:
             configs.append((CAR_CHARGERS_KEY, "car_chargers"))
         if self._reads_power_switches:
             configs.append((POWER_SWITCH_KEY, "power_switches"))
+        if supports_feature(self.model, ModelFeature.SDC_CONTROLS):
+            configs.append((ACCESSORIES_KEY, "accessories"))
         for key, state_key in configs:
             try:
                 await self._read_accessory_config(key, state_key)
@@ -757,6 +773,13 @@ class DjiPowerDevice:
                 raise
             except DjiPowerError as error:
                 _LOGGER.debug("Accessory configuration unavailable: %s", error)
+        if supports_feature(self.model, ModelFeature.RESERVE_CONTROL):
+            try:
+                await self._read_energy_reserve()
+            except DjiPowerDisconnectedError:
+                raise
+            except DjiPowerError as error:
+                _LOGGER.debug("Backup reserve configuration unavailable: %s", error)
 
     async def _read_accessory_config(
         self, key: int, state_key: str
@@ -875,6 +898,38 @@ class DjiPowerDevice:
         self._merge_data(invalidated)
         # An omitted or malformed record may settle on a later confirmation read.
         return {}
+
+    async def _read_energy_reserve(self) -> str:
+        """Require a fresh reserve record; unreadable state disables its controls."""
+        try:
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                update = await self._read_config(ENERGY_STORAGE_KEY)
+            current = update.get("key_06")
+            if (
+                not isinstance(current, str)
+                or update.get("energy_reserve_available") is None
+            ):
+                raise DjiPowerError("station omitted valid backup reserve state")
+        except DjiPowerDisconnectedError:
+            raise
+        except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            self._merge_data(_RESERVE_INVALIDATION)
+            raise DjiPowerError(
+                f"cannot read backup reserve configuration: {str(error) or 'timed out'}"
+            ) from error
+        return current
+
+    async def _wait_for_energy_reserve(self, expected: dict[str, object]) -> None:
+        """Confirm the reserve from fresh reads, delaying only later attempts."""
+        for attempt in range(READBACK_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(READBACK_RETRY_INTERVAL)
+            await self._read_energy_reserve()
+            if all(self.data.get(key) == value for key, value in expected.items()):
+                return
+        raise DjiPowerError("station did not report the requested backup reserve")
 
     async def _wait_for_eco_mode_values(self, expected: dict[str, object]) -> None:
         for attempt in range(READBACK_RETRIES + 1):
@@ -1137,6 +1192,38 @@ class DjiPowerDevice:
                     "recharge_limit": requested_recharge,
                 },
             )
+
+    async def set_energy_reserve(
+        self, *, enabled: bool | None = None, percent: int | None = None
+    ) -> None:
+        """Set the custom backup reserve and require a matching fresh readback."""
+        if not supports_feature(self.model, ModelFeature.RESERVE_CONTROL):
+            raise DjiPowerError("backup reserve control is not supported on this model")
+        async with self._operation_lock:
+            bounds = None
+            if percent is not None:
+                limits = await self._read_charge_limits()
+                bounds = energy_reserve_bounds(
+                    limits.get("discharge_limit"), limits.get("recharge_limit")
+                )
+                if bounds is None:
+                    raise DjiPowerError(
+                        "charge limits for the backup reserve range are unavailable"
+                    )
+            current = await self._read_energy_reserve()
+            try:
+                payload = build_energy_reserve_set_payload(
+                    current, enabled=enabled, percent=percent, bounds=bounds
+                )
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (ENERGY_STORAGE_KEY, RULES_KEY))
+            expected: dict[str, object] = {}
+            if enabled is not None:
+                expected["energy_reserve_enabled"] = enabled
+            if percent is not None:
+                expected["energy_reserve"] = percent
+            await self._wait_for_energy_reserve(expected)
 
     async def set_charge_power(self, watts: int) -> None:
         """Set Power 2000 manual recharge watts and require matching readback."""

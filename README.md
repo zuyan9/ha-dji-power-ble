@@ -17,14 +17,20 @@ used only during setup to retrieve the device's local credential.
 
 ## Features
 
-- AC output control; discharge and recharge limit controls
-- Battery level, remaining time, charging time, temperature, and charging status
-- Input, output, AC, USB, SDC, etc. power readings
-- Expansion battery devices with battery level and pack diagnostics
-- [SDC and car-charger controls](docs/accessory-controls.md) reported by the station
-- Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
-- Power 1000 Mini: individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs)
-- Firmware, timezone, display, reserve, and cloud-status diagnostics
+- Monitor:
+  - Battery level, remaining time, charging time, temperature, and charging status
+  - Input, output, AC, USB, SDC, etc. power readings
+  - Expansion battery devices with battery level and pack diagnostics
+  - Firmware, timezone, display, reserve, and cloud-status diagnostics
+- Control:
+  - AC output
+  - Discharge and recharge limit
+  - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
+  - SDC accessory [info and controls](docs/accessory-controls.md)
+- Model Specific:
+  - Power 2000: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
+  - Power 1000 Mini: individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs)
+
 
 ## Requirements
 
@@ -90,7 +96,7 @@ acknowledgements.
 
 - `0x66` HMS alarm reports remain diagnostics-only; no active-alarm entity is
   implemented.
-- SDC output-voltage data is a subtype-dependent union and is not exposed until captures
-  with real accessories establish safe entity mappings.
+- SDC rows other than recognized accessory inputs, such as drone-battery charging,
+  appear only in diagnostics until their meaning is established.
 - Cell-level BMS values are not present on the known app-facing BLE command path.
 - DJI can change the optional account-login endpoints at any time.

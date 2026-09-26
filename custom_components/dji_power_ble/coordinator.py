@@ -213,6 +213,16 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
+    async def async_set_energy_reserve(
+        self, *, enabled: bool | None = None, percent: int | None = None
+    ) -> None:
+        """Set the custom backup reserve and publish its confirmed readback."""
+        try:
+            await self.device.set_energy_reserve(enabled=enabled, percent=percent)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
     async def async_set_discharge_power(self, watts: int) -> None:
         """Set fixed discharge power and publish its confirmed readback."""
         try:

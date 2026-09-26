@@ -50,6 +50,7 @@ START_BIND = 0x00
 CHECK_SECRET_KEY = 0x01
 
 EXPANSION_BATTERIES_KEY = 0x01
+ACCESSORIES_KEY = 0x04
 CHARGE_LIMIT_KEY = 0x05
 ENERGY_STORAGE_KEY = 0x06
 CAR_CHARGERS_KEY = 0x0A
@@ -59,6 +60,9 @@ TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
 
 TIME_PERIOD_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+# DJI Home keeps the backup reserve this far above the discharge limit.
+ENERGY_RESERVE_MARGIN = 5
 
 _SET_STATE_RULES = (RULES_KEY, bytes.fromhex("0a00") + b"1800efffff")
 
@@ -328,6 +332,40 @@ def _parse_input_voltage(port: bytes) -> float | None:
     return None
 
 
+ACCESSORY_INPUT_FORMS = {1: "solar", 2: "car", 3: "grid"}
+
+
+def _parse_accessory_inputs(port: bytes) -> tuple[int, list[dict[str, object]]] | None:
+    """Decode an attached accessory's type and per-input rows.
+
+    The 17-byte 0x3038 head starts with the accessory serial number, which is
+    discarded. Row voltages are hundredths of a volt.
+    """
+    if len(port) < 8:
+        return None
+    for container in _records(parse_tlvs(port[8:]), 0x3038):
+        if len(container) < 17:
+            continue
+        inputs: list[dict[str, object]] = []
+        for rows in _records(parse_tlvs(container[17:]), 0x3039):
+            for row in _records(parse_tlvs(rows), 0x303A):
+                if len(row) < 13:
+                    continue
+                inputs.append(
+                    {
+                        "form": row[0],
+                        "form_name": ACCESSORY_INPUT_FORMS.get(row[0], "unknown"),
+                        "output_w": int.from_bytes(row[1:3], "little"),
+                        "input_w": int.from_bytes(row[3:5], "little"),
+                        "output_voltage_v": int.from_bytes(row[5:9], "little")
+                        / 100,
+                        "input_voltage_v": int.from_bytes(row[9:13], "little") / 100,
+                    }
+                )
+        return container[16], inputs
+    return None
+
+
 def parse_report(payload: bytes) -> dict[str, object]:
     """Decode a firmware-proven ``0x5a/0x61`` battery and power push."""
     data: dict[str, object] = {}
@@ -393,6 +431,8 @@ def parse_report(payload: bytes) -> dict[str, object]:
                     }
                     if (input_voltage := _parse_input_voltage(port)) is not None:
                         item["input_voltage_v"] = input_voltage
+                    if (accessory := _parse_accessory_inputs(port)) is not None:
+                        item["accessory_type"], item["accessory_inputs"] = accessory
                     interfaces.append(item)
                     group_output[group_type] = (
                         group_output.get(group_type, 0) + output_w
@@ -668,6 +708,18 @@ _CAR_CHARGER_FIELDS = (
 )
 
 
+def parse_accessories(value: bytes) -> list[dict[str, object]]:
+    """Decode attached accessory types and firmware, discarding serial numbers."""
+    accessories: list[dict[str, object]] = []
+    for record in parse_tlvs(value, strict=True):
+        row = record.value
+        if len(row) < 33:
+            raise ProtocolError("accessory records must contain at least 33 bytes")
+        if row[16]:
+            accessories.append({"type": row[16], "firmware": _ascii_field(row[17:33])})
+    return accessories
+
+
 def parse_car_chargers(value: bytes) -> list[dict[str, int]]:
     """Decode complete accessory rows, retaining unknown enum values."""
     chargers: list[dict[str, int]] = []
@@ -743,6 +795,17 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
 
     if len(storage := keyed.get(ENERGY_STORAGE_KEY, b"")) >= 3:
         data["energy_reserve"] = storage[2]
+    if ENERGY_STORAGE_KEY in keyed:
+        # The station reports availability first, then 1 for an enabled reserve.
+        data.update(energy_reserve_available=None, energy_reserve_enabled=None)
+        if len(storage) >= 4:
+            data["energy_reserve_available"] = {0: False, 1: True}.get(storage[0])
+            data["energy_reserve_enabled"] = {1: True, 2: False}.get(storage[1])
+
+    if ACCESSORIES_KEY in keyed:
+        data["accessories"] = None
+        with contextlib.suppress(ProtocolError):
+            data["accessories"] = parse_accessories(keyed[ACCESSORIES_KEY])
 
     if len(display := keyed.get(0x0C, b"")) >= 10:
         data["display_timeout_s"] = int.from_bytes(display[0:2], "little")
@@ -1102,6 +1165,65 @@ def build_charge_limits_set_payload(
     value[20:24] = discharge_limit.to_bytes(4, "little")
     return build_keyed_set_payload(
         [(CHARGE_LIMIT_KEY, bytes(value))], timestamp_ms=timestamp_ms
+    )
+
+
+def energy_reserve_bounds(
+    discharge_limit: object, recharge_limit: object
+) -> tuple[int, int] | None:
+    """Return DJI Home's backup reserve range for the station's charge limits."""
+    if type(discharge_limit) is not int or type(recharge_limit) is not int:
+        return None
+    minimum = discharge_limit + ENERGY_RESERVE_MARGIN
+    if not 0 <= minimum <= recharge_limit <= 100:
+        return None
+    return minimum, recharge_limit
+
+
+def build_energy_reserve_set_payload(
+    current_value: str | bytes,
+    *,
+    enabled: bool | None = None,
+    percent: int | None = None,
+    bounds: tuple[int, int] | None = None,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Build a custom backup reserve SET, preserving availability and any tail.
+
+    A level change requires the range derived from fresh charge limits, because
+    the station stores any byte without checking it.
+    """
+    try:
+        value = bytearray(
+            bytes.fromhex(current_value)
+            if isinstance(current_value, str)
+            else current_value
+        )
+    except ValueError as error:
+        raise ProtocolError("backup reserve state is not valid hex") from error
+    if len(value) < 4:
+        raise ProtocolError("backup reserve state must contain four bytes")
+    if value[0] != 1:
+        raise ProtocolError("the station does not offer a custom backup reserve")
+    if enabled is None and percent is None:
+        raise ProtocolError("no backup reserve change was requested")
+    if enabled is None and value[1] not in (1, 2):
+        raise ProtocolError("the station reported an unknown backup reserve state")
+    if enabled is not None:
+        value[1] = 1 if enabled else 2
+    if percent is not None:
+        if bounds is None:
+            raise ProtocolError("the backup reserve range is unavailable")
+        minimum, maximum = bounds
+        if type(percent) is not int or not minimum <= percent <= maximum:
+            raise ProtocolError(
+                f"backup reserve must be a whole percentage from {minimum} to "
+                f"{maximum}, above the discharge limit and within the recharge limit"
+            )
+        value[2:4] = percent.to_bytes(2, "little")
+    return build_keyed_set_payload(
+        [(ENERGY_STORAGE_KEY, bytes(value)), _SET_STATE_RULES],
+        timestamp_ms=timestamp_ms,
     )
 
 

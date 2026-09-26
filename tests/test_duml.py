@@ -28,15 +28,36 @@ def interface(
     input_w: int,
     *,
     input_voltage_mv: int | None = None,
+    accessory: bytes | None = None,
 ) -> bytes:
     value = bytes((sequence, interface_type, 0))
     value += output_w.to_bytes(2, "little")
     value += input_w.to_bytes(2, "little")
     value += b"\x00"
+    if accessory is not None:
+        value += record(0x3038, accessory)
     if input_voltage_mv is not None:
         voltage = b"\x01" + input_voltage_mv.to_bytes(2, "little") + b"\x00" * 6
         value += record(0x3035, record(0x3036, voltage))
     return record(0x3034, value)
+
+
+def accessory_input(
+    form: int, output_w: int, input_w: int, output_v: int, input_v: int
+) -> bytes:
+    row = bytes((form,)) + output_w.to_bytes(2, "little")
+    row += input_w.to_bytes(2, "little") + output_v.to_bytes(4, "little")
+    row += input_v.to_bytes(4, "little")
+    return record(0x303A, row)
+
+
+def accessory_report(
+    accessory_type: int, *rows: bytes, serial: bytes = b"TEST-ACCESSORY01"
+) -> bytes:
+    """Build a synthetic 0x3038 value: serial and type head, then nested rows."""
+    return serial.ljust(16, b"\x00") + bytes((accessory_type,)) + record(
+        0x3039, b"".join(rows)
+    )
 
 
 def group(group_type: int, *interfaces: bytes) -> bytes:
@@ -867,6 +888,146 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(parsed["sdc_input_w"], 11)
         self.assertEqual(parsed["interfaces"][-1]["input_voltage_v"], 51.234)
 
+    def test_accessory_helper_matches_station_framing(self) -> None:
+        accessory = accessory_report(
+            4,
+            accessory_input(1, 0, 39, 0, 3890),
+            accessory_input(1, 0, 43, 0, 4012),
+        )
+
+        # Raw 17-byte head, then a nested 0x3039 list of 13-byte 0x303A rows.
+        self.assertEqual(
+            record(0x3038, accessory).hex(),
+            "38303700"
+            + b"TEST-ACCESSORY01".hex()
+            + "04"
+            + "39302200"
+            + "3a300d00" + "01" + "0000" + "2700" + "00000000" + "320f0000"
+            + "3a300d00" + "01" + "0000" + "2b00" + "00000000" + "ac0f0000",
+        )
+
+    def test_sdc_accessory_inputs_decode_without_serial(self) -> None:
+        accessory = accessory_report(
+            4,
+            accessory_input(1, 0, 43, 0, 4012),
+            accessory_input(1, 0, 39, 1, 3890),
+        )
+        interfaces = record(
+            0x3031,
+            group(2, interface(1, 2, 19, 0))
+            + group(
+                4,
+                interface(1, 5, 0, 82, accessory=accessory, input_voltage_mv=51234),
+            ),
+        )
+
+        parsed = duml.parse_report(
+            record(0x3030, bytes.fromhex("13005200") + interfaces)
+        )
+
+        ac, sdc = parsed["interfaces"]
+        self.assertNotIn("accessory_type", ac)
+        self.assertEqual(sdc["accessory_type"], 4)
+        self.assertEqual(
+            sdc["accessory_inputs"],
+            [
+                {
+                    "form": 1,
+                    "form_name": "solar",
+                    "output_w": 0,
+                    "input_w": 43,
+                    "output_voltage_v": 0.0,
+                    "input_voltage_v": 40.12,
+                },
+                {
+                    "form": 1,
+                    "form_name": "solar",
+                    "output_w": 0,
+                    "input_w": 39,
+                    "output_voltage_v": 0.01,
+                    "input_voltage_v": 38.9,
+                },
+            ],
+        )
+        self.assertEqual(sdc["input_voltage_v"], 51.234)
+        self.assertEqual(parsed["sdc_1_input_w"], 82)
+        self.assertNotIn("TEST-ACCESSORY", repr(parsed))
+
+    def test_accessory_rows_keep_order_forms_and_full_width_values(self) -> None:
+        accessory = accessory_report(
+            3,
+            accessory_input(2, 700, 0, 1380, 0),
+            accessory_input(3, 0, 0xFFFF, 0, 0xFFFFFFFF),
+            accessory_input(9, 1, 2, 3, 4),
+            serial=b"S" * 16,
+        )
+
+        parsed = duml.parse_report(
+            record(
+                0x3030,
+                bytes(4)
+                + record(0x3031, group(4, interface(2, 5, 0, 0, accessory=accessory))),
+            )
+        )
+
+        (sdc,) = parsed["interfaces"]
+        self.assertEqual(sdc["accessory_type"], 3)
+        self.assertEqual(
+            [
+                (row["form"], row["form_name"], row["output_w"], row["input_w"])
+                for row in sdc["accessory_inputs"]
+            ],
+            [(2, "car", 700, 0), (3, "grid", 0, 65535), (9, "unknown", 1, 2)],
+        )
+        self.assertEqual(sdc["accessory_inputs"][0]["output_voltage_v"], 13.8)
+        self.assertEqual(
+            sdc["accessory_inputs"][1]["input_voltage_v"], 0xFFFFFFFF / 100
+        )
+        self.assertNotIn("SSSS", repr(parsed))
+
+    def test_empty_or_malformed_accessory_records_do_not_hide_port_data(self) -> None:
+        valid_row = accessory_input(1, 0, 43, 0, 4012)
+        cases = {
+            "empty container": b"",
+            "short head": b"TEST-ACCESSORY01",
+            "head without rows": accessory_report(4)[:17],
+            "empty row list": accessory_report(4),
+            "short row": accessory_report(4, record(0x303A, bytes(12)), valid_row),
+            "unknown child": accessory_report(4) + record(0x3040, b"\x01"),
+            "truncated rows": accessory_report(4, valid_row)[:-3],
+        }
+        expected_inputs = {
+            "empty container": None,
+            "short head": None,
+            "head without rows": [],
+            "empty row list": [],
+            "short row": [43],
+            "unknown child": [],
+            "truncated rows": [],
+        }
+        for name, accessory in cases.items():
+            with self.subTest(name):
+                interfaces = record(
+                    0x3031, group(4, interface(1, 5, 0, 43, accessory=accessory))
+                )
+
+                parsed = duml.parse_report(
+                    record(0x3030, bytes.fromhex("00002b00") + interfaces)
+                )
+
+                (sdc,) = parsed["interfaces"]
+                self.assertEqual(parsed["sdc_1_input_w"], 43)
+                self.assertEqual(sdc["input_w"], 43)
+                if expected_inputs[name] is None:
+                    self.assertNotIn("accessory_type", sdc)
+                    self.assertNotIn("accessory_inputs", sdc)
+                else:
+                    self.assertEqual(sdc["accessory_type"], 4)
+                    self.assertEqual(
+                        [row["input_w"] for row in sdc["accessory_inputs"]],
+                        expected_inputs[name],
+                    )
+
     def test_battery_time_type_drives_charging_independent_of_power(self) -> None:
         for time_type, expected in ((0, False), (1, True), (2, False), (255, None)):
             for input_w, output_w in ((0, 500), (516, 500)):
@@ -912,6 +1073,172 @@ class ReportTests(unittest.TestCase):
                 self.assertNotIn("charging", parsed)
                 self.assertNotIn("battery_time_type", parsed)
                 self.assertNotIn("runtime_min", parsed)
+
+
+def keyed(key: int, value: bytes) -> bytes:
+    return duml.build_keyed_set_payload([(key, value)], timestamp_ms=0)
+
+
+def accessory_row(
+    accessory_type: int,
+    firmware: bytes = b"00.00.03.20",
+    serial: bytes = b"TEST-ACCESSORY01",
+) -> bytes:
+    return record(
+        0x1011, serial.ljust(16, b"\x00") + bytes((accessory_type,))
+        + firmware.ljust(16, b"\x00")
+    )
+
+
+class AccessoryListTests(unittest.TestCase):
+    def test_types_and_firmware_decode_in_order_without_serials(self) -> None:
+        value = accessory_row(4) + accessory_row(0) + accessory_row(3, b"01.02.03.04")
+
+        parsed = duml.parse_telemetry(keyed(duml.ACCESSORIES_KEY, value))
+
+        self.assertEqual(
+            parsed["accessories"],
+            [
+                {"type": 4, "firmware": "00.00.03.20"},
+                {"type": 3, "firmware": "01.02.03.04"},
+            ],
+        )
+        self.assertEqual(parsed["key_04"], value.hex())
+        del parsed["key_04"]
+        self.assertNotIn("TEST-ACCESSORY", repr(parsed))
+
+    def test_empty_list_clears_and_missing_key_preserves(self) -> None:
+        self.assertEqual(
+            duml.parse_telemetry(keyed(duml.ACCESSORIES_KEY, b""))["accessories"], []
+        )
+        self.assertNotIn("accessories", duml.parse_telemetry(CAPTURED_KEYED_CONFIG))
+
+    def test_malformed_list_invalidates_only_accessories(self) -> None:
+        for value in (
+            record(0x1011, bytes(32)),
+            accessory_row(4)[:-1],
+            accessory_row(4) + b"\x00",
+        ):
+            with self.subTest(value=value.hex()):
+                payload = duml.build_keyed_set_payload(
+                    [(duml.ACCESSORIES_KEY, value), (0x02, b"\x01")],
+                    timestamp_ms=0,
+                )
+
+                parsed = duml.parse_telemetry(payload)
+
+                self.assertIsNone(parsed["accessories"])
+                self.assertTrue(parsed["cloud_connected"])
+
+    def test_unreadable_firmware_is_unknown(self) -> None:
+        for firmware in (b"", b"\xff\xfe"):
+            with self.subTest(firmware=firmware):
+                parsed = duml.parse_telemetry(
+                    keyed(duml.ACCESSORIES_KEY, accessory_row(4, firmware))
+                )
+
+                self.assertEqual(parsed["accessories"], [{"type": 4, "firmware": None}])
+
+
+class EnergyReserveTests(unittest.TestCase):
+    def test_reserve_state_decodes_availability_switch_and_level(self) -> None:
+        for value, available, enabled in (
+            ("01015000", True, True),
+            ("01025000", True, False),
+            ("00022300", False, False),
+            ("01035000", True, None),
+            ("02015000", None, True),
+        ):
+            with self.subTest(value=value):
+                parsed = duml.parse_telemetry(
+                    keyed(duml.ENERGY_STORAGE_KEY, bytes.fromhex(value))
+                )
+
+                self.assertIs(parsed["energy_reserve_available"], available)
+                self.assertIs(parsed["energy_reserve_enabled"], enabled)
+                self.assertEqual(parsed["energy_reserve"], bytes.fromhex(value)[2])
+
+    def test_short_record_clears_controls_but_keeps_existing_level_rule(self) -> None:
+        parsed = duml.parse_telemetry(
+            keyed(duml.ENERGY_STORAGE_KEY, bytes.fromhex("010150"))
+        )
+        self.assertIsNone(parsed["energy_reserve_available"])
+        self.assertIsNone(parsed["energy_reserve_enabled"])
+        self.assertEqual(parsed["energy_reserve"], 80)
+        self.assertNotIn(
+            "energy_reserve_enabled", duml.parse_telemetry(keyed(0x02, b"\x01"))
+        )
+
+    def test_range_follows_discharge_margin_and_recharge_limit(self) -> None:
+        for discharge, recharge, expected in (
+            (5, 90, (10, 90)),
+            (0, 70, (5, 70)),
+            (15, 100, (20, 100)),
+            (15, 20, (20, 20)),
+            (15, 19, None),
+            (5, 101, None),
+            (-10, 90, None),
+            (None, 90, None),
+            (5, True, None),
+            (5.0, 90, None),
+        ):
+            with self.subTest(discharge=discharge, recharge=recharge):
+                self.assertEqual(
+                    duml.energy_reserve_bounds(discharge, recharge), expected
+                )
+
+    def test_set_changes_only_requested_fields_and_carries_rules(self) -> None:
+        current = "01025000ffee"
+        for kwargs, expected in (
+            ({"enabled": True}, "01015000ffee"),
+            ({"enabled": False}, "01025000ffee"),
+            ({"percent": 10}, "01020a00ffee"),
+            ({"percent": 90}, "01025a00ffee"),
+            ({"enabled": True, "percent": 35}, "01012300ffee"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                payload = duml.build_energy_reserve_set_payload(
+                    current, bounds=(10, 90), timestamp_ms=0, **kwargs
+                )
+
+                entries = duml.parse_keyed_values(payload)
+                self.assertEqual(entries[duml.ENERGY_STORAGE_KEY].hex(), expected)
+                self.assertEqual(entries[duml.RULES_KEY], b"\x0a\x00" + b"1800efffff")
+                self.assertEqual(
+                    list(entries), [duml.ENERGY_STORAGE_KEY, duml.RULES_KEY]
+                )
+                self.assertEqual(payload[:16], duml.build_keyed_header(0))
+
+    def test_set_rejects_unoffered_unknown_or_out_of_range_changes(self) -> None:
+        for current, kwargs in (
+            ("00025000", {"enabled": True}),
+            ("02025000", {"percent": 50}),
+            ("01035000", {"percent": 50}),
+            ("01025000", {}),
+            ("01025000", {"percent": 9}),
+            ("01025000", {"percent": 91}),
+            ("01025000", {"percent": 50.0}),
+            ("01025000", {"percent": True}),
+            ("01025000", {"percent": 50, "bounds": None}),
+            ("01025000", {"percent": 60, "bounds": (20, 55)}),
+            ("010250", {"enabled": True}),
+            ("zz025000", {"enabled": True}),
+        ):
+            with (
+                self.subTest(current=current, kwargs=kwargs),
+                self.assertRaises(duml.ProtocolError),
+            ):
+                duml.build_energy_reserve_set_payload(
+                    current, **({"bounds": (10, 90)} | kwargs)
+                )
+
+    def test_explicit_switch_replaces_an_unknown_reported_state(self) -> None:
+        payload = duml.build_energy_reserve_set_payload(
+            bytes.fromhex("01035000"), enabled=False, timestamp_ms=0
+        )
+        self.assertEqual(
+            duml.parse_keyed_values(payload)[duml.ENERGY_STORAGE_KEY].hex(), "01025000"
+        )
 
 
 class AdvertisementTests(unittest.TestCase):

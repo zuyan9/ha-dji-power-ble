@@ -13,6 +13,7 @@ from homeassistant.const import (
     CONF_ADDRESS,
     PERCENTAGE,
     EntityCategory,
+    UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
     UnitOfTemperature,
@@ -25,6 +26,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .accessory import (
+    SDC_ACCESSORY_NAMES,
+    PortIdentity,
+    accessory_firmware,
+    accessory_inputs,
+    port_name,
+    reported_sdc_accessories,
+)
 from .const import DOMAIN
 from .coordinator import DjiPowerCoordinator
 from .entity import DjiPowerEntity
@@ -258,6 +267,24 @@ EXPANSION_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
 )
 
 
+# Per-input readings by input kind: unique-ID suffix, name, and row field.
+INPUT_METRICS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "solar": (
+        ("power", "power", "input_w"),
+        ("voltage", "voltage", "input_voltage_v"),
+    ),
+    "car": (
+        ("recharge_power", "recharge power", "input_w"),
+        ("charge_power", "charge power", "output_w"),
+        ("voltage", "voltage", "voltage"),
+    ),
+    "grid": (
+        ("power", "power", "output_w"),
+        ("voltage", "voltage", "output_voltage_v"),
+    ),
+}
+
+
 def _expansion_batteries(coordinator: DjiPowerCoordinator) -> dict[str, dict]:
     """Return the current packs with stable identities."""
     return {
@@ -333,6 +360,43 @@ async def async_setup_entry(
         coordinator.async_add_listener(async_discover_expansion_batteries)
     )
     async_discover_expansion_batteries()
+
+    if not supports_feature(coordinator.device.model, ModelFeature.SDC_CONTROLS):
+        return
+    seen: set[tuple] = set()
+
+    @callback
+    def async_discover_sdc_accessories() -> None:
+        """Add each reported accessory's identity and input readings once."""
+        if not coordinator.last_update_success:
+            return
+        entities: list[SensorEntity] = []
+        ports = reported_sdc_accessories(coordinator.data or {})
+        for identity, port in ports.items():
+            for factory in (
+                DjiPowerSdcAccessorySensor,
+                DjiPowerSdcAccessoryFirmwareSensor,
+            ):
+                if (identity, factory) not in seen:
+                    seen.add((identity, factory))
+                    entities.append(factory(coordinator, identity))
+            for form, ordinal in accessory_inputs(port):
+                for metric in INPUT_METRICS[form]:
+                    token = identity, form, ordinal, metric[0]
+                    if token not in seen:
+                        seen.add(token)
+                        entities.append(
+                            DjiPowerSdcInputSensor(
+                                coordinator, identity, form, ordinal, metric
+                            )
+                        )
+        if entities:
+            async_add_entities(entities)
+
+    entry.async_on_unload(
+        coordinator.async_add_listener(async_discover_sdc_accessories)
+    )
+    async_discover_sdc_accessories()
 
 
 class DjiPowerSensor(DjiPowerEntity, SensorEntity):
@@ -436,3 +500,114 @@ class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEnti
     def native_value(self) -> float | int | None:
         pack = _expansion_batteries(self.coordinator).get(self._serial, {})
         return pack.get(self.entity_description.key)
+
+
+class _DjiPowerSdcSensor(DjiPowerEntity, SensorEntity):
+    """A reading for the accessory attached to one SDC-family port."""
+
+    def __init__(
+        self,
+        coordinator: DjiPowerCoordinator,
+        identity: PortIdentity,
+        key: str,
+        name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._identity = identity
+        interface_type, seq = identity
+        self._attr_name = f"{port_name(interface_type, seq)} {name}"
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_{interface_type}_{seq}_{key}"
+        )
+
+    @property
+    def port(self) -> dict | None:
+        return reported_sdc_accessories(self.coordinator.data or {}).get(
+            self._identity
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.port is not None
+
+
+class DjiPowerSdcAccessorySensor(_DjiPowerSdcSensor):
+    """The attached accessory, named as DJI Home names it."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_options = list(SDC_ACCESSORY_NAMES.values())
+    _attr_translation_key = "sdc_accessory"
+
+    def __init__(
+        self, coordinator: DjiPowerCoordinator, identity: PortIdentity
+    ) -> None:
+        super().__init__(coordinator, identity, "accessory", "accessory")
+
+    @property
+    def native_value(self) -> str | None:
+        port = self.port
+        return SDC_ACCESSORY_NAMES.get(port["accessory_type"]) if port else None
+
+
+class DjiPowerSdcAccessoryFirmwareSensor(_DjiPowerSdcSensor):
+    """The attached accessory's firmware from the station's accessory list."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: DjiPowerCoordinator, identity: PortIdentity
+    ) -> None:
+        super().__init__(
+            coordinator, identity, "accessory_firmware", "accessory firmware"
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.native_value is not None
+
+    @property
+    def native_value(self) -> str | None:
+        return accessory_firmware(self.coordinator.data or {}, self._identity)
+
+
+class DjiPowerSdcInputSensor(_DjiPowerSdcSensor):
+    """Power or voltage of one numbered accessory input.
+
+    An attached accessory omits inputs that carry no power, so their power is 0.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: DjiPowerCoordinator,
+        identity: PortIdentity,
+        form: str,
+        ordinal: int,
+        metric: tuple[str, str, str],
+    ) -> None:
+        key, name, self._field = metric
+        self._slot = form, ordinal
+        label = form if ordinal == 1 and form != "solar" else f"{form} {ordinal}"
+        super().__init__(
+            coordinator, identity, f"{form}_{ordinal}_{key}", f"{label} {name}"
+        )
+        if self._field.endswith("_w"):
+            self._attr_device_class = SensorDeviceClass.POWER
+            self._attr_native_unit_of_measurement = UnitOfPower.WATT
+        else:
+            self._attr_device_class = SensorDeviceClass.VOLTAGE
+            self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+
+    @property
+    def native_value(self) -> float | int | None:
+        port = self.port
+        if port is None:
+            return None
+        row = accessory_inputs(port).get(self._slot)
+        if row is None:
+            return 0 if self._field.endswith("_w") else None
+        if self._field == "voltage":
+            return row.get("input_voltage_v") or row.get("output_voltage_v")
+        return row.get(self._field)

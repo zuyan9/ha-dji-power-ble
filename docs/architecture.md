@@ -67,11 +67,13 @@ separate Home Assistant device linked to the station. Pack serial numbers identi
 devices and entities independently of connection order. Missing packs retain their
 registry entries and history with unavailable sensors, including after a reload.
 
-On these same models, optional SDC switch and car-charger configuration is first read
-in the background after setup, then refreshed with the packs every 30 seconds. Power
-1000 Mini reads its switch list on the same schedule for USB output switches, without
-pack reads. The entity platforms discover controls from supported reported rows,
-identified by interface, port sequence, and charger type. Missing or invalid snapshots invalidate
+On these same models, optional SDC switch, car-charger, and accessory-list
+configuration is first read in the background after setup, then refreshed with the
+packs every 30 seconds, together with the backup reserve setting. Power 1000 Mini
+reads its switch list on the same schedule for USB output switches, without pack
+reads. The entity platforms discover controls from supported reported rows,
+identified by interface, port sequence, and charger type, and add the backup reserve
+controls once the station offers that setting. Missing or invalid snapshots invalidate
 the affected controls without removing their entities. These controls remain on the
 station's device and use its existing connection.
 
@@ -82,6 +84,9 @@ builder changes only the requested limit fields and preserves the station's othe
 values. Every SET must return a zero status for every requested key. The client then
 polls configuration until the requested state is observed, preventing a successful GATT
 write from being mistaken for an applied setting.
+
+Backup reserve writes use keys `0x06` and `0x0E` and change only the requested switch
+or level after a fresh `0x06` read.
 
 AC, SDC, and USB switches read and preserve the complete switch list before editing
 their own row. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
@@ -114,4 +119,6 @@ pair-key authentication. Treat captures as sensitive even when payloads are encr
 Never publish pair keys, DJI account tokens, passwords, serial numbers, BLE addresses,
 or raw captures containing them. Downloaded diagnostics redact the name, address, pair key,
 and serial number; account passwords and member tokens are transient and are not stored.
-Expansion-pack serial numbers and the raw keyed record containing them are also redacted.
+Expansion-pack serial numbers and the raw keyed records that carry pack, parallel-device,
+or accessory serial numbers are also redacted. Accessory serial numbers in telemetry
+reports are discarded during decoding.
