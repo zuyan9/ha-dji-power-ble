@@ -146,6 +146,8 @@ class _Coordinator:
         self.async_set_car_charger = AsyncMock()
         self.async_set_sdc = AsyncMock()
         self.async_set_usb = AsyncMock()
+        self.async_set_ac = AsyncMock()
+        self.async_set_port_switch = AsyncMock()
         self.async_set_energy_reserve = AsyncMock()
 
     def async_add_listener(self, listener):
@@ -177,15 +179,19 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             )
 
     def _accessories(self) -> list:
-        return [entity for entity in self.entities if hasattr(entity, "_identity")]
+        return [
+            entity for entity in self.entities
+            if hasattr(entity, "_identity")
+            and not isinstance(entity, (switch.DjiPowerAcSwitch,
+                                        switch.DjiPowerCarOutletSwitch))
+        ]
 
     async def test_no_guessed_entities_and_listeners_clean_up(self) -> None:
         await self._setup()
-        self.assertEqual(len(self.entities), 6)  # Existing AC, TOU, limits and watts.
+        self.assertEqual(len(self.entities), 2)  # Only limits precede discovery.
         self.assertEqual(self._accessories(), [])
-        # Accessory discovery on three platforms plus USB switches, reserve
-        # discovery on two.
-        self.assertEqual(len(self.coordinator.listeners), 6)
+        # Port, accessory, reserve and Eco discovery unsubscribe on unload.
+        self.assertEqual(len(self.coordinator.listeners), 9)
         self.coordinator.publish(
             {
                 "car_chargers": [None, {}, _car(type=99), _car(seq=True), _car(sw=0)],
@@ -205,6 +211,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.data = {
             "car_chargers": [_car()],
             "power_switches": [{"type": 5, "seq": 1, "sw": 2}],
+            "station_rules": [11],
         }
         await self._setup()
         self.assertEqual(len(self._accessories()), 8)
@@ -244,6 +251,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         report = {
             "car_chargers": [_car(interface_type=6, seq=7, type=3)],
             "power_switches": [{"type": 6, "seq": 7, "sw": 1}],
+            "station_rules": [11],
         }
         self.coordinator.publish(report)
         original = list(self._accessories())
@@ -301,7 +309,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 {"type": 3, "seq": 1, "sw": 1},
                 {"type": 5, "seq": 1, "sw": 1},
             ],
-            "port_switches_offered": True,
+            "station_rules": [11],
         }
         await self._setup()
         names = [entity._attr_name for entity in self._accessories()]
@@ -333,14 +341,14 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(usb, [])
                 for offered in (None, False):
                     self.coordinator.publish(
-                        self.coordinator.data | {"port_switches_offered": offered}
+                        self.coordinator.data | {"station_rules": offered}
                     )
                     self.assertFalse(any(
                         isinstance(entity, switch.DjiPowerUsbSwitch)
                         for entity in self.entities
                     ))
                 self.coordinator.publish(
-                    self.coordinator.data | {"port_switches_offered": True}
+                    self.coordinator.data | {"station_rules": [11]}
                 )
                 usb = [
                     entity for entity in self.entities
@@ -351,11 +359,11 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(usb[0].available)
                 self.coordinator.publish(
-                    self.coordinator.data | {"port_switches_offered": None}
+                    self.coordinator.data | {"station_rules": None}
                 )
                 self.assertFalse(usb[0].available)
 
-    async def test_usb_model_creates_only_reported_usb_switches(self) -> None:
+    async def test_mini_discovers_supported_car_sdc_and_usb_rows(self) -> None:
         self.coordinator.device.model = "DJI Power 1000 Mini"
         self.coordinator.data = {
             "car_chargers": [_car()],
@@ -366,18 +374,21 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 {"type": 4, "seq": 2, "sw": 2},
                 {"type": 4, "seq": 1, "sw": 0},
             ],
-            "port_switches_offered": True,
+            "station_rules": [11],
         }
         await self._setup()
-        self.assertEqual(len(self.coordinator.listeners), 1)
+        self.assertEqual(len(self.coordinator.listeners), 9)
+        self.assertIn("SDC 1 power", [e._attr_name for e in self._accessories()])
+        self.assertIn(
+            "SDC 1 car recharging", [e._attr_name for e in self._accessories()]
+        )
+        usb = [
+            e for e in self._accessories() if isinstance(e, switch.DjiPowerUsbSwitch)
+        ]
         self.assertEqual(
-            [entity._attr_name for entity in self._accessories()],
+            [entity._attr_name for entity in usb],
             ["USB-A1 output", "USB-C2 output"],
         )
-        self.assertTrue(all(
-            isinstance(entity, switch.DjiPowerUsbSwitch)
-            for entity in self._accessories()
-        ))
         self.coordinator.publish(
             self.coordinator.data
             | {
@@ -390,13 +401,63 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertEqual(
-            [entity._attr_name for entity in self._accessories()],
+            [entity._attr_name for entity in self._accessories()
+             if isinstance(entity, switch.DjiPowerUsbSwitch)],
             ["USB-A1 output", "USB-C2 output", "USB-A2 output", "USB-C1 output"],
         )
         self.assertEqual(
-            [entity.is_on for entity in self._accessories()],
+            [entity.is_on for entity in self._accessories()
+             if isinstance(entity, switch.DjiPowerUsbSwitch)],
             [False, True, True, True],
         )
+
+    async def test_all_port_types_share_discovery_and_rule_loss_policy(self) -> None:
+        self.coordinator.device.model = "DJI Power 1000 Mini"
+        await self._setup()
+        self.assertFalse(any(
+            isinstance(entity, switch._DjiPowerPortSwitch) for entity in self.entities
+        ))
+        rows = [
+            {"type": interface_type, "seq": seq, "sw": 1}
+            for interface_type, seq in ((2, 1), (2, 2), (7, 1), (3, 1),
+                                        (4, 2), (5, 1), (6, 1))
+        ]
+        self.coordinator.publish({"power_switches": rows})
+        def ports():
+            return {
+                entity._identity[:2]: entity for entity in self.entities
+                if isinstance(entity, switch._DjiPowerPortSwitch)
+            }
+
+        self.assertEqual(set(ports()), {(2, 1), (2, 2), (7, 1)})
+        self.assertEqual(ports()[2, 1]._attr_unique_id, f"{ADDRESS}_ac_output")
+        self.assertEqual(ports()[2, 2]._attr_unique_id, f"{ADDRESS}_2_2_ac_output")
+        await ports()[2, 1].async_turn_on()
+        self.coordinator.async_set_ac.assert_awaited_once_with(True)
+        for identity in ((2, 2), (7, 1)):
+            setter = self.coordinator.async_set_port_switch
+            setter.reset_mock()
+            await ports()[identity].async_turn_off()
+            setter.assert_awaited_once_with(*identity, False)
+            self.assertTrue(ports()[identity].is_on)
+
+        offered = {"power_switches": rows, "station_rules": [11]}
+        self.coordinator.publish(offered)
+        original = ports()
+        self.assertEqual(len(original), 7)
+        self.assertTrue(all(entity.available for entity in original.values()))
+        for rules in (None, [], [True], "11"):
+            self.coordinator.publish(offered | {"station_rules": rules})
+            self.assertEqual(
+                {identity for identity, entity in original.items() if entity.available},
+                {(2, 1), (2, 2), (7, 1)},
+            )
+        self.coordinator.publish(offered | {"power_switches": rows + [rows[0]]})
+        self.assertFalse(original[2, 1].available)
+        self.coordinator.publish(offered)
+        self.assertEqual(ports(), original)
+        self.assertTrue(all(entity.available for entity in original.values()))
+        self.assertEqual(len({e._attr_unique_id for e in original.values()}), 7)
 
 
 class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
@@ -406,6 +467,7 @@ class AccessoryControlTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.data = {
             "car_chargers": [self.row],
             "power_switches": [{"type": 5, "seq": 1, "sw": 1}],
+            "station_rules": [11],
         }
         self.master = switch.DjiPowerCarRechargingSwitch(self.coordinator, (5, 1, 4))
         self.mode = select.DjiPowerCarModeSelect(self.coordinator, (5, 1, 4))
@@ -627,7 +689,7 @@ class UsbSwitchTests(unittest.IsolatedAsyncioTestCase):
             {"type": 4, "seq": 2, "sw": 2},
         ]
         self.coordinator.data = {
-            "power_switches": self.rows, "port_switches_offered": True
+            "power_switches": self.rows, "station_rules": [11]
         }
         self.switches = {
             (row["type"], row["seq"]): switch.DjiPowerUsbSwitch(
@@ -640,7 +702,7 @@ class UsbSwitchTests(unittest.IsolatedAsyncioTestCase):
         for offered in (None, False, 1, "true"):
             with self.subTest(offered=offered):
                 self.coordinator.data = {
-                    "power_switches": self.rows, "port_switches_offered": offered
+                    "power_switches": self.rows, "station_rules": offered
                 }
                 self.assertTrue(
                     all(not entity.available for entity in self.switches.values())
@@ -740,7 +802,7 @@ class BackupReserveEntityTests(unittest.IsolatedAsyncioTestCase):
                 entities = await self._entities()
                 self.assertEqual(
                     len(entities),
-                    2 if model not in ("DJI Power 1000 Mini", "DJI Power") else 0,
+                    2 if model != "DJI Power" else 0,
                 )
                 if entities:
                     self.assertEqual(

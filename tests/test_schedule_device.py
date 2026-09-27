@@ -16,6 +16,9 @@ from tests.test_device import (
 )
 from tests.test_duml import SYNTHETIC_ECO_MODE
 
+AVAILABLE_ECO = b"\x01" + SYNTHETIC_ECO_MODE[1:]
+STATION_RULES = b"\x08\x00" + b"08002000"
+
 PEAK = {"type": "peak", "start": "17:00", "end": "20:00"}
 OFF_PEAK = {"type": "off_peak", "start": "00:30", "end": "05:30"}
 # Independent synthetic readback fixture. The app reads rows by their enclosing
@@ -34,7 +37,7 @@ class TimePeriodsClient(StationClient):
 
     def __init__(self, device):
         super().__init__(device, encrypted=False)
-        self.values = {0x16: PEAK_VALUE, 0x18: SYNTHETIC_ECO_MODE}
+        self.values = {0x16: PEAK_VALUE, 0x18: AVAILABLE_ECO, 0x0E: STATION_RULES}
         self.ack = {0x16: bytes(4), 0x0E: bytes(4)}
         self.apply_set = True
         self.did_set = False
@@ -59,7 +62,7 @@ class TimePeriodsClient(StationClient):
             assert requested[0x0E] == b"\x0c\x00" + b"1e00efffff3f"
             self.did_set = True
             if self.apply_set and self.ack == {0x16: bytes(4), 0x0E: bytes(4)}:
-                self.values.update(requested)
+                self.values[0x16] = requested[0x16]
             reply = duml.build_keyed_set_payload(self.ack.items(), timestamp_ms=1)
         else:
             raise AssertionError(f"unexpected command {request.command_id}")
@@ -79,16 +82,12 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(sleeper.stop)
 
     def set_mode(self, mode):
-        eco = bytearray(SYNTHETIC_ECO_MODE)
+        eco = bytearray(AVAILABLE_ECO)
         eco[1] = mode
         self.client.values[0x18] = bytes(eco)
 
     async def test_other_models_reject_writes_before_any_ble_request(self):
         for model in (
-            "DJI Power 1000",
-            "DJI Power 1000 V2",
-            "DJI Power 1000 Mini",
-            "DJI Power 500",
             "DJI Power",
             "DJI Power (0xFF)",
         ):
@@ -100,24 +99,43 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
                     await self.device.set_time_periods([OFF_PEAK])
                 self.assertEqual(self.client.requests, [])
 
-    async def test_only_supported_model_requests_optional_schedule(self):
-        supported = ("DJI Power 2000", "DJI Power Auro 2000 Elite")
-        for model in (*supported, "DJI Power 1000 V2", "DJI Power 1000 Mini"):
+    async def test_known_models_discover_optional_schedule_after_initialization(self):
+        for model in ("DJI Power 2000", "DJI Power Auro 2000 Elite",
+                      "DJI Power 1000 V2", "DJI Power 1000 Mini"):
             with self.subTest(model=model):
                 self.device.model = model
                 self.client.requests.clear()
                 await self.device.refresh_config()
-                schedule_get = (duml.GET_COMMAND, b"\x00\x16\x10")
-                self.assertEqual(
-                    schedule_get in self.client.requests, model in supported
-                )
+                self.assertNotIn((duml.GET_COMMAND, b"\x00\x16\x10"),
+                                 self.client.requests)
+                await self.device._discover_capabilities()
+                self.assertEqual(self.device.data["time_periods"],
+                                 duml.normalize_time_periods([PEAK]))
+
+    async def test_mini_schedule_uses_reported_capability(self):
+        self.device.model = "DJI Power 1000 Mini"
+        await self.device.set_time_periods([OFF_PEAK])
+        self.assertTrue(self.client.did_set)
+
+    async def test_fresh_rules_and_availability_override_cached_capability(self):
+        for rules, available in ((b"\x04\x00" + b"0000", 1), (STATION_RULES, 0)):
+            with self.subTest(rules=rules, available=available):
+                self.device.data.update(station_rules=[5], eco_available=True)
+                self.client.values[0x0E] = rules
+                self.client.values[0x18] = bytes([available]) + AVAILABLE_ECO[1:]
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerError, "does not offer"
+                ):
+                    await self.device.set_time_periods([OFF_PEAK])
+                self.assertFalse(self.client.did_set)
 
     async def test_auro_replaces_and_confirms_the_schedule(self):
         self.device.model = "DJI Power Auro 2000 Elite"
         await self.device.set_time_periods([OFF_PEAK])
         self.assertEqual(
             [command for command, _ in self.client.requests],
-            [duml.GET_COMMAND, duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+            [duml.GET_COMMAND, duml.GET_COMMAND, duml.GET_COMMAND,
+             duml.SET_COMMAND, duml.GET_COMMAND],
         )
         self.assertEqual(
             self.device.data["time_periods"], duml.normalize_time_periods([OFF_PEAK])
@@ -130,7 +148,8 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(periods, duml.normalize_time_periods([PEAK]))
         self.assertEqual(
-            self.client.requests, [(duml.GET_COMMAND, b"\x00\x16\x10")]
+            self.client.requests, [(duml.GET_COMMAND, body) for body in
+                                   (b"\x00\x16\x10", b"\x00\x18\x10", b"\x00\x0e\x10")]
         )
         periods[0]["days"].clear()
         periods[0]["start"] = "01:00"
@@ -175,7 +194,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.requests, [])
 
     async def test_editor_read_rejects_unsupported_model_before_io(self):
-        self.device.model = "DJI Power 1000 V2"
+        self.device.model = "DJI Power"
         with self.assertRaisesRegex(
             device_module.DjiPowerError, "not supported on this model"
         ):
@@ -201,7 +220,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_time_periods([OFF_PEAK], expected_periods=[])
         self.assertEqual(
             [cmd for cmd, _ in self.client.requests],
-            [duml.GET_COMMAND, duml.GET_COMMAND],
+            [duml.GET_COMMAND, duml.GET_COMMAND, duml.GET_COMMAND],
         )
         self.assertFalse(self.client.did_set)
         self.assertEqual(
@@ -213,7 +232,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.client.did_set)
         self.assertEqual(
             [cmd for cmd, _ in self.client.requests],
-            [duml.GET_COMMAND, duml.GET_COMMAND],
+            [duml.GET_COMMAND, duml.GET_COMMAND, duml.GET_COMMAND],
         )
 
     async def test_stale_snapshot_noop_still_checks_empty_schedule_mode(self):
@@ -251,11 +270,13 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [cmd for cmd, _ in self.client.requests],
-            [duml.GET_COMMAND, duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+            [duml.GET_COMMAND, duml.GET_COMMAND, duml.GET_COMMAND,
+             duml.SET_COMMAND, duml.GET_COMMAND],
         )
         self.assertEqual(
             [body for cmd, body in self.client.requests if cmd == duml.GET_COMMAND],
-            [b"\x00\x16\x10", b"\x00\x18\x10", b"\x00\x16\x10"],
+            [b"\x00\x16\x10", b"\x00\x18\x10", b"\x00\x0e\x10",
+             b"\x00\x16\x10"],
         )
         self.assertEqual(
             self.device.data["time_periods"], duml.normalize_time_periods([OFF_PEAK])
@@ -268,7 +289,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         await self.device.set_time_periods([PEAK])
         self.assertEqual(
             [cmd for cmd, _ in self.client.requests],
-            [duml.GET_COMMAND, duml.GET_COMMAND],
+            [duml.GET_COMMAND, duml.GET_COMMAND, duml.GET_COMMAND],
         )
         self.assertFalse(self.client.did_set)
 
@@ -295,7 +316,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
                     await self.device.set_time_periods([])
                 self.assertEqual(
                     [cmd for cmd, _ in self.client.requests],
-                    [duml.GET_COMMAND, duml.GET_COMMAND],
+                    [duml.GET_COMMAND, duml.GET_COMMAND, duml.GET_COMMAND],
                 )
         for mode in (0, 1):
             with self.subTest(mode=mode):
@@ -314,7 +335,8 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
             (0x18, bytes([1, 9]) + bytes(84)),
         ):
             with self.subTest(key=key, value=value):
-                self.client.values = {0x16: PEAK_VALUE, 0x18: SYNTHETIC_ECO_MODE}
+                self.client.values = {0x16: PEAK_VALUE, 0x18: AVAILABLE_ECO,
+                                      0x0E: STATION_RULES}
                 if value is None:
                     self.client.values.pop(key)
                 else:
@@ -329,10 +351,10 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_optional_failures_clear_stale_schedule_without_breaking_refresh(
         self,
     ):
-        await self.device.refresh_config()
+        await self.device._discover_capabilities()
         self.assertIsInstance(self.device.data["time_periods"], list)
         self.client.values.pop(0x16)
-        await self.device.refresh_config()
+        await self.device._discover_capabilities()
         self.assertIsNone(self.device.data["time_periods"])
         self.assertIsNone(self.device.data["key_16"])
         self.assertTrue(self.device.data["discharge_power_available"])
@@ -344,10 +366,10 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
             device_module.DjiPowerDisconnectedError("disconnected"),
         ):
 
-            async def read(*keys, error=error):
-                if keys == (0x16,):
+            async def read(*keys, error=error, **kwargs):
+                if 0x16 in keys:
                     raise error
-                return await original(*keys)
+                return await original(*keys, **kwargs)
 
             with (
                 self.subTest(error=error),
@@ -355,9 +377,9 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 if isinstance(error, device_module.DjiPowerDisconnectedError):
                     with self.assertRaises(type(error)):
-                        await self.device.refresh_config()
+                        await self.device._discover_capabilities()
                 else:
-                    await self.device.refresh_config()
+                    await self.device._discover_capabilities()
                     self.assertIsNone(self.device.data.get("time_periods"))
 
     async def test_ack_must_include_success_for_schedule_and_rules_keys(self):
@@ -375,7 +397,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.client.requests.clear()
                 with self.assertRaises(device_module.DjiPowerError):
                     await self.device.set_time_periods([OFF_PEAK])
-                self.assertEqual(len(self.client.requests), 3)
+                self.assertEqual(len(self.client.requests), 4)
                 self.assertEqual(
                     self.device.data["time_periods"],
                     duml.normalize_time_periods([PEAK]),
@@ -398,8 +420,8 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         async def settle(delay):
             self.assertEqual(delay, 2)
-            self.assertEqual(len(self.client.requests), 4)
-            requested = duml.parse_keyed_values(self.client.requests[2][1])
+            self.assertEqual(len(self.client.requests), 5)
+            requested = duml.parse_keyed_values(self.client.requests[3][1])
             self.client.values.update(requested)
 
         self.sleep.side_effect = settle
@@ -445,7 +467,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         original = self.client.write_gatt_char
 
         async def hold_first_readback(*args, **kwargs):
-            if len(self.client.requests) == 3:
+            if len(self.client.requests) == 4:
                 reading.set()
                 await release.wait()
             await original(*args, **kwargs)
@@ -461,12 +483,13 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         await queued.wait()
         self.assertFalse(first.done())
         self.assertFalse(second.done())
-        self.assertEqual(len(self.client.requests), 3)
+        self.assertEqual(len(self.client.requests), 4)
         release.set()
         await asyncio.gather(first, second)
         self.assertEqual(
             [cmd for cmd, _ in self.client.requests],
-            [duml.GET_COMMAND, duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND]
+            [duml.GET_COMMAND, duml.GET_COMMAND, duml.GET_COMMAND,
+             duml.SET_COMMAND, duml.GET_COMMAND]
             * 2,
         )
         self.assertEqual(
@@ -481,7 +504,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         original = self.client.write_gatt_char
 
         async def hold_first_readback(*args, **kwargs):
-            if len(self.client.requests) == 3:
+            if len(self.client.requests) == 4:
                 reading.set()
                 await release.wait()
             await original(*args, **kwargs)
@@ -496,11 +519,11 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         reader = asyncio.create_task(read_for_editor())
         await queued.wait()
         self.assertFalse(reader.done())
-        self.assertEqual(len(self.client.requests), 3)
+        self.assertEqual(len(self.client.requests), 4)
         release.set()
         await writer
         self.assertEqual(await reader, duml.normalize_time_periods([OFF_PEAK]))
-        self.assertEqual(len(self.client.requests), 5)
+        self.assertEqual(len(self.client.requests), 8)
 
     async def test_queued_editor_write_cannot_overwrite_first_write(self):
         reading = asyncio.Event()
@@ -509,7 +532,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         original = self.client.write_gatt_char
 
         async def hold_first_readback(*args, **kwargs):
-            if len(self.client.requests) == 3:
+            if len(self.client.requests) == 4:
                 reading.set()
                 await release.wait()
             await original(*args, **kwargs)
@@ -551,7 +574,7 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.client.did_set)
 
     async def test_push_absence_preserves_schedule_but_invalid_data_clears_it(self):
-        await self.device.refresh_config()
+        await self.device._discover_capabilities()
         self.client.send(
             duml.TELEMETRY_COMMAND, duml.build_keyed_set_payload([(0x15, bytes(2))])
         )

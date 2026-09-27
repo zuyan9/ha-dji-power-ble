@@ -11,7 +11,12 @@ from homeassistant.core import callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import DjiPowerEntity
-from .features import ModelFeature, supports_feature
+from .features import (
+    ModelFeature,
+    eligible_port_switches,
+    feature_available,
+    is_known_model,
+)
 
 AccessoryIdentity = tuple[int, int, int]
 PortIdentity = tuple[int, int]
@@ -27,11 +32,6 @@ SDC_ACCESSORY_NAMES = {
     5: "poe_cable",
 }
 ACCESSORY_INPUT_FORMS = ("solar", "car", "grid")
-
-
-def port_switches_offered(data: dict) -> bool:
-    """Return whether the station's rules offer per-port switches."""
-    return data.get("port_switches_offered") is True
 
 
 def port_name(interface_type: int, seq: int) -> str:
@@ -140,29 +140,26 @@ def async_discover_accessories(
     async_add_entities: AddEntitiesCallback,
     factories: dict[str, Callable[[AccessoryIdentity], list[DjiPowerEntity]]],
     *,
-    feature: ModelFeature = ModelFeature.SDC_CONTROLS,
     interface_types: set[int] = SDC_INTERFACE_TYPES,
-    offered: Callable[[dict], bool] | None = None,
 ) -> None:
-    """Add each reported accessory once, including after setup or reconnection.
-
-    ``offered`` is a further station condition for creating the entities.
-    """
-    if not supports_feature(coordinator.device.model, feature):
+    """Add each offered accessory once, including after setup or reconnection."""
+    if not is_known_model(coordinator.device.model):
         return
     seen: set[tuple[str, AccessoryIdentity]] = set()
 
     @callback
     def discover() -> None:
         data = coordinator.data or {}
-        if not coordinator.last_update_success or (
-            offered is not None and not offered(data)
-        ):
+        if not coordinator.last_update_success:
             return
         entities = []
         for key, factory in factories.items():
             rows = reported_rows(data, key, interface_types)
             for identity, row in rows.items():
+                if key == "power_switches" and (
+                    identity[:2] not in eligible_port_switches(data)
+                ):
+                    continue
                 state = row.get("sw")
                 if type(state) is not int or state not in (1, 2):
                     continue
@@ -177,14 +174,15 @@ def async_discover_accessories(
     discover()
 
 
-def async_discover_backup_reserve(
+def async_discover_feature(
     coordinator,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    feature: ModelFeature,
     factory: Callable[[], list[DjiPowerEntity]],
 ) -> None:
-    """Add reserve controls once the station offers them for a solar accessory."""
-    if not supports_feature(coordinator.device.model, ModelFeature.RESERVE_CONTROL):
+    """Add a feature once its reported capability becomes available."""
+    if not is_known_model(coordinator.device.model):
         return
     added = False
 
@@ -193,13 +191,25 @@ def async_discover_backup_reserve(
         nonlocal added
         if added or not coordinator.last_update_success:
             return
-        if (coordinator.data or {}).get("energy_reserve_available") is not True:
+        if not feature_available(coordinator.data or {}, feature):
             return
         added = True
         async_add_entities(factory())
 
     entry.async_on_unload(coordinator.async_add_listener(discover))
     discover()
+
+
+def async_discover_backup_reserve(
+    coordinator,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+    factory: Callable[[], list[DjiPowerEntity]],
+) -> None:
+    """Add reserve controls once the station offers them for a solar accessory."""
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.RESERVE_CONTROL, factory
+    )
 
 
 class DjiPowerAccessoryEntity(DjiPowerEntity):
@@ -228,7 +238,11 @@ class DjiPowerAccessoryEntity(DjiPowerEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.row is not None
+        return (
+            super().available
+            and is_known_model(self.coordinator.device.model)
+            and self.row is not None
+        )
 
 
 class DjiPowerCarChargerEntity(DjiPowerAccessoryEntity):

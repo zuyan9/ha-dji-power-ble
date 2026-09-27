@@ -12,7 +12,7 @@ from tests.test_device import FakeBleDevice, device_module, duml
 
 RESERVE_MODELS = (
     "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
-    "DJI Power Auro 2000 Elite",
+    "DJI Power Auro 2000 Elite", "DJI Power 1000 Mini",
 )
 RESERVE_OFF = bytes.fromhex("01025000")
 # Recharge limit 90 %, discharge limit 5 %: DJI Home's reserve range is 10-90 %.
@@ -85,7 +85,7 @@ class BackupReserveDeviceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_unvalidated_models_are_rejected_without_requests(self):
-        for model in ("DJI Power 1000 Mini", "DJI Power"):
+        for model in ("DJI Power", "DJI Power (0xff)"):
             with self.subTest(model=model):
                 self.reset_device(model)
                 with self.assertRaises(device_module.DjiPowerError):
@@ -187,6 +187,29 @@ class BackupReserveDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.device.data["energy_reserve_enabled"])
         self.assertTrue(self.device.data["car_chargers"])
         self.assertTrue(self.device.data["power_switches"])
+
+    async def test_partial_reserve_reply_cannot_authorize_a_write(self):
+        self.reset_device("DJI Power 1000 Mini")
+        for status in (1, 3, 4):
+            with self.subTest(status=status):
+                self.device.data.update(
+                    key_06=RESERVE_OFF.hex(), energy_reserve_available=True
+                )
+                reply = status.to_bytes(4, "little") + duml.build_keyed_set_payload(
+                    [(duml.ENERGY_STORAGE_KEY, RESERVE_OFF)]
+                )
+                packet = duml.DumlPacket(
+                    duml.POWER_DESTINATION, duml.APP_SOURCE, 1, 0x80,
+                    duml.POWER_COMMAND_SET, duml.GET_COMMAND, reply,
+                )
+                with patch.object(
+                    self.device, "_request", new=AsyncMock(return_value=packet)
+                ) as request:
+                    with self.assertRaises(device_module.DjiPowerError):
+                        await self.device.set_energy_reserve(enabled=True)
+                    self.assertEqual(request.await_count, 1)
+                self.assertIsNone(self.device.data["energy_reserve_available"])
+                self.assertIsNone(self.device.data["key_06"])
 
     def test_malformed_push_invalidates_accessories_and_reserve(self):
         self.device.data.update(

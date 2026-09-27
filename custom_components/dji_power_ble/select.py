@@ -13,18 +13,21 @@ from .accessory import (
     AccessoryIdentity,
     DjiPowerCarChargerEntity,
     async_discover_accessories,
+    async_discover_feature,
 )
 from .const import DOMAIN
 from .entity import DjiPowerEntity
-from .features import ModelFeature, supports_feature
+from .features import ModelFeature, feature_available
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    if supports_feature(coordinator.device.model, ModelFeature.TOU_POWER_CONTROL):
-        async_add_entities([DjiPowerAdjustmentSelect(coordinator)])
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.TOU_POWER_CONTROL,
+        lambda: [DjiPowerAdjustmentSelect(coordinator)],
+    )
     async_discover_accessories(
         coordinator,
         entry,
@@ -52,7 +55,13 @@ class DjiPowerAdjustmentSelect(DjiPowerEntity, SelectEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.current_option is not None
+        return (
+            super().available
+            and feature_available(
+                self.coordinator.data or {}, ModelFeature.TOU_POWER_CONTROL
+            )
+            and self.current_option is not None
+        )
 
     @property
     def current_option(self) -> str | None:

@@ -7,7 +7,13 @@ import struct
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from tests.test_device import FakeBleDevice, StationClient, device_module, duml
+from tests.test_device import (
+    FakeBleDevice,
+    StationClient,
+    device_module,
+    duml,
+    requested_config_keys,
+)
 
 
 def charger_value(*, seq=1, watts=400, mode=2, enabled=1):
@@ -31,16 +37,41 @@ USB_SWITCHES = b"".join(
 )
 
 
+def rules_value(*bits):
+    """Encode a station rules reply independently of the production decoder."""
+    count = max(bits, default=0) + 1
+    mask = sum(1 << bit for bit in bits).to_bytes((count + 7) // 8, "little")
+    text = (count.to_bytes(2, "little") + mask).hex().encode()
+    return len(text).to_bytes(2, "little") + text
+
+
+def merge_switch_rows(current, changed):
+    """Apply addressed rows as a station does for either partial or full lists."""
+    def rows(value):
+        result = []
+        offset = 0
+        while offset < len(value):
+            size = int.from_bytes(value[offset + 2:offset + 4], "little")
+            result.append(value[offset:offset + 4 + size])
+            offset += 4 + size
+        return result
+
+    updates = {row[4:6]: row for row in rows(changed)}
+    return b"".join(updates.get(row[4:6], row) for row in rows(current))
+
+
 class AccessoryClient(StationClient):
     """Use real packet framing around synthetic accessory property snapshots."""
 
     def __init__(self, device):
         super().__init__(device, encrypted=device.model == "DJI Power 1000")
-        self.values = {0x0A: charger_value(), 0x0D: SWITCHES}
+        self.values = {0x0A: charger_value(), 0x0D: SWITCHES, 0x0E: rules_value(0, 11)}
         self.ack_override = None
         self.apply_set = True
         self.did_set = False
         self.readback = None
+        self.get_status = bytes(4)
+        self.get_status_by_key = {}
 
     async def write_gatt_char(self, uuid, value, *, response):  # noqa: ARG002
         packet = duml.DumlPacket.decode(value)
@@ -48,12 +79,17 @@ class AccessoryClient(StationClient):
         payload = self.device._decode_payload(packet)
         self.requests.append((packet.command_id, payload))
         if packet.command_id == duml.GET_COMMAND:
-            key = payload[1]
-            current = self.values.get(key)
-            if self.did_set and self.readback is not None:
-                current = self.readback(key, current)
-            entries = [] if current is None else [(key, current)]
-            reply = bytes(4) + duml.build_keyed_set_payload(entries, timestamp_ms=1)
+            entries = []
+            for key in requested_config_keys(payload):
+                current = self.values.get(key)
+                if self.did_set and self.readback is not None:
+                    current = self.readback(key, current)
+                if current is not None:
+                    entries.append((key, current))
+            status = self.get_status_by_key.get(payload[1], self.get_status)
+            reply = status + duml.build_keyed_set_payload(
+                entries, timestamp_ms=1
+            )
         elif packet.command_id == duml.SET_COMMAND:
             requested = duml.parse_keyed_values(payload)
             ack = {key: bytes(4) for key in requested}
@@ -61,7 +97,13 @@ class AccessoryClient(StationClient):
                 ack = self.ack_override
             self.did_set = True
             if self.apply_set and all(ack.get(k) == bytes(4) for k in requested):
-                self.values.update(requested)
+                for key, current in requested.items():
+                    if key == 0x0E:
+                        # This advertises client support; it is not station rules.
+                        continue
+                    if key == 0x0D:
+                        current = merge_switch_rows(self.values[key], current)
+                    self.values[key] = current
             reply = duml.build_keyed_set_payload(ack.items(), timestamp_ms=1)
         else:
             raise AssertionError(f"unexpected command {packet.command_id}")
@@ -100,22 +142,21 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.reset_device()
                 self.client.values[0x0A] = charger_value(mode=mode)
                 self.device.data["car_auto_threshold"] = rule
+                self.client.values[0x0E] = rules_value(*([0] if rule else []))
                 with patch.object(device_module.asyncio, "sleep", AsyncMock()) as sleep:
                     await self.device.set_car_charger(5, 1, 4, **kwargs)
                 sleep.assert_not_awaited()
                 self.assertEqual(self.car_row()[field], expected)
                 self.assertEqual(
                     [command for command, _ in self.client.requests],
-                    [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+                    [duml.GET_COMMAND] * 2 + [duml.SET_COMMAND, duml.GET_COMMAND],
                 )
                 self.assertEqual(self.client.requests[0][1], b"\x00\x0a\x10")
-                self.assertEqual(self.client.requests[2][1], b"\x00\x0a\x10")
+                self.assertEqual(self.client.requests[1][1], b"\x00\x0e\x10")
+                self.assertEqual(self.client.requests[3][1], b"\x00\x0a\x10")
 
     async def test_all_supported_transports_handle_accessory_controls(self):
-        for model in (
-            "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
-            "DJI Power Auro 2000 Elite",
-        ):
+        for model in duml.MODEL_NAMES.values():
             with self.subTest(model=model):
                 self.reset_device(model)
                 await self.device.set_car_charger(5, 1, 4, recharge_power_w=475)
@@ -139,17 +180,18 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                     await self.device.set_usb(3, 1, True)
                 self.assertEqual(self.client.requests, [])
 
-    async def test_usb_model_reads_only_switches_and_rejects_sdc_controls(self):
+    async def test_mini_discovers_and_controls_reported_accessories(self):
         self.reset_device("DJI Power 1000 Mini")
         await self.device._refresh_accessory_config()
-        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x0d\x10")])
-        self.assertNotIn("car_chargers", self.device.data)
+        self.assertEqual(
+            [payload[1] for _, payload in self.client.requests],
+            [0x0A, 0x0D, 0x04, 0x0E, 0x06],
+        )
+        self.assertEqual(self.car_row()["type"], 4)
         self.client.requests.clear()
-        with self.assertRaises(device_module.DjiPowerError):
-            await self.device.set_car_charger(5, 1, 4, enabled=True)
-        with self.assertRaises(device_module.DjiPowerError):
-            await self.device.set_sdc(5, 1, True)
-        self.assertEqual(self.client.requests, [])
+        await self.device.set_car_charger(5, 1, 4, enabled=False)
+        await self.device.set_sdc(5, 1, False)
+        self.assertEqual(self.car_row()["sw"], 2)
 
     async def test_usb_controls_follow_the_station_rule_on_every_named_model(self):
         for model in (
@@ -160,18 +202,26 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(model=model, offered=offered):
                     self.reset_device(model)
                     self.client.values[0x0D] = USB_SWITCHES
-                    self.device.data["port_switches_offered"] = offered
+                    self.device.data["port_switches_offered"] = not offered
+                    self.client.values.pop(0x0E, None)
+                    if offered is not None:
+                        self.client.values[0x0E] = rules_value(
+                            *([11] if offered else [])
+                        )
                     if not offered:
                         with self.assertRaisesRegex(
                             device_module.DjiPowerError, "does not offer"
                         ):
                             await self.device.set_usb(3, 1, False)
-                        self.assertEqual(self.client.requests, [])
+                        self.assertEqual(
+                            [command for command, _ in self.client.requests],
+                            [duml.GET_COMMAND] * 2,
+                        )
                         continue
                     await self.device.set_usb(3, 1, False)
                     self.assertEqual(
                         [command for command, _ in self.client.requests],
-                        [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+                        [duml.GET_COMMAND] * 2 + [duml.SET_COMMAND, duml.GET_COMMAND],
                     )
                     self.assertEqual(
                         self.device.data["power_switches"][1],
@@ -197,8 +247,139 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [command for command, _ in self.client.requests],
-            [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND] * 2,
+            ([duml.GET_COMMAND] * 2 + [duml.SET_COMMAND, duml.GET_COMMAND]) * 2,
         )
+
+    async def test_port_writes_use_fresh_rule_21_scope_for_every_output_type(self):
+        ports = ((2, 1), (3, 1), (4, 2), (5, 1), (6, 2), (7, 3))
+        switches = b"".join(
+            struct.pack("<HHBBBB", 0x1014, 4, kind, seq, 1, 0xA5)
+            for kind, seq in ports
+        )
+        for full in (False, True):
+            for kind, seq in ports:
+                with self.subTest(full=full, port=(kind, seq)):
+                    self.reset_device()
+                    self.client.values[0x0D] = switches
+                    rules = rules_value(11, 21) if full else rules_value(11)
+                    self.client.values[0x0E] = rules
+                    self.device.data["station_rules"] = [11] if full else [11, 21]
+                    await self.device.set_port_switch(kind, seq, False)
+                    written = duml.parse_keyed_values(self.client.requests[2][1])
+                    rows = duml.parse_power_switches(written[0x0D])
+                    self.assertEqual(len(rows), len(ports) if full else 1)
+                    self.assertIn({"type": kind, "seq": seq, "sw": 2}, rows)
+                    # The station must merge a partial SET; all other rows survive.
+                    self.assertEqual(
+                        len(self.device.data["power_switches"]), len(ports)
+                    )
+                    for row in self.device.data["power_switches"]:
+                        state = 2 if (row["type"], row["seq"]) == (kind, seq) else 1
+                        self.assertEqual(
+                            row["sw"], state
+                        )
+                    self.assertEqual(self.client.values[0x0E], rules)
+                    self.assertTrue(all(
+                        self.client.values[0x0D][offset] == 0xA5
+                        for offset in range(7, len(switches), 8)
+                    ))
+
+    async def test_ac_and_car_outlet_need_rows_but_not_rule_11(self):
+        for status in (0, 2):
+            for kind in (2, 7):
+                with self.subTest(status=status, kind=kind):
+                    self.reset_device()
+                    self.client.values[0x0D] = struct.pack(
+                        "<HHBBB", 0x1014, 3, kind, 2, 1
+                    )
+                    self.client.values.pop(0x0E)
+                    self.client.get_status = status.to_bytes(4, "little")
+                    self.device.data["station_rules"] = [11, 21]
+                    await self.device.set_port_switch(kind, 2, False)
+                    written = duml.parse_keyed_values(self.client.requests[2][1])
+                    self.assertEqual(
+                        duml.parse_power_switches(written[0x0D]),
+                        [{"type": kind, "seq": 2, "sw": 2}],
+                    )
+                    self.assertEqual(self.device.data["station_rules"], [])
+
+    async def test_rule_11_revocation_prevents_sdc_and_usb_writes(self):
+        for kind in (3, 4, 5, 6):
+            with self.subTest(kind=kind):
+                self.reset_device()
+                self.client.values[0x0D] = struct.pack("<HHBBB", 0x1014, 3, kind, 1, 1)
+                self.client.values[0x0E] = rules_value(21)
+                self.device.data.update(
+                    station_rules=[11, 21], port_switches_offered=True
+                )
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerError, "does not offer"
+                ):
+                    await self.device.set_port_switch(kind, 1, False)
+                self.assertFalse(self.client.did_set)
+                self.assertFalse(self.device.data["port_switches_offered"])
+
+    async def test_unreadable_fresh_rules_prevent_even_ac_writes(self):
+        for value, status in (
+            (b"bad", 0), (rules_value(11, 21), 1),
+            (rules_value(11, 21), 3), (rules_value(11, 21), 4),
+        ):
+            with self.subTest(value=value, status=status):
+                self.reset_device()
+                self.client.values[0x0E] = value
+                self.client.get_status_by_key[0x0E] = status.to_bytes(4, "little")
+                self.device.data.update(
+                    station_rules=[11, 21], port_switches_offered=True
+                )
+                with self.assertRaises(device_module.DjiPowerError):
+                    await self.device.set_ac(False)
+                self.assertFalse(self.client.did_set)
+                self.assertIsNone(self.device.data["station_rules"])
+                self.assertFalse(self.device._operation_lock.locked())
+                self.assertEqual(self.device._pending, {})
+
+    async def test_port_control_requires_successful_rules_ack(self):
+        self.client.ack_override = {0x0D: bytes(4), 0x0E: (1).to_bytes(4, "little")}
+        with self.assertRaisesRegex(device_module.DjiPowerError, "0x0e"):
+            await self.device.set_sdc(5, 1, False)
+        self.assertEqual(len(self.client.requests), 3)
+        self.assertEqual(self.client.requests[-1][0], duml.SET_COMMAND)
+        self.assertTrue(self.device.data["power_switches"][1]["sw"] == 1)
+
+    async def test_unchanged_port_write_needs_fresh_matching_row(self):
+        await self.device._refresh_accessory_config()
+        self.client.readback = lambda key, value: None if key == 0x0D else value
+        with self.assertRaises(device_module.DjiPowerError):
+            await self.device.set_sdc(5, 1, True)
+        self.assertIsNone(self.device.data["power_switches"])
+        self.assertIsNone(self.device.data["key_0d"])
+
+    async def test_cancelled_port_confirmation_releases_transaction_lock(self):
+        reading = asyncio.Event()
+        send = self.client.write_gatt_char
+
+        async def stall_confirmation(*args, **kwargs):
+            if self.client.did_set:
+                reading.set()
+                await asyncio.Event().wait()
+            await send(*args, **kwargs)
+
+        self.client.write_gatt_char = stall_confirmation
+        task = asyncio.create_task(self.device.set_sdc(5, 1, False))
+        async with asyncio.timeout(1):
+            await reading.wait()
+        self.assertTrue(self.device._operation_lock.locked())
+        self.assertTrue(self.device._pending)
+        self.assertEqual(self.device.data["power_switches"][1]["sw"], 1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertFalse(self.device._operation_lock.locked())
+        self.assertEqual(self.device._pending, {})
+        self.client.write_gatt_char = send
+        await self.device.set_sdc(6, 2, True)
+        self.assertEqual(self.device.data["power_switches"][1]["sw"], 2)
+        self.assertEqual(self.device.data["power_switches"][2]["sw"], 1)
 
     async def test_auto_voltages_follow_the_station_rule(self):
         self.client.values[0x0A] = charger_value(mode=1)
@@ -210,17 +391,22 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
             for name in ("auto_voltage_v", "minimum_voltage_v", "charge_voltage_v"):
                 with self.subTest(rule=rule, name=name):
                     self.device.data["car_auto_threshold"] = rule
+                    self.client.values[0x0E] = (
+                        b"bad" if rule is None else rules_value(*([0] if rule else []))
+                    )
                     self.client.requests.clear()
                     if name in offered:
                         await self.device.set_car_charger(5, 1, 4, **{name: 12})
-                        self.assertEqual(len(self.client.requests), 3)
+                        self.assertEqual(len(self.client.requests), 4)
                         continue
                     with self.assertRaisesRegex(
                         device_module.DjiPowerError, "mode does not use"
                     ):
                         await self.device.set_car_charger(5, 1, 4, **{name: 12})
                     self.assertEqual(
-                        self.client.requests, [(duml.GET_COMMAND, b"\x00\x0a\x10")]
+                        self.client.requests,
+                        [(duml.GET_COMMAND, key) for key in
+                         (b"\x00\x0a\x10", b"\x00\x0e\x10")],
                     )
         # Both powers stay editable in Auto, whatever the rules.
         await self.device.set_car_charger(5, 1, 4, recharge_power_w=500)
@@ -242,6 +428,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(value=value):
                 self.reset_device()
+                self.client.values.pop(0x0E, None)
                 if value is not None:
                     self.client.values[0x0E] = value
                 await self.device._refresh_accessory_config()
@@ -252,12 +439,12 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.device.data["station_rules"], rules)
                 self.assertIs(self.device.data["car_auto_threshold"], expected)
 
-    async def test_rules_are_read_only_while_a_charger_is_reported(self):
+    async def test_rules_are_refreshed_without_charger_or_usb_rows(self):
         self.client.values[0x0A] = b""
         self.client.values[0x0E] = bytes.fromhex("0600") + b"010001"
         await self.device._refresh_accessory_config()
-        self.assertNotIn((duml.GET_COMMAND, b"\x00\x0e\x10"), self.client.requests)
-        self.assertNotIn("car_auto_threshold", self.device.data)
+        self.assertIn((duml.GET_COMMAND, b"\x00\x0e\x10"), self.client.requests)
+        self.assertTrue(self.device.data["car_auto_threshold"])
 
     async def test_failed_rules_read_clears_the_previous_layout(self):
         self.client.values[0x0E] = bytes.fromhex("0600") + b"010001"
@@ -266,10 +453,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.device.data["car_auto_threshold"], True)
         read = self.device._read_config
 
-        async def fail_rules(key, *additional_keys):
+        async def fail_rules(key, *additional_keys, **kwargs):
             if key == duml.RULES_KEY:
                 raise device_module.DjiPowerError("rejected")
-            return await read(key, *additional_keys)
+            return await read(key, *additional_keys, **kwargs)
 
         with patch.object(self.device, "_read_config", side_effect=fail_rules):
             await self.device._refresh_accessory_config()
@@ -287,7 +474,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(device_module.DjiPowerError):
                     await self.device.set_car_charger(5, 1, 4, recharge_power_w=450)
                 self.assertEqual(
-                    self.client.requests, [(duml.GET_COMMAND, b"\x00\x0a\x10")]
+                    self.client.requests,
+                    [(duml.GET_COMMAND, key) for key in
+                     (b"\x00\x0a\x10", b"\x00\x0e\x10")]
+                    if fresh != b"bad" else [(duml.GET_COMMAND, b"\x00\x0a\x10")],
                 )
 
     async def test_missing_requested_port_never_sends_a_write(self):
@@ -299,7 +489,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.client.requests.clear()
                 with self.assertRaises(device_module.DjiPowerError):
                     await method(*args, **kwargs)
-                self.assertEqual(len(self.client.requests), 1)
+                self.assertEqual(len(self.client.requests), 2)
 
     async def test_replacement_charger_on_same_port_cannot_receive_old_control(self):
         await self.device._refresh_accessory_config()
@@ -309,7 +499,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.client.requests.clear()
         with self.assertRaisesRegex(device_module.DjiPowerError, "absent"):
             await self.device.set_car_charger(5, 1, 4, enabled=False)
-        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x0a\x10")])
+        self.assertEqual(
+            self.client.requests, [(duml.GET_COMMAND, key) for key in
+                                   (b"\x00\x0a\x10", b"\x00\x0e\x10")],
+        )
         self.assertEqual(self.car_row()["type"], 3)
 
     async def test_replacement_on_same_port_cannot_satisfy_write_confirmation(self):
@@ -330,7 +523,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.client.requests.clear()
         with self.assertRaisesRegex(device_module.DjiPowerError, "enable the car"):
             await self.device.set_car_charger(5, 1, 4, mode=1)
-        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x0a\x10")])
+        self.assertEqual(
+            self.client.requests, [(duml.GET_COMMAND, key) for key in
+                                   (b"\x00\x0a\x10", b"\x00\x0e\x10")],
+        )
 
     async def test_missing_or_rejected_ack_cannot_confirm_control(self):
         for kind in ("car", "sdc"):
@@ -346,14 +542,14 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                             await self.device.set_car_charger(5, 1, 4, enabled=False)
                         else:
                             await self.device.set_sdc(5, 1, False)
-                    self.assertEqual(len(self.client.requests), 2)
+                    self.assertEqual(len(self.client.requests), 3)
 
     async def test_success_ack_with_ineffective_setting_exhausts_readback_retries(self):
         self.client.apply_set = False
         with self.assertRaisesRegex(device_module.DjiPowerError, "did not report"):
             await self.device.set_car_charger(5, 1, 4, recharge_power_w=500)
         self.assertEqual(self.car_row()["p_from_car_v"], 400)
-        self.assertEqual(len(self.client.requests), device_module.READBACK_RETRIES + 3)
+        self.assertEqual(len(self.client.requests), device_module.READBACK_RETRIES + 4)
 
     async def test_delayed_readback_retries_after_immediate_first_read(self):
         calls = 0
@@ -414,7 +610,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(states, [])
 
     async def test_stalled_optional_read_is_bounded_and_does_not_hold_the_lock(self):
-        async def hang(key):
+        async def hang(key, **kwargs):
             await asyncio.Future()
 
         with patch.object(device_module, "DEFAULT_REQUEST_TIMEOUT", 0.01), patch.object(
@@ -432,7 +628,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         send = self.client.write_gatt_char
 
         async def hold_first_readback(*args, **kwargs):
-            if len(self.client.requests) == 2:
+            if len(self.client.requests) == 3:
                 reading.set()
                 await release.wait()
             await send(*args, **kwargs)
@@ -447,7 +643,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.sleep(0)
         self.assertFalse(second.done())
-        self.assertEqual(len(self.client.requests), 2)
+        self.assertEqual(len(self.client.requests), 3)
         release.set()
         await asyncio.gather(first, second)
         self.assertEqual(self.car_row()["p_from_car_v"], 500)
@@ -464,6 +660,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
             if calls.count("accessories") == 2:
                 self.client.is_connected = False
 
+        async def discovery():
+            self.assertTrue(self.device._operation_lock.locked())
+            calls.append("discovery")
+
         async def packs():
             self.assertTrue(self.device._operation_lock.locked())
             calls.append("packs")
@@ -475,11 +675,14 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(self.device, "_refresh_accessory_config", accessory),
+            patch.object(self.device, "_discover_capabilities", discovery),
             patch.object(self.device, "_read_expansion_batteries", packs),
             patch.object(device_module.asyncio, "sleep", sleep),
         ):
             await self.device._refresh_expansion_loop()
-        self.assertEqual(calls, ["accessories", "sleep", "packs", "accessories"])
+        self.assertEqual(
+            calls, ["discovery", "accessories", "sleep", "packs", "accessories"]
+        )
 
     def test_malformed_push_invalidates_accessories_and_clears_stale_controls(self):
         self.device.data.update(
@@ -520,7 +723,7 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
             FakeBleDevice(), "ab" * 16, name="Station", model="DJI Power 1000 Mini"
         )
         self.client = AccessoryClient(self.device)
-        self.client.values = {0x0D: USB_SWITCHES}
+        self.client.values = {0x0D: USB_SWITCHES, 0x0E: rules_value(11)}
         # Rule 11, which the connection's initial rules read reports.
         self.device.data["port_switches_offered"] = True
         self.device._client = self.client
@@ -560,11 +763,12 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(after, before)
                     self.assertEqual(
                         [command for command, _ in self.client.requests],
-                        [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+                        [duml.GET_COMMAND] * 2 + [duml.SET_COMMAND, duml.GET_COMMAND],
                     )
                     self.assertEqual(self.client.requests[0][1], b"\x00\x0d\x10")
-                    self.assertEqual(self.client.requests[2][1], b"\x00\x0d\x10")
-                    written = duml.parse_keyed_values(self.client.requests[1][1])
+                    self.assertEqual(self.client.requests[1][1], b"\x00\x0e\x10")
+                    self.assertEqual(self.client.requests[3][1], b"\x00\x0d\x10")
+                    written = duml.parse_keyed_values(self.client.requests[2][1])
                     self.assertEqual(set(written), {0x0D, 0x0E})
                     self.assertEqual(
                         written[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f"
@@ -591,7 +795,10 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(device_module.DjiPowerError):
                     await self.device.set_usb(interface_type, seq, True)
                 self.assertEqual(
-                    self.client.requests, [(duml.GET_COMMAND, b"\x00\x0d\x10")]
+                    self.client.requests,
+                    [(duml.GET_COMMAND, payload) for payload in
+                     (b"\x00\x0d\x10", b"\x00\x0e\x10")]
+                    if interface_type in (3, 4) else [],
                 )
 
     async def test_missing_or_rejected_ack_cannot_confirm_usb_switch(self):
@@ -601,14 +808,14 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.client.ack_override = ack
                 with self.assertRaises(device_module.DjiPowerError):
                     await self.device.set_usb(4, 2, False)
-                self.assertEqual(len(self.client.requests), 2)
+                self.assertEqual(len(self.client.requests), 3)
 
     async def test_ineffective_usb_write_exhausts_readback_retries(self):
         self.client.apply_set = False
         with self.assertRaisesRegex(device_module.DjiPowerError, "did not report"):
             await self.device.set_usb(4, 1, False)
         self.assertEqual(self.switches()[(4, 1)], 1)
-        self.assertEqual(len(self.client.requests), device_module.READBACK_RETRIES + 3)
+        self.assertEqual(len(self.client.requests), device_module.READBACK_RETRIES + 4)
 
     async def test_refresh_rereads_the_rules_while_usb_rows_are_reported(self):
         for value, offered in (
@@ -625,13 +832,17 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
                 await self.device._refresh_accessory_config()
                 self.assertEqual(
                     [payload for _, payload in self.client.requests],
-                    [b"\x00\x0d\x10", b"\x00\x0e\x10"],
+                    [b"\x00\x0a\x10", b"\x00\x0d\x10", b"\x00\x04\x10",
+                     b"\x00\x0e\x10", b"\x00\x06\x10"],
                 )
                 self.assertIs(self.device.data["port_switches_offered"], offered)
         self.client.values[0x0D] = struct.pack("<HHBBB", 0x1014, 3, 2, 1, 1)
         self.client.requests.clear()
         await self.device._refresh_accessory_config()
-        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x0d\x10")])
+        self.assertEqual(
+            [payload[1] for _, payload in self.client.requests],
+            [0x0A, 0x0D, 0x04, 0x0E, 0x06],
+        )
 
     async def test_failed_switch_refresh_clears_usb_and_ac_state(self):
         await self.device._refresh_accessory_config()
@@ -648,4 +859,4 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.device.data["power_switches"])
         self.assertIsNone(self.device.data["key_0d"])
         self.assertIsNone(self.device.data["ac_enabled"])
-        self.assertNotIn("car_chargers", self.device.data)
+        self.assertIsNone(self.device.data.get("car_chargers"))

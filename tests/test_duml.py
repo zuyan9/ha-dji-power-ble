@@ -687,7 +687,7 @@ class DischargePowerTests(unittest.TestCase):
                 )
                 entries = duml.parse_keyed_values(payload)
 
-                self.assertEqual(set(entries), {0x18})
+                self.assertEqual(set(entries), {0x18, 0x0E})
                 self.assertEqual(
                     entries[0x18],
                     current[:38] + bytes.fromhex("a6010000") + current[42:],
@@ -796,7 +796,7 @@ class ChargePowerTests(unittest.TestCase):
                 )
                 entries = duml.parse_keyed_values(payload)
 
-                self.assertEqual(set(entries), {0x18})
+                self.assertEqual(set(entries), {0x18, 0x0E})
                 self.assertEqual(
                     entries[0x18],
                     current[:26] + bytes.fromhex("ee020000") + current[30:],
@@ -961,7 +961,7 @@ class PowerAdjustmentTests(unittest.TestCase):
                     )
                     entries = duml.parse_keyed_values(payload)
 
-                    self.assertEqual(set(entries), {0x18})
+                    self.assertEqual(set(entries), {0x18, 0x0E})
                     self.assertEqual(
                         entries[0x18], current[:17] + bytes((encoded,)) + current[18:]
                     )

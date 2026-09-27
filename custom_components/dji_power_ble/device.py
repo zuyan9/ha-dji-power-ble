@@ -15,6 +15,7 @@ from bleak_retry_connector import BleakClientWithServiceCache, establish_connect
 
 from .duml import (
     ACCESSORIES_KEY,
+    APP_DISCOVERY_KEYS,
     APP_SOURCE,
     AUTH_COMMAND,
     CAR_CHARGER_NUMBERS,
@@ -40,16 +41,15 @@ from .duml import (
     DumlPacket,
     DumlStream,
     ProtocolError,
-    build_ac_set_payload,
     build_car_charger_set_payload,
     build_charge_limits_set_payload,
     build_charge_power_set_payload,
     build_discharge_power_set_payload,
     build_energy_reserve_set_payload,
+    build_keyed_set_payload,
+    build_port_switch_set_payload,
     build_power_adjustment_set_payload,
-    build_sdc_switch_set_payload,
     build_time_periods_set_payload,
-    build_usb_switch_set_payload,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
     energy_reserve_bounds,
@@ -61,7 +61,13 @@ from .duml import (
     parse_telemetry,
     validate_time_periods_mode,
 )
-from .features import ModelFeature, supports_feature
+from .features import (
+    ModelFeature,
+    eligible_port_switches,
+    feature_available,
+    is_known_model,
+    supports_feature,
+)
 
 if TYPE_CHECKING:
     from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -77,6 +83,7 @@ AUTHENTICATION_ATTEMPTS = 2
 READBACK_RETRIES = 8
 READBACK_RETRY_INTERVAL = 2.0
 EXPANSION_REFRESH_INTERVAL = 30.0
+CAPABILITY_DISCOVERY_TIMEOUT = 45.0
 EXPANSION_MODELS = {
     "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
     "DJI Power Auro 2000 Elite",
@@ -120,6 +127,10 @@ class DjiPowerDisconnectedError(DjiPowerError):
 
 class DjiPowerScheduleChangedError(DjiPowerError):
     """The station schedule changed while a replacement was being edited."""
+
+
+class _ConfigTooLarge(DjiPowerError):
+    """The station requires the requested keys to be read individually."""
 
 
 StateCallback: TypeAlias = Callable[[dict[str, object]], None]
@@ -715,23 +726,9 @@ class DjiPowerDevice:
 
     async def refresh_config(self) -> None:
         """Fetch and publish a keyed configuration snapshot."""
-        await self._read_expansion_batteries()
+        if self.model in EXPANSION_MODELS:
+            await self._read_expansion_batteries()
         await self._read_config(*_INITIAL_CONFIG_KEYS)
-        if supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
-            try:
-                await self._read_eco_mode()
-            except DjiPowerDisconnectedError:
-                raise
-            except DjiPowerError as error:
-                # Older firmware may omit or reject this optional setting.
-                _LOGGER.debug("Eco-mode configuration unavailable: %s", error)
-        if supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
-            try:
-                await self._read_time_periods()
-            except DjiPowerDisconnectedError:
-                raise
-            except DjiPowerError as error:
-                _LOGGER.debug("Time-period configuration unavailable: %s", error)
 
     @property
     def _reads_power_switches(self) -> bool:
@@ -759,6 +756,7 @@ class DjiPowerDevice:
             # Discover optional controls after setup, so an unsupported request
             # cannot consume the connection's initialization deadline.
             async with self._operation_lock:
+                await self._discover_capabilities()
                 await self._refresh_accessory_config()
             while self.is_connected:
                 await asyncio.sleep(EXPANSION_REFRESH_INTERVAL)
@@ -785,12 +783,8 @@ class DjiPowerDevice:
                 raise
             except DjiPowerError as error:
                 _LOGGER.debug("Accessory configuration unavailable: %s", error)
-        # The rules choose a reported car charger's Auto layout and offer USB
-        # switches.
-        if self._reports_usb_switch or (
-            self.data.get("car_chargers")
-            and supports_feature(self.model, ModelFeature.SDC_CONTROLS)
-        ):
+        # Rules also govern SDC-only stations and energy-management controls.
+        if is_known_model(self.model):
             try:
                 await self._read_station_rules()
             except DjiPowerDisconnectedError:
@@ -805,13 +799,77 @@ class DjiPowerDevice:
             except DjiPowerError as error:
                 _LOGGER.debug("Backup reserve configuration unavailable: %s", error)
 
-    @property
-    def _reports_usb_switch(self) -> bool:
-        """Return whether the last switch list has a USB-A or USB-C row."""
-        rows = self.data.get("power_switches")
-        return isinstance(rows, list) and any(
-            isinstance(row, dict) and row.get("type") in (3, 4) for row in rows
-        )
+    @staticmethod
+    def _config_invalidation(keys: tuple[int, ...]) -> dict[str, object]:
+        """Clear derived capability state as well as its raw records."""
+        empty = parse_telemetry(build_keyed_set_payload([(key, b"") for key in keys]))
+        update = dict.fromkeys(empty)
+        if ENERGY_STORAGE_KEY in keys:
+            update["energy_reserve"] = None
+        return update
+
+    async def _discover_capabilities(self) -> None:
+        """Run the app's optional settings probe with bounded single-key fallback.
+
+        Called after initialization, under the operation lock. Partial replies
+        never establish absence or authorize controls. Each complete reply can
+        publish independently when a station requires one key per request.
+        """
+        if not is_known_model(self.model):
+            return
+        remaining = set(APP_DISCOVERY_KEYS)
+        found: set[int] = set()
+
+        async def read(keys: tuple[int, ...]) -> None:
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                update = await self._read_config(*keys, require_complete=True)
+            returned = {
+                key for key in keys if isinstance(update.get(f"key_{key:02x}"), str)
+            }
+            missing = tuple(set(keys) - returned)
+            invalidated = self._config_invalidation(missing)
+            if RULES_KEY in missing:
+                invalidated.update(
+                    station_rules=[], car_auto_threshold=False,
+                    port_switches_offered=False,
+                )
+            self._merge_data(invalidated)
+            remaining.difference_update(keys)
+            found.update(returned)
+
+        try:
+            async with asyncio.timeout(CAPABILITY_DISCOVERY_TIMEOUT):
+                try:
+                    await read(APP_DISCOVERY_KEYS)
+                except _ConfigTooLarge:
+                    for key in APP_DISCOVERY_KEYS:
+                        try:
+                            await read((key,))
+                        except DjiPowerDisconnectedError:
+                            raise
+                        except (
+                            DjiPowerError, BleakError, EOFError, TimeoutError
+                        ) as error:
+                            # One unsupported or broken key must not suppress
+                            # the rest of the station's feature discovery.
+                            if not self.is_connected:
+                                raise DjiPowerDisconnectedError(
+                                    "Bluetooth connection lost"
+                                ) from error
+                            self._merge_data(self._config_invalidation((key,)))
+        except DjiPowerDisconnectedError:
+            raise
+        except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
+            if not self.is_connected:
+                raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
+            _LOGGER.debug("Capability discovery incomplete: %s", type(error).__name__)
+        if not self.is_connected:
+            raise DjiPowerDisconnectedError("Bluetooth connection lost")
+        self._merge_data({
+            **self._config_invalidation(tuple(remaining)),
+            "discovery_keys": sorted(found),
+            "capability_discovery_complete": not remaining,
+        })
 
     async def _read_accessory_config(
         self, key: int, state_key: str
@@ -820,7 +878,7 @@ class DjiPowerDevice:
         raw_key = f"key_{key:02x}"
         try:
             async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
-                update = await self._read_config(key)
+                update = await self._read_config(key, require_complete=True)
             if not isinstance(update.get(raw_key), str) or not isinstance(
                 update.get(state_key), list
             ):
@@ -871,6 +929,11 @@ class DjiPowerDevice:
         response = await self._request(GET_COMMAND, payload)
         try:
             decoded = self._decode_payload(response)
+            if (
+                require_complete and len(decoded) >= 4
+                and int.from_bytes(decoded[:4], "little") in (1, 3)
+            ):
+                raise _ConfigTooLarge("station did not return complete config data")
             if require_complete and (
                 len(decoded) < 20 or decoded[6:8] != b"\x10\x00"
                 or int.from_bytes(decoded[:4], "little") not in (0, 2)
@@ -888,7 +951,8 @@ class DjiPowerDevice:
     async def _read_eco_mode(self) -> str:
         """Require a fresh eco-mode record rather than reusing cached settings."""
         try:
-            update = await self._read_config(ECO_MODE_KEY)
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                update = await self._read_config(ECO_MODE_KEY, require_complete=True)
             current = update.get("key_18")
             if not isinstance(current, str):
                 raise DjiPowerError("station omitted eco-mode configuration")
@@ -896,12 +960,13 @@ class DjiPowerDevice:
             # The disconnect callback already marks the coordinator unavailable.
             # Publishing state here would mark its last update successful again.
             raise
-        except (DjiPowerError, BleakError, EOFError) as error:
+        except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
             if not self.is_connected:
                 raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
             self._merge_data(
                 {
                     "key_18": None,
+                    "eco_available": None,
                     "power_adjustment": None,
                     "charge_power_available": False,
                     "charge_power_w": None,
@@ -965,7 +1030,9 @@ class DjiPowerDevice:
         """Require a fresh reserve record; unreadable state disables its controls."""
         try:
             async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
-                update = await self._read_config(ENERGY_STORAGE_KEY)
+                update = await self._read_config(
+                    ENERGY_STORAGE_KEY, require_complete=True
+                )
             current = update.get("key_06")
             if (
                 not isinstance(current, str)
@@ -987,7 +1054,7 @@ class DjiPowerDevice:
         """Read the rules for the Auto car-charger layout and port switches."""
         try:
             async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
-                update = await self._read_config(RULES_KEY)
+                update = await self._read_config(RULES_KEY, require_complete=True)
         except DjiPowerDisconnectedError:
             raise
         except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
@@ -1031,13 +1098,16 @@ class DjiPowerDevice:
     async def _read_time_periods(self) -> list[dict[str, object]]:
         """Require a valid fresh schedule, including an explicit empty list."""
         try:
-            update = await self._read_config(TIME_PERIODS_KEY)
+            async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                update = await self._read_config(
+                    TIME_PERIODS_KEY, require_complete=True
+                )
             periods = update.get("time_periods")
             if not isinstance(periods, list):
                 raise DjiPowerError("station omitted or returned invalid time periods")
         except DjiPowerDisconnectedError:
             raise
-        except (DjiPowerError, BleakError, EOFError) as error:
+        except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
             if not self.is_connected:
                 raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
             self._merge_data({"time_periods": None, "key_16": None})
@@ -1049,10 +1119,13 @@ class DjiPowerDevice:
         if not supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
             raise DjiPowerError("time periods are not supported on this model")
         async with self._operation_lock:
+            periods = await self._read_time_periods()
+            await self._read_eco_mode()
+            await self._read_station_rules()
+            if not feature_available(self.data, ModelFeature.TARIFF_SCHEDULE):
+                raise DjiPowerError("the station does not offer time-period control")
             # Return an independent normalized copy for editors to retain.
-            return normalize_time_periods(
-                await self._read_time_periods(), allow_overlap=True
-            )
+            return normalize_time_periods(periods, allow_overlap=True)
 
     async def set_time_periods(
         self, periods: object, *, expected_periods: object | None = None
@@ -1072,6 +1145,9 @@ class DjiPowerDevice:
         async with self._operation_lock:
             current = await self._read_time_periods()
             eco_mode = await self._read_eco_mode()
+            await self._read_station_rules()
+            if not feature_available(self.data, ModelFeature.TARIFF_SCHEDULE):
+                raise DjiPowerError("the station does not offer time-period control")
             try:
                 validate_time_periods_mode(eco_mode, clearing=not requested)
             except ProtocolError as error:
@@ -1116,22 +1192,8 @@ class DjiPowerDevice:
         raise DjiPowerError("station did not report the requested values")
 
     async def set_ac(self, enabled: bool) -> None:
-        """Set AC output and wait for a matching readback."""
-        async with self._operation_lock:
-            update = await self._read_accessory_config(
-                POWER_SWITCH_KEY, "power_switches"
-            )
-            try:
-                payload = build_ac_set_payload(
-                    enabled, current_value=update["key_0d"]
-                )
-            except ProtocolError as error:
-                raise DjiPowerError(str(error)) from error
-            await self._set(payload, (POWER_SWITCH_KEY, RULES_KEY))
-            await self._wait_for_accessory_values(
-                POWER_SWITCH_KEY, "power_switches",
-                {"type": 2, "seq": 1}, {"sw": 1 if enabled else 2},
-            )
+        """Set the legacy main AC output using the shared port policy."""
+        await self.set_port_switch(2, 1, enabled)
 
     @staticmethod
     def _accessory_row(
@@ -1164,40 +1226,41 @@ class DjiPowerDevice:
         raise DjiPowerError("accessory did not report the requested values")
 
     async def set_sdc(self, interface_type: int, seq: int, enabled: bool) -> None:
-        """Set a reported SDC switch while retaining all other switch rows."""
-        if not supports_feature(self.model, ModelFeature.SDC_CONTROLS):
-            raise DjiPowerError("SDC controls are not supported on this model")
-        await self._set_port_switch(
-            build_sdc_switch_set_payload, interface_type, seq, enabled
-        )
+        """Set an SDC output offered by the station's fresh rules."""
+        if type(interface_type) is not int or interface_type not in (5, 6):
+            raise DjiPowerError("SDC controls require an SDC or SDC Lite interface")
+        await self.set_port_switch(interface_type, seq, enabled)
 
     async def set_usb(self, interface_type: int, seq: int, enabled: bool) -> None:
-        """Set a reported USB output while retaining all other switch rows."""
-        if not supports_feature(self.model, ModelFeature.USB_CONTROLS):
-            raise DjiPowerError("USB output controls are not supported on this model")
-        if self.data.get("port_switches_offered") is not True:
-            raise DjiPowerError("the station does not offer USB output controls")
-        await self._set_port_switch(
-            build_usb_switch_set_payload, interface_type, seq, enabled
-        )
+        """Set a USB output offered by the station's fresh rules."""
+        if type(interface_type) is not int or interface_type not in (3, 4):
+            raise DjiPowerError("USB controls require a USB-A or USB-C interface")
+        await self.set_port_switch(interface_type, seq, enabled)
 
-    async def _set_port_switch(
-        self,
-        build: Callable[[str, int, int, bool], bytes],
-        interface_type: int,
-        seq: int,
-        enabled: bool,
+    async def set_port_switch(
+        self, interface_type: int, seq: int, enabled: bool
     ) -> None:
-        """Edit one fresh switch row and confirm it from a targeted readback."""
+        """Read rules and switches under one lock, then confirm the target row."""
+        if not is_known_model(self.model):
+            raise DjiPowerError("port controls are not supported on this model")
         async with self._operation_lock:
             update = await self._read_accessory_config(
                 POWER_SWITCH_KEY, "power_switches"
             )
+            await self._read_station_rules()
             try:
-                payload = build(update["key_0d"], interface_type, seq, enabled)
+                payload = build_port_switch_set_payload(
+                    update["key_0d"], interface_type, seq, enabled,
+                    station_rules=self.data.get("station_rules"),
+                )
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, tuple(parse_keyed_values(payload)))
+            offered = eligible_port_switches({
+                **update, "station_rules": self.data.get("station_rules")
+            })
+            if (interface_type, seq) not in offered:
+                raise DjiPowerError("the station does not offer this output control")
+            await self._set(payload, (POWER_SWITCH_KEY, RULES_KEY))
             await self._wait_for_accessory_values(
                 POWER_SWITCH_KEY, "power_switches",
                 {"type": interface_type, "seq": seq},
@@ -1226,6 +1289,7 @@ class DjiPowerDevice:
         }
         async with self._operation_lock:
             update = await self._read_accessory_config(CAR_CHARGERS_KEY, "car_chargers")
+            await self._read_station_rules()
             try:
                 payload = build_car_charger_set_payload(
                     update["key_0a"], interface_type, seq, accessory_type,
@@ -1329,11 +1393,12 @@ class DjiPowerDevice:
             raise DjiPowerError("charge-power control is not supported on this model")
         async with self._operation_lock:
             current = await self._read_eco_mode()
+            await self._require_tou_capability()
             try:
                 payload = build_charge_power_set_payload(current, watts)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY,))
+            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
             await self._wait_for_eco_mode_values(
                 {"charge_power_available": True, "charge_power_w": watts}
             )
@@ -1346,11 +1411,12 @@ class DjiPowerDevice:
             )
         async with self._operation_lock:
             current = await self._read_eco_mode()
+            await self._require_tou_capability()
             try:
                 payload = build_discharge_power_set_payload(current, watts)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY,))
+            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
             await self._wait_for_eco_mode_values(
                 {"discharge_power_available": True, "discharge_power_w": watts}
             )
@@ -1363,9 +1429,16 @@ class DjiPowerDevice:
             )
         async with self._operation_lock:
             current = await self._read_eco_mode()
+            await self._require_tou_capability()
             try:
                 payload = build_power_adjustment_set_payload(current, mode)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY,))
+            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
             await self._wait_for_eco_mode_values({"power_adjustment": mode})
+
+    async def _require_tou_capability(self) -> None:
+        """Check fresh station rules before editing an existing TOU setup."""
+        await self._read_station_rules()
+        if not feature_available(self.data, ModelFeature.TOU_POWER_CONTROL):
+            raise DjiPowerError("the station does not offer Time of Use power control")

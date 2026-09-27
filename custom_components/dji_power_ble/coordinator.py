@@ -171,6 +171,16 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
+    async def async_set_port_switch(
+        self, interface_type: int, seq: int, enabled: bool
+    ) -> None:
+        """Set a reported output and publish its confirmed state."""
+        try:
+            await self.device.set_port_switch(interface_type, seq, enabled)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
     async def async_set_usb(
         self, interface_type: int, seq: int, enabled: bool
     ) -> None:

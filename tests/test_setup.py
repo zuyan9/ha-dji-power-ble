@@ -497,7 +497,10 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(integration.DjiPowerDevice.call_count, 2)
         self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
                          "DJI Power 2000")
-        chargers = [entity for entity in entities if hasattr(entity, "_identity")]
+        chargers = [
+            entity for entity in entities
+            if getattr(entity, "_row_key", None) == "car_chargers"
+        ]
         self.assertEqual(len(chargers), 7)
         # Recharge mode offers its own numbers; Charge and Auto numbers wait.
         self.assertEqual(

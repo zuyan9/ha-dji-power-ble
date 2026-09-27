@@ -184,33 +184,44 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.invoke([])
         self.coordinator.async_set_time_periods.assert_awaited_once_with([])
 
-    async def test_auro_accepts_the_power_2000_schedule(self) -> None:
-        self.coordinator.device.model = "DJI Power Auro 2000 Elite"
-        await self.invoke()
-        self.coordinator.async_set_time_periods.assert_awaited_once()
+    async def test_known_models_reach_fresh_device_capability_validation(self) -> None:
+        for model in duml.MODEL_NAMES.values():
+            with self.subTest(model=model):
+                self.coordinator.device.model = model
+                self.coordinator.async_set_time_periods.reset_mock()
+                await self.invoke()
+                self.coordinator.async_set_time_periods.assert_awaited_once()
 
-    async def test_other_models_are_rejected_before_write(self) -> None:
-        for model in ("DJI Power 1000 V2", "DJI Power 1000 Mini", "DJI Power 1000"):
+    async def test_unknown_models_are_rejected_before_write(self) -> None:
+        for model in ("DJI Power", "DJI Power (0xFF)", "Unrecognized station"):
             with self.subTest(model=model):
                 self.coordinator.device.model = model
                 with self.assertRaisesRegex(
                     ServiceValidationError,
-                    "only on Power 2000 and Power Auro 2000 Elite",
+                    "recognized DJI Power station model",
                 ):
                     await self.invoke()
         self.coordinator.async_set_time_periods.assert_not_awaited()
 
-    def test_device_selector_offers_every_schedule_model(self) -> None:
+    async def test_pending_cached_capability_does_not_block_fresh_device_check(self):
+        self.coordinator.data = {
+            "time_periods": None, "eco_available": None, "station_rules": None,
+        }
+        await self.invoke()
+        self.coordinator.async_set_time_periods.assert_awaited_once()
+
+    async def test_fresh_device_capability_failure_reaches_caller(self):
+        self.coordinator.async_set_time_periods.side_effect = ServiceValidationError(
+            "The station does not offer electricity price periods"
+        )
+        with self.assertRaisesRegex(ServiceValidationError, "does not offer"):
+            await self.invoke()
+
+    def test_device_selector_does_not_restrict_station_models(self) -> None:
         text = (COMPONENT / "services.yaml").read_text()
-        self.assertCountEqual(
-            re.findall(r"^ +model: (.+)$", text, re.MULTILINE),
-            [
-                model
-                for model in duml.MODEL_NAMES.values()
-                if services.supports_feature(
-                    model, services.ModelFeature.TARIFF_SCHEDULE
-                )
-            ],
+        self.assertEqual(re.findall(r"^ +model: (.+)$", text, re.MULTILINE), [])
+        self.assertEqual(
+            re.findall(r"^ +- integration: (.+)$", text, re.MULTILINE), [DOMAIN]
         )
 
     async def test_child_and_unrelated_devices_cannot_target_station(self) -> None:

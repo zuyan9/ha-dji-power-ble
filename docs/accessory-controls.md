@@ -1,8 +1,9 @@
-# SDC accessories, car-charger, and USB output controls
+# Port switches and SDC accessory controls
 
-These use the existing Bluetooth connection. SDC accessory readings and SDC and
-car-charger controls are enabled on Power 1000, Power 1000 V2, Power 2000, and Power
-Auro 2000 Elite. USB output switches appear on any station that offers them.
+These use the existing Bluetooth connection on every supported station model,
+including the Mini. Controls appear from the station's reported rows, availability
+and rules; a model name alone does not establish support. Recognized accessory and
+charger types remain the ones listed below.
 
 ## Accessory information and input readings
 
@@ -63,8 +64,9 @@ number is available only in the modes that use it:
 | Auto | Both powers and the auto switching voltage, or both powers and both voltages |
 
 In Auto, the station's rules choose between the two layouts, as they do in DJI Home.
-The integration reads the rules with the charger settings. If the rules cannot be
-read, Auto offers only the two powers.
+The integration reads the rules with the charger settings and again before a
+write. If a refresh cannot read the rules, Auto displays only the two powers; a
+write still requires a successful fresh rules read.
 
 A number also needs valid bounds reported by the station. The integration uses those
 bounds; it does not assume that all accessories share a fixed wattage or voltage range.
@@ -77,7 +79,9 @@ its power or voltage settings.
 ## SDC switches
 
 An **SDC power** or **SDC Lite power** switch appears for each port with an explicit
-supported switch record. SDC power readings alone do not establish switch support.
+supported switch record and station rule 11. SDC power readings alone do not
+establish switch support. This follows DJI Home: a station without rule 11 no longer
+offers SDC switches, even if an earlier integration version created them.
 The port switch and the car-recharging switch are separate settings. The original
 Power 1000 reports only its AC switch, so it has no SDC power switch.
 
@@ -89,15 +93,24 @@ station whose rules include rule 11. DJI Home uses the same two conditions for i
 USB toggles. A station that reports USB rows without rule 11 gets no USB switches, and
 existing USB switches become unavailable while the rules are unknown.
 
-AC, SDC, and USB writes retain the complete reported switch list and change only the
-addressed switch.
+## AC and car outlets
+
+AC outputs and car outlets (interface type 7) appear when the station reports a
+valid switch row, without requiring rule 11. The existing main **AC output** entity
+keeps its identity; additional outputs use their reported port sequences.
+
+All port writes read fresh switch rows and rules under the same operation lock.
+With rule 21, the SET includes the complete list; otherwise it includes only the
+addressed row. The selected row's extra bytes are preserved in both cases, and
+full-list writes also preserve every other row. Missing rules in a complete reply
+mean clear bits; a failed or malformed rules read prevents the write.
 
 ## Discovery and confirmation
 
 Accessory discovery runs after connection setup and refreshes every 30 seconds,
 alongside expansion-pack refreshes where supported. The refresh reads the charger
-settings, the switch list, and the accessory list, plus the station's rules while a
-car charger or USB switch is reported. Telemetry reports update the
+settings, the switch list, the accessory list, reserve and station rules on every
+supported model. Telemetry reports update the
 accessory type and input readings as they arrive. Device pushes can update the
 controls sooner.
 Newly attached accessories are discovered automatically. Missing, malformed, or failed
