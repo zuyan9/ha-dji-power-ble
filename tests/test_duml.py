@@ -1037,7 +1037,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(parsed["battery_percent"], 47)
         self.assertEqual(parsed["runtime_min"], 5940)
         self.assertEqual(parsed["battery_time_type"], 2)
-        self.assertFalse(parsed["charging"])
+        self.assertNotIn("charging", parsed)
         self.assertEqual(parsed["temperature"], 25.1)
         self.assertEqual(parsed["usb_c_output_w"], 1)
         self.assertEqual(parsed["usb_c_1_output_w"], 1)
@@ -1066,7 +1066,7 @@ class ReportTests(unittest.TestCase):
                 self.assertIsNone(parsed["temperature"])
                 self.assertEqual(parsed["battery_percent"], 66)
                 self.assertEqual(parsed["runtime_min"], 2969)
-                self.assertFalse(parsed["charging"])
+                self.assertEqual(parsed["battery_time_type"], 2)
                 self.assertEqual(parsed["primary_battery_percent"], 66)
                 self.assertEqual(parsed["primary_runtime_min"], 0)
 
@@ -1249,8 +1249,8 @@ class ReportTests(unittest.TestCase):
                         expected_inputs[name],
                     )
 
-    def test_battery_time_type_drives_charging_independent_of_power(self) -> None:
-        for time_type, expected in ((0, False), (1, True), (2, False), (255, None)):
+    def test_report_preserves_charging_inputs_for_state_merge(self) -> None:
+        for time_type in (0, 1, 2, 255):
             for input_w, output_w in ((0, 500), (516, 500)):
                 with self.subTest(
                     time_type=time_type, input_w=input_w, output_w=output_w
@@ -1265,10 +1265,80 @@ class ReportTests(unittest.TestCase):
                     )
 
                     self.assertEqual(parsed["battery_time_type"], time_type)
-                    self.assertIs(parsed["charging"], expected)
+                    self.assertEqual(parsed["input_w"], input_w)
+                    self.assertEqual(parsed["output_w"], output_w)
+                    self.assertNotIn("charging", parsed)
+
+    def test_primary_battery_status_is_independent_of_time_power_and_temperature(
+        self,
+    ) -> None:
+        for io_status, expected_status in (
+            (1, "recharging"), (2, "discharging"), (0, None), (3, None), (255, None)
+        ):
+            for time_type in (0, 1, 2, 255):
+                for duration, input_w, output_w, temperature_status in (
+                    (0, 0, 500, 0),
+                    (5940, 516, 500, 1),
+                    (6000, 500, 0, 255),
+                ):
+                    with self.subTest(
+                        io_status=io_status, time_type=time_type,
+                        duration=duration, temperature_status=temperature_status,
+                    ):
+                        battery = bytearray.fromhex("c819000000c819c801ce090000ff")
+                        battery[2:4] = duration.to_bytes(2, "little")
+                        battery[4] = time_type
+                        battery[11] = temperature_status
+                        battery[12] = io_status
+                        power = output_w.to_bytes(2, "little") + input_w.to_bytes(
+                            2, "little"
+                        )
+
+                        parsed = duml.parse_report(
+                            record(0x3020, battery) + record(0x3030, power)
+                        )
+
+                        self.assertEqual(parsed["primary_io_status"], io_status)
+                        self.assertEqual(
+                            parsed["primary_battery_status"], expected_status
+                        )
+                        self.assertEqual(parsed["battery_time_type"], time_type)
+                        self.assertEqual(parsed["runtime_min"], duration)
+                        self.assertEqual(parsed["primary_runtime_min"], 456)
+                        self.assertEqual(parsed["primary_battery_percent"], 66)
+                        self.assertEqual(parsed["input_w"], input_w)
+                        self.assertEqual(parsed["output_w"], output_w)
+                        self.assertEqual(
+                            parsed["temperature"],
+                            25.1 if temperature_status == 1 else None,
+                        )
+
+    def test_short_battery_record_has_unknown_primary_status(self) -> None:
+        battery = bytes.fromhex("c819990b02c819c801ce090102")
+        for length in range(13):
+            with self.subTest(length=length):
+                parsed = duml.parse_report(record(0x3020, battery[:length]))
+
+                self.assertIsNone(parsed["primary_io_status"])
+                self.assertIsNone(parsed["primary_battery_status"])
+                if length >= 9:
+                    self.assertEqual(parsed["battery_time_type"], 2)
+                    self.assertEqual(parsed["runtime_min"], 2969)
+                    self.assertEqual(parsed["primary_runtime_min"], 456)
+                else:
+                    self.assertNotIn("charging", parsed)
+                    self.assertNotIn("runtime_min", parsed)
+
+    def test_report_without_battery_does_not_emit_primary_status(self) -> None:
+        for payload in (b"", record(0x3030, bytes.fromhex("f4010402"))):
+            with self.subTest(payload=payload.hex()):
+                parsed = duml.parse_report(payload)
+
+                self.assertNotIn("primary_io_status", parsed)
+                self.assertNotIn("primary_battery_status", parsed)
 
     def test_battery_only_reports_preserve_duration_and_type(self) -> None:
-        for time_type, expected in ((0, False), (1, True), (2, False), (255, None)):
+        for time_type in (0, 1, 2, 255):
             for duration in (0, 5940, 6000):
                 with self.subTest(time_type=time_type, duration=duration):
                     battery = bytearray.fromhex("c819000000c819c801")
@@ -1280,7 +1350,7 @@ class ReportTests(unittest.TestCase):
                     self.assertEqual(parsed["battery_time_type"], time_type)
                     self.assertEqual(parsed["runtime_min"], duration)
                     self.assertEqual(parsed["primary_runtime_min"], 456)
-                    self.assertIs(parsed["charging"], expected)
+                    self.assertNotIn("charging", parsed)
                     self.assertNotIn("input_w", parsed)
 
     def test_missing_or_short_battery_does_not_infer_charging(self) -> None:

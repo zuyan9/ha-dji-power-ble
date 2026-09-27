@@ -20,6 +20,7 @@ used only during setup to retrieve the device's local credential.
 
 - Monitor:
   - Battery level, remaining time, charging time, temperature, and charging status
+  - [Primary battery status](docs/protocol.md#battery-time-and-charging), where reported
   - Input, output, AC, USB, SDC, etc. power readings
   - Expansion battery devices with battery level and pack diagnostics
   - Firmware, battery cycle, timezone, display, reserve, and cloud-status

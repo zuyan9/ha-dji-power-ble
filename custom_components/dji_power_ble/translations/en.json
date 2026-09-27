@@ -223,6 +223,13 @@
       "battery_cycle_count": {
         "name": "Battery cycle count"
       },
+      "primary_battery_status": {
+        "name": "Primary battery status",
+        "state": {
+          "recharging": "Recharging",
+          "discharging": "Discharging"
+        }
+      },
       "expansion_battery": {
         "name": "Battery"
       },

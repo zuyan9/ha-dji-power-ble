@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -302,6 +303,21 @@ class BatteryTimeSensorTests(unittest.IsolatedAsyncioTestCase):
                         entity.native_value, minutes if key == active_key else None
                     )
 
+    def test_recharging_time_remains_when_charging_is_off_or_unknown(self) -> None:
+        for power, charging in (({}, None), ({"input_w": 0}, False)):
+            with self.subTest(power=power):
+                self.coordinator.data = {
+                    "battery_time_type": 1,
+                    "runtime_min": 90,
+                    "charging": charging,
+                    **power,
+                }
+                recharging = self.entities["recharging_time_min"]
+                self.assertTrue(recharging.available)
+                self.assertEqual(recharging.native_value, 90)
+                self.assertFalse(self.entities["runtime_min"].available)
+                self.assertIsNone(self.entities["runtime_min"].native_value)
+
     def test_missing_or_unknown_type_clears_both_times(self) -> None:
         for data in (
             None,
@@ -391,6 +407,142 @@ class BatteryTimeSensorTests(unittest.IsolatedAsyncioTestCase):
                 "primary_runtime_min": 37,
             }
             self.assertEqual(entity.native_value, 37)
+
+
+class PrimaryBatteryStatusSensorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.listeners = []
+        self.unloads = []
+        self.entry = types.SimpleNamespace(
+            entry_id="station",
+            title="Power station",
+            data={"address": ADDRESS},
+            async_on_unload=self.unloads.append,
+        )
+        self.coordinator = types.SimpleNamespace(
+            entry=self.entry,
+            device=types.SimpleNamespace(
+                address=ADDRESS,
+                model="DJI Power 2000",
+                serial_number="SYNTHETICBASE",
+            ),
+            data={},
+            last_update_success=True,
+            async_add_listener=self.add_listener,
+        )
+        self.hass = types.SimpleNamespace(
+            data={DOMAIN: {self.entry.entry_id: self.coordinator}},
+            entity_registry=_EntityRegistry(),
+            device_registry=_DeviceRegistry(),
+        )
+        self.added = []
+
+    def add_listener(self, listener):
+        self.listeners.append(listener)
+        return lambda: self.listeners.remove(listener)
+
+    def primary_status_entities(self):
+        return [
+            entity for entity in self.added
+            if entity._attr_unique_id == f"{ADDRESS}_primary_battery_status"
+        ]
+
+    def publish(self, data) -> None:
+        self.coordinator.data = data
+        for listener in self.listeners.copy():
+            listener()
+
+    async def setup(self) -> None:
+        await sensor.async_setup_entry(self.hass, self.entry, self.added.extend)
+
+    async def test_reported_status_is_discovered_at_setup_without_expansion_packs(
+        self,
+    ) -> None:
+        self.coordinator.data = {
+            "primary_io_status": 1,
+            "primary_battery_status": "recharging",
+        }
+        await self.setup()
+
+        (entity,) = self.primary_status_entities()
+        self.assertEqual(entity.native_value, "recharging")
+        self.assertTrue(entity.available)
+        self.assertEqual(entity.device_info["identifiers"], {(DOMAIN, ADDRESS)})
+        description = entity.entity_description
+        self.assertEqual(description.translation_key, "primary_battery_status")
+        self.assertEqual(description.device_class, sensor.SensorDeviceClass.ENUM)
+        self.assertEqual(description.options, ["recharging", "discharging"])
+        self.assertTrue(description.entity_registry_enabled_default)
+
+    async def test_missing_primary_status_does_not_create_entity(self) -> None:
+        self.coordinator.device.model = "DJI Power 1000"
+        self.coordinator.data = {"primary_battery_percent": 66}
+        await self.setup()
+        self.publish({"primary_io_status": None, "primary_battery_status": None})
+
+        self.assertEqual(self.primary_status_entities(), [])
+
+    async def test_later_status_is_discovered_once_even_when_unknown(self) -> None:
+        await self.setup()
+        self.assertEqual(self.primary_status_entities(), [])
+
+        self.coordinator.last_update_success = False
+        self.publish({"primary_io_status": 1, "primary_battery_status": "recharging"})
+        self.assertEqual(self.primary_status_entities(), [])
+
+        self.coordinator.last_update_success = True
+        self.publish({"primary_io_status": 0, "primary_battery_status": None})
+        (entity,) = self.primary_status_entities()
+        self.assertIsNone(entity.native_value)
+        for raw, value in ((1, "recharging"), (2, "discharging"), (255, None)):
+            self.publish({"primary_io_status": raw, "primary_battery_status": value})
+            self.assertEqual(self.primary_status_entities(), [entity])
+            self.assertEqual(entity.native_value, value)
+        self.publish({"primary_io_status": None, "primary_battery_status": None})
+        self.assertIsNone(entity.native_value)
+
+    async def test_state_is_independent_of_aggregate_and_unknown_when_absent(
+        self,
+    ) -> None:
+        self.coordinator.data = {"primary_io_status": 2}
+        await self.setup()
+        (entity,) = self.primary_status_entities()
+        for status in ("recharging", "discharging", None):
+            for time_type in (0, 1, 2, 255):
+                with self.subTest(status=status, time_type=time_type):
+                    self.publish({
+                        "primary_battery_status": status,
+                        "battery_time_type": time_type,
+                        "charging": time_type == 1,
+                        "runtime_min": 5940,
+                        "primary_runtime_min": 0,
+                        "input_w": 516,
+                        "output_w": 500,
+                    })
+                    self.assertEqual(entity.native_value, status)
+                    self.assertTrue(entity.available)
+        for data in ({}, None):
+            self.publish(data)
+            self.assertIsNone(entity.native_value)
+
+    async def test_disconnect_and_unload(self) -> None:
+        self.coordinator.data = {"primary_io_status": 1}
+        await self.setup()
+        (entity,) = self.primary_status_entities()
+        self.coordinator.last_update_success = False
+        self.assertFalse(entity.available)
+        for unload in self.unloads:
+            unload()
+        self.assertEqual(self.listeners, [])
+
+    def test_status_name_and_states_are_translated(self) -> None:
+        strings = json.loads((COMPONENT / "strings.json").read_text())
+        translated = json.loads((COMPONENT / "translations/en.json").read_text())
+        self.assertEqual(strings, translated)
+        self.assertEqual(strings["entity"]["sensor"]["primary_battery_status"], {
+            "name": "Primary battery status",
+            "state": {"recharging": "Recharging", "discharging": "Discharging"},
+        })
 
 
 class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
@@ -582,8 +734,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=20, firmware="01.00.00.00")
         await self.setup([pack])
         unique_ids = {entity._attr_unique_id for entity in self.packs()}
-        # Expansion packs, tariff capability and SDC accessories keep listeners.
-        self.assertEqual(len(self.listeners), 3)
+        # Primary status, expansion packs, tariff and SDC each keep a listener.
+        self.assertEqual(len(self.listeners), 4)
         for callback in self.unload_callbacks:
             callback()
         self.assertEqual(self.listeners, [])

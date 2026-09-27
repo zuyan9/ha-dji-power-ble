@@ -384,7 +384,7 @@ def _parse_accessory_inputs(port: bytes) -> tuple[int, list[dict[str, object]]] 
 
 
 def parse_report(payload: bytes) -> dict[str, object]:
-    """Decode a firmware-proven ``0x5a/0x61`` battery and power push."""
+    """Decode a ``0x5a/0x61`` battery and power push."""
     data: dict[str, object] = {}
     top = _report_records(payload)
 
@@ -397,7 +397,6 @@ def parse_report(payload: bytes) -> dict[str, object]:
                 battery_percent=int.from_bytes(battery[0:2], "little") / 100,
                 runtime_min=int.from_bytes(battery[2:4], "little"),
                 battery_time_type=time_type,
-                charging=time_type == 1 if time_type in (0, 1, 2) else None,
                 primary_battery_percent=int.from_bytes(battery[5:7], "little") / 100,
                 primary_runtime_min=int.from_bytes(battery[7:9], "little"),
             )
@@ -408,6 +407,13 @@ def parse_report(payload: bytes) -> dict[str, object]:
             data["temperature"] = (
                 int.from_bytes(battery[9:11], "little", signed=True) / 100
             )
+        # Primary pack direction is independent of the aggregate time type.
+        # Short records must clear a previously reported primary status.
+        primary_io_status = battery[12] if len(battery) >= 13 else None
+        data["primary_io_status"] = primary_io_status
+        data["primary_battery_status"] = {1: "recharging", 2: "discharging"}.get(
+            primary_io_status
+        )
 
     power_values = _records(top, 0x3030)
     if not power_values or len(power_values[0]) < 4:

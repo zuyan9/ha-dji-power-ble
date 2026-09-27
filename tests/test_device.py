@@ -2254,7 +2254,9 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
             (2, 5940, 516, 2, 5940, False),
             (None, None, 0, 2, 5940, False),
             (0, 0, None, 0, 0, False),
-            (1, 15, None, 1, 15, True),
+            (1, 15, None, 1, 15, False),
+            (None, None, 1, 1, 15, True),
+            (None, None, 0, 1, 15, False),
             (255, 12, None, 255, 12, None),
             (None, None, 600, 255, 12, None),
         )
@@ -2287,13 +2289,184 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(updates[-1].get("battery_time_type"), expected_type)
                 self.assertEqual(updates[-1].get("runtime_min"), expected_time)
                 self.assertIs(updates[-1].get("charging"), charging)
-                if sequence == 1:
-                    self.assertNotIn("charging", updates[-1])
-                if expected_type == 255:
-                    self.assertIn("charging", updates[-1])
+                self.assertIn("charging", updates[-1])
 
         self.assertEqual(updates[1]["runtime_min"], 120)
         self.assertTrue(updates[1]["charging"])
+
+    async def test_charging_requires_time_type_one_and_positive_input(self) -> None:
+        for time_type in (0, 1, 2, 3, 255):
+            for input_w in (None, 0, 1, 516):
+                for output_w in (0, 500):
+                    with self.subTest(
+                        time_type=time_type, input_w=input_w, output_w=output_w
+                    ):
+                        device = device_module.DjiPowerDevice(
+                            FakeBleDevice(), "ab" * 16, name="Test station"
+                        )
+                        battery = bytearray.fromhex("c819780001c819c801ce090102")
+                        battery[4] = time_type
+                        payload = record(0x3020, battery)
+                        if input_w is not None:
+                            power = output_w.to_bytes(2, "little") + input_w.to_bytes(
+                                2, "little"
+                            )
+                            payload += record(0x3030, power)
+
+                        device._handle_packet(
+                            duml.DumlPacket(
+                                0xAB, 0x02, 1, 0, duml.POWER_COMMAND_SET,
+                                duml.REPORT_COMMAND, payload,
+                            )
+                        )
+
+                        expected = None
+                        if time_type in (0, 2):
+                            expected = False
+                        elif time_type == 1 and input_w is not None:
+                            expected = input_w > 0
+                        self.assertIs(device.data["charging"], expected)
+                        self.assertEqual(device.data["battery_time_type"], time_type)
+                        self.assertEqual(device.data["runtime_min"], 120)
+                        self.assertEqual(device.data["primary_runtime_min"], 456)
+                        self.assertEqual(device.data["primary_io_status"], 2)
+                        self.assertEqual(
+                            device.data["primary_battery_status"], "discharging"
+                        )
+
+    async def test_charging_partial_push_order_and_duplicate_notifications(
+        self,
+    ) -> None:
+        for battery_first in (False, True):
+            for input_w in (0, 1):
+                with self.subTest(battery_first=battery_first, input_w=input_w):
+                    device = device_module.DjiPowerDevice(
+                        FakeBleDevice(), "ab" * 16, name="Test station"
+                    )
+                    updates = []
+                    device.add_state_listener(updates.append)
+                    battery = record(
+                        0x3020, bytes.fromhex("c819780001c819c801ce090102")
+                    )
+                    power = record(
+                        0x3030, (500).to_bytes(2, "little")
+                        + input_w.to_bytes(2, "little"),
+                    )
+                    payloads = (battery, power) if battery_first else (power, battery)
+
+                    def push(command: int, payload: bytes, device=device) -> None:
+                        device._handle_packet(
+                            duml.DumlPacket(
+                                0xAB, 0x02, 1, 0, duml.POWER_COMMAND_SET,
+                                command, payload,
+                            )
+                        )
+
+                    push(duml.REPORT_COMMAND, payloads[0])
+                    self.assertIsNone(updates[-1]["charging"])
+                    push(duml.REPORT_COMMAND, payloads[1])
+                    self.assertIs(updates[-1]["charging"], input_w > 0)
+                    self.assertEqual(len(updates), 2)
+
+                    push(duml.REPORT_COMMAND, battery + power)
+                    self.assertEqual(len(updates), 2)
+
+                    push(
+                        duml.TELEMETRY_COMMAND,
+                        duml.build_keyed_set_payload(
+                            [(0x15, b"\x3c\x00")], timestamp_ms=1
+                        ),
+                    )
+                    self.assertEqual(len(updates), 3)
+                    self.assertIs(updates[-1]["charging"], input_w > 0)
+                    push(duml.HMS_COMMAND, b"\x00" * 4)
+                    self.assertEqual(len(updates), 4)
+                    self.assertIs(updates[-1]["charging"], input_w > 0)
+                    self.assertEqual(updates[-1]["runtime_min"], 120)
+                    self.assertEqual(updates[-1]["primary_runtime_min"], 456)
+                    self.assertEqual(
+                        updates[-1]["primary_battery_status"], "discharging"
+                    )
+                    self.assertIsNone(updates[0]["charging"])
+
+    async def test_fragmented_primary_status_updates_preserve_unrelated_pushes(
+        self,
+    ) -> None:
+        updates = []
+        self.device.add_state_listener(updates.append)
+        recharging = bytes.fromhex("c819341702c819c801ce090101")
+        discharging = bytes.fromhex("c819780001c819c801ce090102")
+        cases = (
+            (duml.REPORT_COMMAND, record(0x3020, recharging), 1, "recharging", False),
+            (
+                duml.REPORT_COMMAND, record(0x3030, bytes.fromhex("f4010402")),
+                1, "recharging", False,
+            ),
+            (
+                duml.TELEMETRY_COMMAND,
+                duml.build_keyed_set_payload([(0x15, b"\x3c\x00")], timestamp_ms=1),
+                1, "recharging", False,
+            ),
+            (duml.REPORT_COMMAND, record(0x3020, discharging), 2, "discharging", True),
+            (
+                duml.REPORT_COMMAND, record(0x3030, bytes.fromhex("0000f401")),
+                2, "discharging", True,
+            ),
+        )
+        for sequence, case in enumerate(cases, start=1):
+            command, payload, io_status, status, charging = case
+            with self.subTest(sequence=sequence):
+                wire = duml.DumlPacket(
+                    0xAB, 0x02, sequence, 0, duml.POWER_COMMAND_SET, command, payload
+                ).encode()
+
+                for offset in range(0, len(wire), 7):
+                    self.device._on_notify(None, bytearray(wire[offset : offset + 7]))
+
+                self.assertEqual(len(updates), sequence)
+                self.assertEqual(updates[-1]["primary_io_status"], io_status)
+                self.assertEqual(updates[-1]["primary_battery_status"], status)
+                self.assertIs(updates[-1]["charging"], charging)
+                self.assertEqual(updates[-1]["primary_runtime_min"], 456)
+
+        self.assertEqual(self.device.data["timezone_offset_min"], 60)
+        self.assertEqual(updates[0]["runtime_min"], 5940)
+        self.assertEqual(updates[0]["primary_battery_status"], "recharging")
+        self.assertEqual(updates[-1]["runtime_min"], 120)
+
+    async def test_primary_status_unknown_or_missing_clears_stale_state(self) -> None:
+        updates = []
+        self.device.add_state_listener(updates.append)
+        battery = bytes.fromhex("c819341702c819c801ce090101")
+
+        def push(value: bytes) -> None:
+            self.device._handle_packet(
+                duml.DumlPacket(
+                    0xAB, 0x02, 1, 0, duml.POWER_COMMAND_SET,
+                    duml.REPORT_COMMAND, record(0x3020, value),
+                )
+            )
+
+        invalid_records = (
+            *((battery[:-1] + bytes((status,)), status) for status in (0, 3, 255)),
+            *((battery[:length], None) for length in range(13)),
+        )
+        for invalid, expected_raw in invalid_records:
+            with self.subTest(battery=invalid.hex()):
+                push(battery)
+                self.assertEqual(updates[-1]["primary_battery_status"], "recharging")
+
+                push(invalid)
+
+                self.assertEqual(self.device.data["primary_io_status"], expected_raw)
+                self.assertEqual(updates[-1]["primary_io_status"], expected_raw)
+                self.assertIsNone(self.device.data["primary_battery_status"])
+                self.assertIsNone(updates[-1]["primary_battery_status"])
+                self.assertEqual(updates[-1]["battery_percent"], 66)
+                self.assertEqual(updates[-1]["primary_battery_percent"], 66)
+                self.assertEqual(updates[-1]["runtime_min"], 5940)
+                self.assertEqual(updates[-1]["primary_runtime_min"], 456)
+                self.assertFalse(updates[-1]["charging"])
 
 
 class BaseInfoPushTests(unittest.IsolatedAsyncioTestCase):

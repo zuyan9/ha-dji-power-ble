@@ -113,6 +113,35 @@ class _Coordinator:
             listener()
 
 
+class ChargingTests(unittest.TestCase):
+    def test_existing_identity_and_state_follow_merged_charging(self) -> None:
+        coordinator = _Coordinator()
+        entity = binary_sensor.DjiPowerCharging(coordinator)
+
+        self.assertEqual(entity._attr_unique_id, f"{ADDRESS}_charging")
+        self.assertEqual(entity._attr_name, "Charging")
+        self.assertEqual(entity._attr_device_class, "battery_charging")
+        for state in (True, False, None):
+            with self.subTest(charging=state):
+                coordinator.publish({
+                    "charging": state,
+                    "primary_battery_status": "discharging",
+                })
+                self.assertIs(entity.is_on, state)
+        coordinator.publish({})
+        self.assertIsNone(entity.is_on)
+        coordinator.data = None
+        self.assertIsNone(entity.is_on)
+
+    def test_charging_is_unavailable_while_disconnected(self) -> None:
+        coordinator = _Coordinator({"charging": True})
+        entity = binary_sensor.DjiPowerCharging(coordinator)
+
+        self.assertTrue(entity.available)
+        coordinator.last_update_success = False
+        self.assertFalse(entity.available)
+
+
 class MaintenanceChargingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.coordinator = _Coordinator()
