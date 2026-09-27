@@ -22,6 +22,10 @@ class ScheduleOptionsTests(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.coordinator = SimpleNamespace(
             device=SimpleNamespace(model="DJI Power 2000"),
+            data={
+                "time_periods": deepcopy([PEAK]), "eco_available": True,
+                "station_rules": [5],
+            },
             async_get_time_periods=AsyncMock(return_value=deepcopy([PEAK])),
             async_set_time_periods=AsyncMock(),
         )
@@ -88,7 +92,7 @@ class ScheduleOptionsTests(IsolatedAsyncioTestCase):
         result = await self.flow.async_step_init()
 
         self.assertEqual(result["type"], "menu")
-        self.coordinator.device.model = "DJI Power 1000 V2"
+        self.coordinator.device.model = "DJI Power"
         self.flow.config_entry.data["model"] = "DJI Power 2000"
 
         result = await self.flow.async_step_init()
@@ -96,8 +100,8 @@ class ScheduleOptionsTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["step_id"], "init")
 
-    async def test_schedule_entry_points_reject_other_models_without_io(self):
-        self.coordinator.device.model = "DJI Power 1000 V2"
+    async def test_schedule_entry_points_reject_unknown_model_without_io(self):
+        self.coordinator.device.model = "DJI Power"
         self.flow.config_entry.data["model"] = self.coordinator.device.model
         for step in (
             "time_periods", "add_period", "edit_period", "change_period",
@@ -109,6 +113,24 @@ class ScheduleOptionsTests(IsolatedAsyncioTestCase):
                 self.assertEqual(result["reason"], "schedule_not_supported")
         self.coordinator.async_get_time_periods.assert_not_awaited()
         self.coordinator.async_set_time_periods.assert_not_awaited()
+
+    async def test_mini_menu_follows_reported_schedule_capability(self):
+        self.coordinator.device.model = "DJI Power 1000 Mini"
+        original = dict(self.coordinator.data)
+        for data in ({}, original | {"eco_available": False},
+                     original | {"station_rules": None},
+                     original | {"station_rules": []},
+                     original | {"time_periods": None}):
+            with self.subTest(data=data):
+                self.coordinator.data = data
+                result = await self.flow.async_step_init()
+                self.assertEqual(result["type"], "form")
+                result = await self.flow.async_step_time_periods()
+                self.assertEqual(result["reason"], "schedule_not_supported")
+        self.coordinator.data = original | {"time_periods": []}
+        result = await self.flow.async_step_init()
+        self.assertEqual(result["menu_options"], ["connection", "time_periods"])
+        self.coordinator.async_get_time_periods.assert_not_awaited()
 
     async def test_unloaded_station_cannot_open_editor(self):
         self.flow.hass.data = {}

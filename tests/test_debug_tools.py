@@ -396,7 +396,7 @@ class DebugCaptureTests(unittest.IsolatedAsyncioTestCase):
             await debug.capture(args, debug.Recorder(stream, "capture"))
 
         self.assertEqual(
-            [request.command_id for request in requests], [0x6A, 0x6A, 0x60, 0x60]
+            [request.command_id for request in requests], [0x6A, 0x6A, 0x60]
         )
         self.assertEqual(
             requests[1].payload, b"\x01\x12\x34\x56\x78" + b"ab" * 16 + b"\x00"

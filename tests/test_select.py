@@ -21,14 +21,16 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
             entry=types.SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"}),
             device=types.SimpleNamespace(model="DJI Power 2000"),
             last_update_success=True,
-            data={"power_adjustment": "Manual"},
+            data={
+                "power_adjustment": "Manual", "eco_available": True,
+                "station_rules": [5, 6],
+            },
             async_set_power_adjustment=AsyncMock(),
             async_add_listener=Mock(return_value=Mock()),
         )
         self.entity = select.DjiPowerAdjustmentSelect(self.coordinator)
 
-    async def test_only_power_2000_models_get_selector_before_config(self) -> None:
-        self.coordinator.data = {}
+    async def test_known_models_wait_for_reported_selector_capability(self) -> None:
         entry = types.SimpleNamespace(entry_id="station", async_on_unload=Mock())
         hass = types.SimpleNamespace(
             data={"dji_power_ble": {"station": self.coordinator}}
@@ -42,15 +44,32 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(model=model):
                 self.coordinator.device.model = model
+                self.coordinator.data = {}
+                listeners = []
+                self.coordinator.async_add_listener.side_effect = (
+                    lambda listener, listeners=listeners:
+                        listeners.append(listener) or Mock()
+                )
                 add_entities = Mock()
                 await select.async_setup_entry(hass, entry, add_entities)
-                if model in ("DJI Power 2000", "DJI Power Auro 2000 Elite"):
-                    entities = add_entities.call_args.args[0]
-                    self.assertEqual(len(entities), 1)
-                    self.assertIsInstance(entities[0], select.DjiPowerAdjustmentSelect)
-                    self.assertFalse(entities[0].available)
-                else:
-                    add_entities.assert_not_called()
+                add_entities.assert_not_called()
+                self.coordinator.data = {
+                    "power_adjustment": "Manual", "eco_available": True,
+                    "station_rules": [5, 6],
+                }
+                for listener in listeners:
+                    listener()
+                entities = add_entities.call_args.args[0]
+                self.assertEqual(len(entities), 1)
+                self.assertIsInstance(entities[0], select.DjiPowerAdjustmentSelect)
+                self.assertTrue(entities[0].available)
+                self.coordinator.data["station_rules"] = None
+                self.assertFalse(entities[0].available)
+                self.coordinator.data["station_rules"] = [5, 6]
+                for listener in listeners:
+                    listener()
+                self.assertTrue(entities[0].available)
+                add_entities.assert_called_once()
 
     def test_reported_mode_updates_without_watt_bounds(self) -> None:
         for mode in ("Manual", "Automatic", "Manual"):

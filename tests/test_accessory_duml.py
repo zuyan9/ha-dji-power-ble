@@ -455,6 +455,85 @@ class CarChargerBuilderTests(unittest.TestCase):
                 edit_car(car_value(mode=mode), **settings)
 
 
+class RuleDrivenPortSwitchBuilderTests(unittest.TestCase):
+    ROWS = [
+        b"\x02\x01\x01ac-tail", b"\x05\x00\x02sdc-tail",
+        b"\x07\x03\x01car-tail", b"\x63\x01\x07future",
+    ]
+
+    def value(self) -> bytes:
+        return b"".join(record(0x1014, row) for row in self.ROWS)
+
+    def test_rule_21_selects_complete_list_otherwise_only_changed_row(self):
+        for rules in ([11], [11, 21]):
+            with self.subTest(rules=rules):
+                payload = duml.build_port_switch_set_payload(
+                    self.value(), 5, 0, True, station_rules=rules, timestamp_ms=0
+                )
+                keyed = duml.parse_keyed_values(payload)
+                self.assertEqual(set(keyed), {0x0D, 0x0E})
+                self.assertEqual(keyed[0x0E], bytes.fromhex("0c00") + b"1e00efffff3f")
+                expected = [b"\x05\x00\x01sdc-tail"]
+                if 21 in rules:
+                    expected = [self.ROWS[0], expected[0], *self.ROWS[2:]]
+                actual = duml.parse_tlvs(keyed[0x0D], strict=True)
+                self.assertEqual([item.value for item in actual], expected)
+                self.assertEqual([item.tag for item in actual], [0x0D] * len(expected))
+
+    def test_ac_and_car_outlets_accept_empty_rules_but_use_reported_identity(self):
+        for kind, seq in ((2, 1), (7, 3)):
+            for rules in ([], [21]):
+                with self.subTest(port=(kind, seq), rules=rules):
+                    payload = duml.build_port_switch_set_payload(
+                        self.value(), kind, seq, False, station_rules=rules
+                    )
+                    rows = duml.parse_power_switches(
+                        duml.parse_keyed_values(payload)[0x0D]
+                    )
+                    self.assertIn({"type": kind, "seq": seq, "sw": 2}, rows)
+                    self.assertEqual(len(rows), 4 if 21 in rules else 1)
+
+    def test_usb_and_sdc_require_rule_11_before_either_write_scope(self):
+        for kind in (3, 4, 5, 6):
+            value = record(0x1014, bytes((kind, 0, 1)))
+            for rules in ([], [21]):
+                with self.subTest(kind=kind, rules=rules), self.assertRaisesRegex(
+                    duml.ProtocolError, "does not offer"
+                ):
+                    duml.build_port_switch_set_payload(
+                        value, kind, 0, False, station_rules=rules
+                    )
+
+    def test_unknown_rules_reject_even_ac_without_guessing_write_scope(self):
+        for rules in (None, [True], [11, -1], "11"):
+            with self.subTest(rules=rules), self.assertRaisesRegex(
+                duml.ProtocolError, "rules snapshot"
+            ):
+                duml.build_port_switch_set_payload(
+                    self.value(), 2, 1, False, station_rules=rules
+                )
+
+    def test_invalid_identity_state_and_duplicate_rows_cannot_write(self):
+        for kind, seq, enabled in (
+            (True, 1, True), (99, 1, True), (2, True, True),
+            (2, -1, True), (2, 256, True), (2, 1, 1), (2, 0, True),
+        ):
+            with self.subTest(port=(kind, seq), enabled=enabled), self.assertRaises(
+                duml.ProtocolError
+            ):
+                duml.build_port_switch_set_payload(
+                    self.value(), kind, seq, enabled, station_rules=[]
+                )
+        for value in (
+            b"", b"bad", record(0x1014, b"\x02\x01\x00"),
+            record(0x1014, b"\x02\x01\x01") * 2,
+        ):
+            with self.subTest(value=value), self.assertRaises(duml.ProtocolError):
+                duml.build_port_switch_set_payload(
+                    value, 2, 1, False, station_rules=[]
+                )
+
+
 class SdcSwitchBuilderTests(unittest.TestCase):
     def test_reported_zero_sequence_is_preserved(self) -> None:
         payload = duml.build_sdc_switch_set_payload(

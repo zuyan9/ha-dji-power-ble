@@ -74,6 +74,29 @@ diagnostics = _load_diagnostics()
 
 
 class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_keeps_numeric_settings_but_redacts_unknown_records(self):
+        state = {
+            "key_19": b"TEST-UNKNOWN-IDENTITY".hex(),
+            "key_22": b"TEST-LOG-IDENTITY".hex(),
+            "key_99": b"TEST-FUTURE-IDENTITY".hex(),
+            "key_26": "0102000000",
+            "key_27": "0102",
+            "discovery_keys": [0x19, 0x22, 0x26, 0x27],
+            "capability_discovery_complete": True,
+        }
+        entry = types.SimpleNamespace(entry_id="station", data={}, options={})
+        coordinator = types.SimpleNamespace(
+            data=state, device=types.SimpleNamespace(is_connected=True)
+        )
+        hass = types.SimpleNamespace(
+            data={"dji_power_ble": {entry.entry_id: coordinator}}
+        )
+        result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+        self.assertEqual(result["state"], state | {
+            "key_19": REDACTED, "key_22": REDACTED, "key_99": REDACTED,
+        })
+        self.assertNotEqual(state["key_19"], REDACTED)
+
     async def test_redacts_pack_identity_and_raw_records_without_mutating_state(
         self,
     ) -> None:

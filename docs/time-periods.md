@@ -1,13 +1,13 @@
 # Electricity Price Periods
 
-The **Electricity price time periods** sensor displays the number of scheduled periods configured on the station. Its `periods` attribute details the full schedule, while the `timezone_offset_min` attribute reflects the station's UTC offset in minutes (when reported). Missing or malformed schedule data makes the sensor unavailable. This sensor and its schedule updates are available on the Power 2000 and Power Auro 2000 Elite and are not supported on other station models.
+The **Electricity price time periods** sensor displays the number of scheduled periods configured on the station. Its `periods` attribute details the full schedule, while the `timezone_offset_min` attribute reflects the station's UTC offset in minutes (when reported). Missing or malformed schedule data makes the sensor unavailable. The sensor and schedule editor appear on any supported station that reports a valid schedule list, Eco availability and station rule 5. An empty list is valid. Discovery runs after connection setup, so these controls may appear shortly afterward.
 
 Open **Settings → Devices & services → DJI Power → Configure → Electricity price periods** to edit the schedule directly. The editor reads the current periods from the connected station.
 
 Existing overlapping periods remain visible in the sensor and editor, including
 overlaps across Sunday midnight. Correct the overlaps before saving a schedule.
 
-For automation, select your Power 2000 or Power Auro 2000 Elite under **DJI Power: Set electricity price time periods**. Under **Time periods**, click **Add** to set the peak/off-peak rate, start/end times, and optional weekdays. Use the edit or delete buttons on each row to modify the schedule. To apply the schedule daily, leave the weekdays blank or select all seven days. Keep seconds set to `00`.
+For automation, select your station under **DJI Power: Set electricity price time periods**. Under **Time periods**, click **Add** to set the peak/off-peak rate, start/end times, and optional weekdays. Use the edit or delete buttons on each row to modify the schedule. To apply the schedule daily, leave the weekdays blank or select all seven days. Keep seconds set to `00`.
 
 These forms define the payload sent by the automation; they do not load or immediately alter the station's schedule. Each run replaces all peak and off-peak periods on the selected station. To load and edit the current schedule directly, use **Configure** above.
 

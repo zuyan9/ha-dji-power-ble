@@ -14,7 +14,7 @@ used only during setup to retrieve the device's local credential.
 | DJI Power 1000 Mini | [Partially hardware-tested](https://github.com/zuyan9/ha-dji-power-ble/issues/4) |
 | DJI Power 1000 | [Hardware Tested](https://github.com/zuyan9/ha-dji-power-ble/issues/10)|
 | DJI Power 2000 | [Hardware Tested](https://github.com/zuyan9/ha-dji-power-ble/issues/17) |
-| DJI Power Auro 2000 Elite | Untested; uses the Power 2000 feature set |
+| DJI Power Auro 2000 Elite | Untested; uses the Power 2000 protocol profile |
 
 ## Features
 
@@ -31,8 +31,9 @@ used only during setup to retrieve the device's local credential.
   - SDC accessory [info and controls](docs/accessory-controls.md)
   - Individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs),
     where the station offers them
-- Model Specific:
-  - Power 2000 and Power Auro 2000 Elite: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
+  - Car-outlet switches, where reported
+  - Discharge/recharge watts and [electricity price periods](docs/time-periods.md),
+    where station configuration and rules offer them
 
 
 ## Requirements

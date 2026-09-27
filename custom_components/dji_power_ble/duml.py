@@ -60,8 +60,16 @@ RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
 
+# DJI Home requests these optional configuration keys on every station model.
+APP_DISCOVERY_KEYS = (
+    0x00, 0x02, 0x03, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+    0x0C, 0x0D, 0x0E, 0x15, 0x16, 0x18, 0x19, 0x1B, 0x1C, 0x1D,
+    0x1E, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+)
+
 # Station rule with which DJI Home offers per-port SDC and USB switches.
 PORT_SWITCH_RULE = 11
+FULL_LIST_PORT_WRITE_RULE = 21
 
 TIME_PERIOD_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -948,6 +956,10 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
         # An explicit invalid/disabled record must clear previously usable state.
         # Other module snapshots can omit this key and must not clear it.
         data.update(
+            eco_available=(
+                keyed[ECO_MODE_KEY][0] == 1
+                if len(keyed[ECO_MODE_KEY]) >= 86 else None
+            ),
             power_adjustment=None,
             charge_power_available=False,
             charge_power_min_w=None,
@@ -1033,6 +1045,7 @@ def build_ac_set_payload(
     enabled: bool,
     *,
     current_value: str | bytes | None = None,
+    full_list: bool = True,
     timestamp_ms: int | None = None,
 ) -> bytes:
     """Build the AC SET, preserving other reported switches when supplied."""
@@ -1057,6 +1070,8 @@ def build_ac_set_payload(
         value = _replace_accessory_row(
             value, POWER_SWITCH_KEY, index, 2, bytes((state,))
         )
+        if not full_list:
+            value = _single_port_switch_row(value, index)
     return build_keyed_set_payload(
         [(POWER_SWITCH_KEY, value), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )
@@ -1199,6 +1214,7 @@ def _build_port_switch_set_payload(
     enabled: bool,
     label: str,
     timestamp_ms: int | None,
+    full_list: bool = True,
 ) -> bytes:
     """Edit one explicitly reported port switch without inventing a row."""
     if type(enabled) is not bool:
@@ -1220,8 +1236,46 @@ def _build_port_switch_set_payload(
     updated = _replace_accessory_row(
         value, POWER_SWITCH_KEY, index, 2, bytes((1 if enabled else 2,))
     )
+    if not full_list:
+        updated = _single_port_switch_row(updated, index)
     return build_keyed_set_payload(
         [(POWER_SWITCH_KEY, updated), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+def _single_port_switch_row(value: bytes, index: int) -> bytes:
+    """Keep the edited row and its extension tail using the app's SET tag."""
+    row = parse_tlvs(value, strict=True)[index].value
+    return POWER_SWITCH_KEY.to_bytes(2, "little") + len(row).to_bytes(2, "little") + row
+
+
+def build_port_switch_set_payload(
+    current_value: str | bytes,
+    interface_type: int,
+    seq: int,
+    enabled: bool,
+    *,
+    station_rules: list[int],
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Edit an offered output using the station's rule-selected list scope.
+
+    Callers must supply fresh switch and rules snapshots. An authoritative
+    empty rules list permits AC and car outlets and selects a one-row SET.
+    """
+    if type(interface_type) is not int or interface_type not in (2, 3, 4, 5, 6, 7):
+        raise ProtocolError("output controls require a supported port type")
+    if type(seq) is not int or not 0 <= seq <= 255:
+        raise ProtocolError("output port sequence must be a reported byte")
+    if not isinstance(station_rules, list) or any(
+        type(rule) is not int or rule < 0 for rule in station_rules
+    ):
+        raise ProtocolError("output controls require a valid station rules snapshot")
+    if interface_type in (3, 4, 5, 6) and PORT_SWITCH_RULE not in station_rules:
+        raise ProtocolError("the station does not offer USB or SDC output controls")
+    return _build_port_switch_set_payload(
+        current_value, interface_type, seq, enabled, "Output", timestamp_ms,
+        full_list=FULL_LIST_PORT_WRITE_RULE in station_rules,
     )
 
 
@@ -1231,12 +1285,13 @@ def build_sdc_switch_set_payload(
     seq: int,
     enabled: bool,
     *,
+    full_list: bool = True,
     timestamp_ms: int | None = None,
 ) -> bytes:
     """Edit an explicitly reported SDC switch without inventing a port row."""
     _validate_sdc_identity(interface_type, seq)
     return _build_port_switch_set_payload(
-        current_value, interface_type, seq, enabled, "SDC", timestamp_ms
+        current_value, interface_type, seq, enabled, "SDC", timestamp_ms, full_list
     )
 
 
@@ -1246,6 +1301,7 @@ def build_usb_switch_set_payload(
     seq: int,
     enabled: bool,
     *,
+    full_list: bool = True,
     timestamp_ms: int | None = None,
 ) -> bytes:
     """Edit an explicitly reported USB-A or USB-C output switch."""
@@ -1254,7 +1310,7 @@ def build_usb_switch_set_payload(
     if type(seq) is not int or not 0 <= seq <= 255:
         raise ProtocolError("USB port sequence must be a reported byte")
     return _build_port_switch_set_payload(
-        current_value, interface_type, seq, enabled, "USB", timestamp_ms
+        current_value, interface_type, seq, enabled, "USB", timestamp_ms, full_list
     )
 
 
@@ -1417,7 +1473,7 @@ def build_discharge_power_set_payload(
         )
     value[38:42] = watts.to_bytes(4, "little")
     return build_keyed_set_payload(
-        [(ECO_MODE_KEY, bytes(value))], timestamp_ms=timestamp_ms
+        [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )
 
 
@@ -1438,7 +1494,7 @@ def build_charge_power_set_payload(
         )
     value[26:30] = watts.to_bytes(4, "little")
     return build_keyed_set_payload(
-        [(ECO_MODE_KEY, bytes(value))], timestamp_ms=timestamp_ms
+        [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )
 
 
@@ -1464,7 +1520,7 @@ def build_power_adjustment_set_payload(
             )
     value[17] = 1 if mode == "Automatic" else 2
     return build_keyed_set_payload(
-        [(ECO_MODE_KEY, bytes(value))], timestamp_ms=timestamp_ms
+        [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )
 
 

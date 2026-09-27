@@ -9,7 +9,7 @@ from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN
 from .duml import ProtocolError, normalize_time_periods
-from .features import ModelFeature, supports_feature
+from .features import is_known_model
 
 SERVICE_SET_TIME_PERIODS = "set_time_periods"
 
@@ -60,12 +60,10 @@ def async_setup_services(hass: HomeAssistant) -> None:
                 DOMAIN, coordinator.device.address
             ) not in device.identifiers:
                 continue
-            if not supports_feature(
-                coordinator.device.model, ModelFeature.TARIFF_SCHEDULE
-            ):
+            if not is_known_model(coordinator.device.model):
                 raise ServiceValidationError(
-                    "Electricity price time periods are supported only on "
-                    "Power 2000 and Power Auro 2000 Elite"
+                    "Select a recognized DJI Power station model before "
+                    "configuring electricity price time periods"
                 )
             if (
                 not coordinator.last_update_success
@@ -74,6 +72,8 @@ def async_setup_services(hass: HomeAssistant) -> None:
                 raise ServiceValidationError(
                     "The selected power station is unavailable"
                 )
+            # The device checks fresh schedule, Eco and rules records under its
+            # operation lock; cached capability may still await discovery.
             await coordinator.async_set_time_periods(call.data["periods"])
             return
 

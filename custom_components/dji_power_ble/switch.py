@@ -17,18 +17,16 @@ from .accessory import (
     DjiPowerCarChargerEntity,
     async_discover_accessories,
     async_discover_backup_reserve,
-    port_switches_offered,
 )
 from .const import DOMAIN
 from .entity import DjiPowerEntity
-from .features import ModelFeature
+from .features import ModelFeature, eligible_port_switches, feature_available
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([DjiPowerAcSwitch(coordinator)])
     async_discover_backup_reserve(
         coordinator,
         entry,
@@ -57,29 +55,20 @@ async def async_setup_entry(
                 DjiPowerUsbSwitch(coordinator, identity)
             ],
         },
-        feature=ModelFeature.USB_CONTROLS,
         interface_types=USB_INTERFACE_TYPES,
-        offered=port_switches_offered,
     )
-
-
-class DjiPowerAcSwitch(DjiPowerEntity, SwitchEntity):
-    _attr_device_class = SwitchDeviceClass.OUTLET
-    _attr_name = "AC output"
-
-    def __init__(self, coordinator) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_ac_output"
-
-    @property
-    def is_on(self) -> bool | None:
-        return (self.coordinator.data or {}).get("ac_enabled")
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_ac(True)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_ac(False)
+    async_discover_accessories(
+        coordinator,
+        entry,
+        async_add_entities,
+        {
+            "power_switches": lambda identity: [
+                DjiPowerAcSwitch(coordinator, identity)
+                if identity[0] == 2 else DjiPowerCarOutletSwitch(coordinator, identity)
+            ],
+        },
+        interface_types={2, 7},
+    )
 
 
 class DjiPowerBackupReserveSwitch(DjiPowerEntity, SwitchEntity):
@@ -99,7 +88,7 @@ class DjiPowerBackupReserveSwitch(DjiPowerEntity, SwitchEntity):
         data = self.coordinator.data or {}
         return (
             super().available
-            and data.get("energy_reserve_available") is True
+            and feature_available(data, ModelFeature.RESERVE_CONTROL)
             and self.is_on is not None
         )
 
@@ -149,6 +138,12 @@ class _DjiPowerPortSwitch(DjiPowerAccessoryEntity, SwitchEntity):
     _row_key = "power_switches"
 
     @property
+    def row(self) -> dict | None:
+        return eligible_port_switches(self.coordinator.data or {}).get(
+            self._identity[:2]
+        )
+
+    @property
     def available(self) -> bool:
         return super().available and self.is_on is not None
 
@@ -156,6 +151,54 @@ class _DjiPowerPortSwitch(DjiPowerAccessoryEntity, SwitchEntity):
     def is_on(self) -> bool | None:
         value = (self.row or {}).get("sw")
         return value == 1 if type(value) is int and value in (1, 2) else None
+
+
+class DjiPowerAcSwitch(_DjiPowerPortSwitch):
+    """Control an explicitly reported AC outlet, preserving the first outlet ID."""
+
+    _attr_device_class = SwitchDeviceClass.OUTLET
+    _interface_types = {2}
+
+    def __init__(
+        self, coordinator, identity: AccessoryIdentity = (2, 1, 0)
+    ) -> None:
+        super().__init__(coordinator, identity, "ac_output", "output")
+        seq = identity[1]
+        self._attr_name = "AC output" if seq == 1 else f"AC{seq} output"
+        suffix = "ac_output" if seq == 1 else f"2_{seq}_ac_output"
+        self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_{suffix}"
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        if self._identity[1] == 1:
+            await self.coordinator.async_set_ac(True)
+        else:
+            await self.coordinator.async_set_port_switch(*self._identity[:2], True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        if self._identity[1] == 1:
+            await self.coordinator.async_set_ac(False)
+        else:
+            await self.coordinator.async_set_port_switch(*self._identity[:2], False)
+
+
+class DjiPowerCarOutletSwitch(_DjiPowerPortSwitch):
+    """Control the station's reported 12 V car outlet."""
+
+    _attr_device_class = SwitchDeviceClass.OUTLET
+    _interface_types = {7}
+
+    def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
+        super().__init__(coordinator, identity, "car_outlet_output", "output")
+        seq = identity[1]
+        self._attr_name = (
+            "Car outlet output" if seq == 1 else f"Car outlet {seq} output"
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_port_switch(*self._identity[:2], True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_port_switch(*self._identity[:2], False)
 
 
 class DjiPowerSdcSwitch(_DjiPowerPortSwitch):
@@ -182,12 +225,6 @@ class DjiPowerUsbSwitch(_DjiPowerPortSwitch):
         interface_type, seq, _ = identity
         port = "USB-A" if interface_type == 3 else "USB-C"
         self._attr_name = f"{port}{seq} output"
-
-    @property
-    def available(self) -> bool:
-        return super().available and port_switches_offered(
-            self.coordinator.data or {}
-        )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_usb(*self._identity[:2], True)

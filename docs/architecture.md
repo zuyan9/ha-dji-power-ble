@@ -68,18 +68,23 @@ Pack serial numbers identify devices and entities independently of connection or
 Missing packs retain their registry entries and history with unavailable sensors,
 including after a reload.
 
-On these same models, optional SDC switch, car-charger, and accessory-list
-configuration is first read in the background after setup, then refreshed with the
-packs every 30 seconds, together with the backup reserve setting and, while a car
-charger is reported, the station rules that pick its Auto layout. Power 1000 Mini
-reads its switch list on the same schedule, without pack reads. On every station,
-reported USB rows become USB output switches when the station's rules include rule
-11; the rules are read again while such a row is reported. The entity platforms
-discover controls from supported reported rows, identified by interface, port
-sequence, and charger type, and add the backup reserve controls once the station
-offers that setting. Missing or invalid snapshots invalidate the affected controls
-without removing their entities. These controls remain on the station's device and use
-its existing connection.
+After connection setup, every known station model gets a bounded background GET
+of the app's 30 settings keys. Success and missing-key replies are accepted;
+oversized replies fall back to one key per request. The probe has a 45-second total
+limit, with eight seconds per request, and optional failures leave normal telemetry
+running. Diagnostics record the returned key IDs and whether discovery completed.
+
+Car-charger settings, switch rows, accessory information, reserve, and station rules
+refresh every 30 seconds on every known model, including the Mini. Pack polling
+remains limited to models with expansion batteries. Entity platforms add controls
+when their records and feature-specific gates become usable. Reserve uses its
+availability flag; schedules require a valid list, Eco availability and rule 5;
+existing TOU power controls additionally require rule 6 and an active TOU setup.
+AC and car outlets need valid switch rows; SDC and USB also require rule 11.
+
+Missing or invalid snapshots make affected controls unavailable without removing
+their entities. Later valid snapshots restore them. Existing entity IDs are retained.
+Transport and pack support still depend on the identified station model.
 
 ## Writes and consistency
 
@@ -94,10 +99,11 @@ require matching fresh readback of both records.
 Backup reserve writes use keys `0x06` and `0x0E` and change only the requested switch
 or level after a fresh `0x06` read.
 
-AC, SDC, and USB switches read and preserve the complete switch list before editing
-their own row. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
+Port switches read the switch list and station rules inside the operation lock.
+Rule 21 selects a full-list SET; otherwise only the addressed row is sent. Row
+bodies and extension bytes are preserved. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
 chargers, and validate the selected setting against fresh reported bounds and the
-modes that use it; in Auto, the station's last-read rules decide. All three
+modes that use it; in Auto, freshly read station rules decide. These
 paths require a fresh matching row after the keyed acknowledgement. Optional reads
 and writes share the operation lock, including the confirmation period.
 
@@ -128,4 +134,6 @@ or raw captures containing them. Downloaded diagnostics redact the name, address
 and serial number; account passwords and member tokens are transient and are not stored.
 Expansion-pack serial numbers and the raw keyed records that carry pack, parallel-device,
 or accessory serial numbers are also redacted. Accessory serial numbers in telemetry
-reports are discarded during decoding.
+reports are discarded during decoding. Raw Eco records, unknown keyed records,
+and records with identifiers are redacted; understood numeric settings remain
+available for diagnosis.

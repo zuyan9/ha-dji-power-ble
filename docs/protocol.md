@@ -139,9 +139,17 @@ GET requests contain operation `0x00` followed by requested key IDs plus `0x1000
 each encoded as a little-endian uint16. Initial setup requests base information,
 network state, charge limits, energy reserve, display, power switches, rules, and
 timezone in one GET for keys `0x00`, `0x02`, `0x05`, `0x06`, `0x0C`, `0x0D`, `0x0E`,
-and `0x15`. Expansion batteries use a separate `0x01` read; Power 2000 and Power Auro
-2000 Elite also request `0x18` and `0x16`. Each key selects one property, not a group
-or a complete configuration snapshot. It decodes these fields:
+and `0x15`. Expansion-capable models use a separate `0x01` read.
+
+After initialization, every known model gets the app's broader settings GET:
+`00 02 03 05 06 07 08 09 0A 0B 0C 0D 0E 15 16 18 19 1B 1C 1D 1E 20 21 22 23 24 25 26 27 28`.
+Each key selects one property. GET status is a little-endian u32 before the shared
+header: `0` (success) and `2` (missing unsupported keys) are complete responses;
+`1` (over) and `3` (over and missing) trigger individual-key fallback during
+capability discovery. The probe is bounded to 45 seconds overall and eight seconds
+per request. Failed or unvisited keys cannot retain stale capability state.
+Accessory key `0x04` is read separately; Mini does not poll expansion packs.
+The integration decodes these fields:
 
 | Key | Meaning | Exposed values |
 | --- | --- | --- |
@@ -152,8 +160,8 @@ or a complete configuration snapshot. It decodes these fields:
 | `0x05` | Charge limits | Recharge and discharge limits and their reported bounds |
 | `0x06` | Energy storage | Backup reserve availability, switch, and level |
 | `0x0C` | Display | Display (screen) timeout |
-| `0x0D` | Power switch | AC, SDC, and USB output states |
-| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0); USB output switches (rule 11) |
+| `0x0D` | Power switch | AC, SDC, USB and car-outlet states |
+| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0); SDC/USB switches (rule 11); port SET scope (rule 21) |
 | `0x15` | Timezone | UTC offset in minutes |
 | `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
 
@@ -161,7 +169,8 @@ Raw keyed values are retained internally as `key_XX` hexadecimal state. Download
 diagnostics redact records containing known private identifiers, including expansion
 packs (`key_01`), parallel devices (`key_03`), and accessories (`key_04`). The raw
 rules record (`key_0e`) is also redacted; diagnostics keep its decoded rule numbers as
-`station_rules`.
+`station_rules`. Unknown raw records, including `key_19` and `key_22`, are
+redacted as well. Discovery key IDs and understood numeric records remain visible.
 
 ### Display
 
@@ -320,8 +329,8 @@ switch or level, and preserve any additional bytes. The station stores the level
 without checking it. Like DJI Home, the integration limits it to the discharge limit
 plus 5 % through the recharge limit, from a fresh `0x05` read.
 
-Power 2000 and Power Auro 2000 Elite manual **Recharge power** and **Discharge power**
-writes use key `0x18` (`eco_mode`). The app-derived layout stores each setting as
+Manual **Recharge power** and **Discharge power** writes use keys `0x18`
+(`eco_mode`) and `0x0E`. The app-derived layout stores each setting as
 little-endian uint32 values:
 
 | Setting | Maximum offset | Minimum offset | Setpoint offset |
@@ -329,7 +338,8 @@ little-endian uint32 values:
 | Recharge power (W) | 18 | 22 | 26 |
 | Discharge power (W) | 30 | 34 | 38 |
 
-Both controls require grid-tied Time of Use with manual power adjustment:
+Both controls require Eco availability (byte 0 = 1), station rules 5 and 6,
+and grid-tied Time of Use with manual power adjustment:
 `mode` (byte 1) = 3, `grid_mode` (byte 16) = 3, and `chg_mode` (byte 17) = 2.
 They accept integer watts within their own returned bounds. Recharge power is the
 manual Time of Use charging setpoint; it is distinct from the recharge limit (%)
@@ -347,7 +357,10 @@ configuration and preserves both watt setpoints and all other settings. Automati
 also requires a linked smart meter (`src_dev_id`); link it in DJI Home first.
 Both watt numbers are available only in Manual with valid reported limits.
 Initial grid installation, Time of Use selection, and meter linking remain in DJI
-Home. These controls do not construct missing configuration.
+Home. These controls do not construct missing configuration or switch grid modes
+through BLE. DJI Home additionally checks a country allow-list from its online
+configuration. That online country check is not implemented here; the existing
+TOU controls use the station's reported availability, rules and active mode.
 
 The **Set electricity price time periods** action replaces the complete tariff
 schedule in key `0x16`. Scheduled Periods and Time of Use share this list.
@@ -362,13 +375,13 @@ snapshot for conflict detection while overlaps are corrected. Schedules use the
 station's timezone without changing it. An explicit empty list is distinct from an
 omitted or malformed key.
 
-Schedule writes require fresh schedule and Eco configuration, preserve the selected
+Schedule writes require a valid list, Eco availability and rule 5 on any known
+model. They read fresh schedule, Eco configuration and rules, preserve the selected
 mode, and include the same `0x0E` rules record as AC output writes. Both keys require
 successful acknowledgements, followed by matching tariff readback. Clearing the
 last period is rejected while scheduled or grid operation is active. Schedule
-entities, reads, and writes are restricted to Power 2000 and Power Auro 2000 Elite.
-The codec and offline confirmation tests do not establish physical schedule execution
-on either model.
+entities appear when those capabilities are discovered. The codec and offline
+confirmation tests do not establish physical schedule execution.
 
 A `0x63` response contains a four-byte status for each requested key. Every key must be
 present with status zero. An acknowledgement means the command was accepted, not that
@@ -392,8 +405,8 @@ hardware-tested.
 
 ## SDC and car-charger configuration
 
-Optional SDC controls are enabled for Power 1000, Power 1000 V2, Power 2000, and
-Power Auro 2000 Elite when their configuration reports supported rows. A telemetry
+Optional SDC controls are discovered on every known model when configuration
+reports supported rows and the applicable station rules. A telemetry
 interface alone is insufficient to create a switch.
 
 Key `0x04` (`accessories`) lists attached accessories in 33-byte rows: a 16-byte
@@ -433,18 +446,24 @@ client record sent with writes. The value is a u16 LE text length followed by AS
 hex, which the station can end with NUL. The hex decodes to a u16 LE rule count and
 a little-endian mask; rule *n* is set when *n* is below the count and mask bit *n*
 is `1`. As in DJI Home, text shorter than four characters means no rules. The
-integration reads `0x0E` at connection and again with each accessory refresh while a
-charger or USB switch is reported. Malformed rules or a failed read leave the Auto
-layout unknown, and Auto then offers only the two powers. They also make USB switches
-unavailable.
+integration reads `0x0E` at connection, with every accessory refresh and before
+rule-dependent writes. Malformed rules or a failed read leave the Auto
+layout unknown, and Auto then offers only the two powers. They also make SDC/USB switches and rule-gated energy controls unavailable.
 
 Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
-`type, sequence, switch`. AC is type `2`, sequence `1`; USB-A and USB-C use
-types `3` and `4`, and SDC and SDC Lite use types `5` and `6`, each with their
-reported one-based sequence. All switch writes retain other rows, including AC,
-and modify only the addressed switch byte. As in DJI Home, a USB switch needs its
-reported row and station rule 11, on any station. SDC controls are enabled only on
-Power 1000, Power 1000 V2, Power 2000, and Power Auro 2000 Elite.
+`type, sequence, switch`. AC is type `2` (the legacy main output uses sequence `1`);
+USB-A and USB-C use types `3` and `4`, SDC and SDC Lite use `5` and `6`, and the
+car outlet uses `7`. All use the reported sequence, including zero. AC and car
+outlets need valid matching rows; SDC and USB additionally need rule 11. These
+checks apply to discovery, availability and fresh write validation on every known
+model.
+
+Port writes read the complete switch list and station rules inside the operation
+lock. Rule 21 selects the full list; a clear bit selects only the addressed row.
+Both forms change only its switch byte and preserve extended row bodies. A missing
+rules record in a complete response means clear bits; failed or malformed reads
+cannot select a write policy. The client rules declaration included in SET is
+separate from the station rules used for these decisions.
 
 SET uses child tags `0x000A` and `0x000D` inside outer properties `0x100A` and
 `0x100D`. Readback child tags can differ; parsing follows the enclosing property's

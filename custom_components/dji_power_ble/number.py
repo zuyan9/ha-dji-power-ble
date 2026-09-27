@@ -20,11 +20,12 @@ from .accessory import (
     DjiPowerCarChargerEntity,
     async_discover_accessories,
     async_discover_backup_reserve,
+    async_discover_feature,
 )
 from .const import DOMAIN
 from .duml import CAR_CHARGER_NUMBERS, car_charger_numbers, energy_reserve_bounds
 from .entity import DjiPowerEntity
-from .features import ModelFeature, supports_feature
+from .features import ModelFeature, feature_available
 
 
 async def async_setup_entry(
@@ -35,14 +36,14 @@ async def async_setup_entry(
         DjiPowerLimitNumber(coordinator, "discharge_limit", "Discharge limit"),
         DjiPowerLimitNumber(coordinator, "recharge_limit", "Recharge limit"),
     ]
-    if supports_feature(coordinator.device.model, ModelFeature.TOU_POWER_CONTROL):
-        entities.extend(
-            (
-                DjiPowerDischargePowerNumber(coordinator),
-                DjiPowerChargePowerNumber(coordinator),
-            )
-        )
     async_add_entities(entities)
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.TOU_POWER_CONTROL,
+        lambda: [
+            DjiPowerDischargePowerNumber(coordinator),
+            DjiPowerChargePowerNumber(coordinator),
+        ],
+    )
     async_discover_backup_reserve(
         coordinator,
         entry,
@@ -148,7 +149,7 @@ class DjiPowerBackupReserveNumber(DjiPowerEntity, NumberEntity):
         data = self.coordinator.data or {}
         return (
             super().available
-            and data.get("energy_reserve_available") is True
+            and feature_available(data, ModelFeature.RESERVE_CONTROL)
             and data.get("energy_reserve_enabled") is True
             and isinstance(self.native_value, int)
             and self._bounds() is not None
@@ -202,6 +203,7 @@ class _DjiPowerWattNumber(DjiPowerEntity, NumberEntity):
         value = self.native_value
         return (
             super().available
+            and feature_available(data, ModelFeature.TOU_POWER_CONTROL)
             and data.get(f"{self._key}_available") is True
             and isinstance(minimum, int)
             and isinstance(maximum, int)

@@ -431,8 +431,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             self.hass.device_registry.register(entity.device_info)
             self.hass.entity_registry.register(entity._attr_unique_id)
 
-    async def setup(self, packs=None) -> None:
-        self.coordinator.data = {"expansion_batteries": packs}
+    async def setup(self, packs=None, **data) -> None:
+        self.coordinator.data = {"expansion_batteries": packs, **data}
         await sensor.async_setup_entry(self.hass, self.entry, self.add_entities)
 
     def publish(self, packs) -> None:
@@ -459,7 +459,7 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         await self.setup([pack])
         self.assertEqual(
             len(self.entities) - len(self.packs()),
-            len(sensor.DESCRIPTIONS) + len(sensor.BATTERY_TIME_DESCRIPTIONS) + 1,
+            len(sensor.DESCRIPTIONS) + len(sensor.BATTERY_TIME_DESCRIPTIONS),
         )
         self.assertEqual(len(self.packs()), 4)
         self.assertEqual(len(self.hass.device_registry.devices), 2)
@@ -582,8 +582,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=20, firmware="01.00.00.00")
         await self.setup([pack])
         unique_ids = {entity._attr_unique_id for entity in self.packs()}
-        # Expansion packs and SDC accessories each keep one discovery listener.
-        self.assertEqual(len(self.listeners), 2)
+        # Expansion packs, tariff capability and SDC accessories keep listeners.
+        self.assertEqual(len(self.listeners), 3)
         for callback in self.unload_callbacks:
             callback()
         self.assertEqual(self.listeners, [])
@@ -633,31 +633,51 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             "Electricity price time periods",
         )
 
-    async def test_time_period_sensor_created_only_for_power_2000_models(
+    async def test_time_period_sensor_waits_for_capability_on_known_models(
         self,
     ) -> None:
-        power_2000_models = ("DJI Power 2000", "DJI Power Auro 2000 Elite")
         for model in (
-            *power_2000_models, "DJI Power 1000 V2", "DJI Power 1000 Mini",
+            "DJI Power 2000", "DJI Power Auro 2000 Elite",
+            "DJI Power 1000 V2", "DJI Power 1000 Mini",
             "DJI Power 1000", "DJI Power",
         ):
             with self.subTest(model=model):
                 self.entities.clear()
+                self.listeners.clear()
                 self.coordinator.device.model = model
                 await self.setup([])
+                self.assertFalse(any(
+                    isinstance(item, sensor.DjiPowerTimePeriodsSensor)
+                    for item in self.entities
+                ))
+                self.coordinator.data.update(
+                    time_periods=[], eco_available=True, station_rules=[5]
+                )
+                for listener in self.listeners:
+                    listener()
                 schedules = [
                     item for item in self.entities
                     if isinstance(item, sensor.DjiPowerTimePeriodsSensor)
                 ]
-                self.assertEqual(len(schedules), int(model in power_2000_models))
+                self.assertEqual(len(schedules), int(model != "DJI Power"))
                 if schedules:
                     self.assertEqual(
                         schedules[0]._attr_unique_id, f"{ADDRESS}_time_periods"
                     )
+                    self.assertTrue(schedules[0].available)
+                    self.coordinator.data["station_rules"] = None
                     self.assertFalse(schedules[0].available)
+                    self.coordinator.data["station_rules"] = [5]
+                    for listener in self.listeners:
+                        listener()
+                    self.assertTrue(schedules[0].available)
+                    self.assertEqual(sum(
+                        isinstance(item, sensor.DjiPowerTimePeriodsSensor)
+                        for item in self.entities
+                    ), 1)
 
     async def test_schedule_count_attributes_and_availability(self) -> None:
-        await self.setup([])
+        await self.setup([], time_periods=[], eco_available=True, station_rules=[5])
         entity = next(
             item for item in self.entities
             if isinstance(item, sensor.DjiPowerTimePeriodsSensor)
@@ -667,7 +687,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         }
         for periods in ([], [period]):
             self.coordinator.data = {
-                "time_periods": periods, "timezone_offset_min": 0
+                "time_periods": periods, "timezone_offset_min": 0,
+                "eco_available": True, "station_rules": [5],
             }
             self.assertTrue(entity.available)
             self.assertEqual(entity.native_value, len(periods))
@@ -902,14 +923,20 @@ class SdcAccessorySensorTests(unittest.IsolatedAsyncioTestCase):
                 }
                 self.assertFalse(entities["5_2_accessory_firmware"].available)
 
-    async def test_other_models_and_unrecognized_ports_create_no_entities(self) -> None:
+    async def test_known_models_discover_reported_accessories_and_unknowns_do_not(
+        self,
+    ) -> None:
         interfaces = [_sdc(_solar(39, 38.9))]
         for model in ("DJI Power 1000 Mini", "DJI Power 500", "DJI Power"):
             with self.subTest(model=model):
                 self.entities.clear()
+                self.listeners.clear()
                 self.coordinator.device.model = model
-                await self.setup(interfaces=interfaces)
-                self.assertEqual(self.sdc_entities(), {})
+                await self.setup()
+                self.publish(interfaces=interfaces)
+                self.assertEqual(
+                    len(self.sdc_entities()), 4 if model == "DJI Power 1000 Mini" else 0
+                )
         self.coordinator.device.model = "DJI Power 2000"
         self.entities.clear()
         await self.setup(

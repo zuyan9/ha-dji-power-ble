@@ -1,7 +1,7 @@
 # Custom backup reserve level
 
-Power 1000, Power 1000 V2, Power 2000, and Power Auro 2000 Elite expose DJI Home's
-**Custom Backup Reserve Level** setting as two configuration entities:
+When a supported station reports that backup reserve is available, the integration
+exposes DJI Home's **Custom Backup Reserve Level** as two configuration entities:
 
 | Entity | Behavior |
 | --- | --- |
@@ -30,4 +30,5 @@ While its phone is online, DJI Home saves settings through the DJI cloud, which 
 later restore the app's value on a cloud-connected station. Change the setting one place
 at a time.
 
-Power 1000 Mini does not support this.
+Discovery also checks the Mini; controls appear only if its firmware offers the
+setting. Model-specific hardware acceptance remains to be verified.

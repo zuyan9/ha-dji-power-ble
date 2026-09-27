@@ -31,13 +31,14 @@ from .accessory import (
     PortIdentity,
     accessory_firmware,
     accessory_inputs,
+    async_discover_feature,
     port_name,
     reported_sdc_accessories,
 )
 from .const import DOMAIN
 from .coordinator import DjiPowerCoordinator
 from .entity import DjiPowerEntity
-from .features import ModelFeature, supports_feature
+from .features import ModelFeature, feature_available, is_known_model
 
 DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -321,8 +322,10 @@ async def async_setup_entry(
         DjiPowerBatteryTimeSensor(coordinator, description)
         for description in BATTERY_TIME_DESCRIPTIONS
     )
-    if supports_feature(coordinator.device.model, ModelFeature.TARIFF_SCHEDULE):
-        async_add_entities([DjiPowerTimePeriodsSensor(coordinator)])
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.TARIFF_SCHEDULE,
+        lambda: [DjiPowerTimePeriodsSensor(coordinator)],
+    )
     device_registry = dr.async_get(hass)
     known: set[tuple[str, str]] = set()
     restored = []
@@ -372,7 +375,7 @@ async def async_setup_entry(
     )
     async_discover_expansion_batteries()
 
-    if not supports_feature(coordinator.device.model, ModelFeature.SDC_CONTROLS):
+    if not is_known_model(coordinator.device.model):
         return
     seen: set[tuple] = set()
 
@@ -456,7 +459,13 @@ class DjiPowerTimePeriodsSensor(DjiPowerEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.native_value is not None
+        return (
+            super().available
+            and feature_available(
+                self.coordinator.data or {}, ModelFeature.TARIFF_SCHEDULE
+            )
+            and self.native_value is not None
+        )
 
     @property
     def native_value(self) -> int | None:

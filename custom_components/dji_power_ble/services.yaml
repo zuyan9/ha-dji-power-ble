@@ -1,22 +1,19 @@
 set_time_periods:
   name: Set electricity price time periods
   description: >-
-    Replace all peak and off-peak periods on a Power 2000 or Power Auro 2000 Elite
-    when this action runs.
+    Replace all peak and off-peak periods on a station that offers electricity
+    price periods when this action runs.
     Times use the station's timezone and whole minutes (seconds 00).
     This does not change the Energy Optimization mode.
   fields:
     device_id:
       name: Power station
-      description: The Power 2000 or Power Auro 2000 Elite to update.
+      description: The DJI Power station to update.
       required: true
       selector:
         device:
           filter:
             - integration: dji_power_ble
-              model: DJI Power 2000
-            - integration: dji_power_ble
-              model: DJI Power Auro 2000 Elite
     periods:
       name: Time periods
       description: >-

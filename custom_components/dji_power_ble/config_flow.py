@@ -76,7 +76,7 @@ from .duml import (
     parse_manufacturer_data,
     resolve_model,
 )
-from .features import ModelFeature, supports_feature
+from .features import ModelFeature, feature_available, is_known_model
 from .local_ble import async_local_adapters
 
 _LOGGER = logging.getLogger(__name__)
@@ -560,12 +560,13 @@ class DjiPowerOptionsFlow(OptionsFlow):
 
     def _supports_schedule(self) -> bool:
         coordinator = self._schedule_coordinator()
-        model = (
-            coordinator.device.model
-            if coordinator is not None
-            else self.config_entry.data.get(CONF_MODEL)
+        return (
+            coordinator is not None
+            and is_known_model(coordinator.device.model)
+            and feature_available(
+                coordinator.data or {}, ModelFeature.TARIFF_SCHEDULE
+            )
         )
-        return supports_feature(model, ModelFeature.TARIFF_SCHEDULE)
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -651,11 +652,11 @@ class DjiPowerOptionsFlow(OptionsFlow):
 
     async def _async_load_periods(self) -> FlowResult | None:
         """Guard every schedule step and load an independent draft once."""
-        if not self._supports_schedule():
-            return self.async_abort(reason="schedule_not_supported")
         coordinator = self._schedule_coordinator()
         if coordinator is None:
             return self.async_abort(reason="station_unavailable")
+        if not self._supports_schedule():
+            return self.async_abort(reason="schedule_not_supported")
         if self._periods is None:
             try:
                 periods = await coordinator.async_get_time_periods()

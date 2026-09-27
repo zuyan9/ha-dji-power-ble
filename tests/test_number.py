@@ -128,7 +128,7 @@ number, coordinator_module, select = _load_modules()
 
 
 class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
-    async def test_only_power_2000_models_get_both_controls_before_config(
+    async def test_known_models_discover_watt_controls_after_capability_arrives(
         self,
     ) -> None:
         coordinator = types.SimpleNamespace(
@@ -140,18 +140,38 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         entry = types.SimpleNamespace(entry_id="station", async_on_unload=Mock())
         hass = types.SimpleNamespace(data={"dji_power_ble": {"station": coordinator}})
-        power_2000_models = ("DJI Power 2000", "DJI Power Auro 2000 Elite")
         for model in (
-            *power_2000_models,
+            "DJI Power 2000", "DJI Power Auro 2000 Elite",
             "DJI Power 1000",
             "DJI Power 1000 V2",
             "DJI Power 1000 Mini",
         ):
             with self.subTest(model=model):
                 coordinator.device.model = model
+                coordinator.data = {}
+                listeners = []
+                coordinator.async_add_listener.side_effect = (
+                    lambda listener, listeners=listeners:
+                        listeners.append(listener) or Mock()
+                )
                 add_entities = Mock()
                 await number.async_setup_entry(hass, entry, add_entities)
                 entities = add_entities.call_args.args[0]
+                self.assertEqual(len(entities), 2)
+                self.assertTrue(all(
+                    isinstance(entity, number.DjiPowerLimitNumber)
+                    for entity in entities
+                ))
+                coordinator.data = {
+                    "eco_available": True, "station_rules": [5, 6],
+                    "power_adjustment": "Manual",
+                }
+                for listener in listeners:
+                    listener()
+                entities = [
+                    entity for call in add_entities.call_args_list
+                    for entity in call.args[0]
+                ]
                 for entity_class in (
                     number.DjiPowerDischargePowerNumber,
                     number.DjiPowerChargePowerNumber,
@@ -161,7 +181,7 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
                         for entity in entities
                         if isinstance(entity, entity_class)
                     ]
-                    self.assertEqual(len(controls), int(model in power_2000_models))
+                    self.assertEqual(len(controls), 1)
                     if controls:
                         self.assertFalse(controls[0].available)
                 # The reserve level waits until the station offers the setting.
@@ -172,7 +192,7 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 self.assertEqual(
-                    len(entities), 4 if model in power_2000_models else 2
+                    len(entities), 4
                 )
 
 
@@ -300,7 +320,10 @@ class _PowerNumberTests:
             entry=types.SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"}),
             device=types.SimpleNamespace(model="DJI Power 2000"),
             last_update_success=True,
-            data=self._data(available=True, w=93, min_w=0, max_w=800),
+            data=self._data(available=True, w=93, min_w=0, max_w=800) | {
+                "eco_available": True, "station_rules": [5, 6],
+                "power_adjustment": "Manual",
+            },
         )
         self.setter = AsyncMock()
         setattr(self.coordinator, f"async_set_{self._key}", self.setter)
