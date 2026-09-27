@@ -27,7 +27,7 @@ def interface(
     output_w: int,
     input_w: int,
     *,
-    input_voltage_mv: int | None = None,
+    consumer: bytes | None = None,
     accessory: bytes | None = None,
 ) -> bytes:
     value = bytes((sequence, interface_type, 0))
@@ -36,10 +36,14 @@ def interface(
     value += b"\x00"
     if accessory is not None:
         value += record(0x3038, accessory)
-    if input_voltage_mv is not None:
-        voltage = b"\x01" + input_voltage_mv.to_bytes(2, "little") + b"\x00" * 6
-        value += record(0x3035, record(0x3036, voltage))
+    if consumer is not None:
+        value += record(0x3035, record(0x3036, consumer))
     return record(0x3034, value)
+
+
+# A synthetic nine-byte consumer row, as DJI Home reads it: device type,
+# charge percentage, remaining time, output watts, and device name.
+CONSUMER_ROW = bytes.fromhex("01" "5a00" "1e00" "2d00" "0100")
 
 
 def accessory_input(
@@ -228,6 +232,21 @@ class KeyedConfigTests(unittest.TestCase):
         # This firmware reports its charge type as unknown.
         self.assertEqual(parsed["battery_cycle_count"], 0)
         self.assertIsNone(parsed["maintenance_charging"])
+
+    def test_display_timeout_reads_the_screen_timeout(self) -> None:
+        # Device, screen, and AC output timeouts in seconds, then the unit.
+        display = b"".join(value.to_bytes(4, "little") for value in (0, 1800, 43200))
+        display += b"\x01"
+        for value, expected in (
+            (display, 1800),
+            (display[:8], 1800),
+            (display[:7], None),
+        ):
+            with self.subTest(length=len(value)):
+                parsed = duml.parse_telemetry(
+                    duml.build_keyed_set_payload([(0x0C, value)])
+                )
+                self.assertEqual(parsed.get("display_timeout_s"), expected)
 
     def parse_base_info(self, value: bytes) -> dict[str, object]:
         return duml.parse_telemetry(duml.build_keyed_set_payload([(0x00, value)]))
@@ -927,7 +946,7 @@ class ReportTests(unittest.TestCase):
                 self.assertNotIn("temperature", parsed)
                 self.assertEqual(parsed["battery_percent"], 66)
 
-    def test_nested_groups_preserve_ports_and_input_voltage(self) -> None:
+    def test_nested_groups_preserve_ports_and_raw_consumer_rows(self) -> None:
         interfaces = record(
             0x3031,
             group(1, interface(1, 1, 0, 23))
@@ -938,7 +957,7 @@ class ReportTests(unittest.TestCase):
                 interface(2, 3, 3, 0),
                 interface(1, 4, 5, 0),
             )
-            + group(4, interface(1, 5, 7, 11, input_voltage_mv=51234)),
+            + group(4, interface(1, 5, 7, 11, consumer=CONSUMER_ROW)),
         )
         payload = record(0x3030, bytes.fromhex("31002f00") + interfaces)
 
@@ -949,7 +968,10 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(parsed["usb_a_1_output_w"], 2)
         self.assertEqual(parsed["usb_a_2_output_w"], 3)
         self.assertEqual(parsed["sdc_input_w"], 11)
-        self.assertEqual(parsed["interfaces"][-1]["input_voltage_v"], 51.234)
+        sdc = parsed["interfaces"][-1]
+        self.assertEqual(sdc["consumer_info"], [CONSUMER_ROW.hex()])
+        self.assertNotIn("input_voltage_v", sdc)
+        self.assertNotIn("consumer_info", parsed["interfaces"][0])
 
     def test_accessory_helper_matches_station_framing(self) -> None:
         accessory = accessory_report(
@@ -980,7 +1002,7 @@ class ReportTests(unittest.TestCase):
             group(2, interface(1, 2, 19, 0))
             + group(
                 4,
-                interface(1, 5, 0, 82, accessory=accessory, input_voltage_mv=51234),
+                interface(1, 5, 0, 82, accessory=accessory, consumer=CONSUMER_ROW),
             ),
         )
 
@@ -1012,7 +1034,7 @@ class ReportTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(sdc["input_voltage_v"], 51.234)
+        self.assertEqual(sdc["consumer_info"], [CONSUMER_ROW.hex()])
         self.assertEqual(parsed["sdc_1_input_w"], 82)
         self.assertNotIn("TEST-ACCESSORY", repr(parsed))
 

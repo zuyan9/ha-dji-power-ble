@@ -169,18 +169,22 @@ class StationRulesTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(duml.parse_station_rules(rules_value(text)), expected)
 
-    def test_rule_zero_selects_the_auto_threshold_layout(self) -> None:
-        for text, expected in (
-            (b"11000f7001\x00", True),
-            (b"1e00efffff3f", True),
-            (b"0200fe", False),
-            (b"0000ff", False),
-            (b"0100", False),
-            (b"", False),
+    def test_set_rules_and_the_auto_threshold_layout_are_decoded(self) -> None:
+        for text, rules in (
+            (b"11000f7001\x00", [0, 1, 2, 3, 12, 13, 14, 16]),
+            (b"1e00efffff3f", [0, 1, 2, 3, *range(5, 30)]),
+            # Mask bits at or above the count are not rules.
+            (b"0200ff", [0, 1]),
+            (b"0200fe", [1]),
+            (b"0000ff", []),
+            (b"0100", []),
+            (b"", []),
         ):
             with self.subTest(text=text):
                 parsed = duml.parse_telemetry(record(0x100E, rules_value(text)))
-                self.assertIs(parsed["car_auto_threshold"], expected)
+                self.assertEqual(parsed["station_rules"], rules)
+                # Rule 0 selects the Auto layout with one threshold.
+                self.assertIs(parsed["car_auto_threshold"], 0 in rules)
 
     def test_malformed_rules_are_unknown_without_hiding_other_state(self) -> None:
         for value in (
@@ -198,13 +202,14 @@ class StationRulesTests(unittest.TestCase):
                 parsed = duml.parse_telemetry(
                     record(0x100E, value) + record(0x1002, b"\x01")
                 )
+                self.assertIsNone(parsed["station_rules"])
                 self.assertIsNone(parsed["car_auto_threshold"])
                 self.assertTrue(parsed["cloud_connected"])
 
     def test_missing_rules_preserve_the_previous_layout(self) -> None:
-        self.assertNotIn(
-            "car_auto_threshold", duml.parse_telemetry(record(0x1002, b"\x01"))
-        )
+        parsed = duml.parse_telemetry(record(0x1002, b"\x01"))
+        self.assertNotIn("station_rules", parsed)
+        self.assertNotIn("car_auto_threshold", parsed)
 
     def test_numbers_follow_dji_home_mode_layouts(self) -> None:
         for mode, rule, expected in (

@@ -20,6 +20,11 @@ from tests.test_duml import (
 
 ROOT = Path(__file__).parents[1]
 COMPONENT = ROOT / "custom_components" / "dji_power_ble"
+# Connect-time GET: base info, network, limits, reserve, display, switches,
+# rules, and timezone.
+INITIAL_CONFIG_GET = bytes.fromhex(
+    "00 00 10 02 10 05 10 06 10 0c 10 0d 10 0e 10 15 10"
+)
 
 
 def _package(name: str, path: Path | None = None) -> types.ModuleType:
@@ -827,10 +832,7 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
             self.client.requests,
             [
                 (duml.GET_COMMAND, bytes.fromhex("00 01 10")),
-                (
-                    duml.GET_COMMAND,
-                    bytes.fromhex("00 00 10 02 10 05 10 06 10 0c 10 0d 10 15 10"),
-                ),
+                (duml.GET_COMMAND, INITIAL_CONFIG_GET),
                 (duml.GET_COMMAND, bytes.fromhex("00 18 10")),
                 (duml.GET_COMMAND, bytes.fromhex("00 16 10")),
             ],
@@ -1782,10 +1784,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
 
                 requests = [
                     (duml.GET_COMMAND, bytes.fromhex("00 01 10")),
-                    (
-                        duml.GET_COMMAND,
-                        bytes.fromhex("00 00 10 02 10 05 10 06 10 0c 10 0d 10 15 10"),
-                    ),
+                    (duml.GET_COMMAND, INITIAL_CONFIG_GET),
                 ]
                 if model == "DJI Power 2000":
                     requests += [

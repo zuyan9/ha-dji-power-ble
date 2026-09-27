@@ -6,7 +6,24 @@
   ],
   "bluetooth": [
     {
-      "manufacturer_id": 2218
+      "manufacturer_id": 2218,
+      "manufacturer_data_start": [145]
+    },
+    {
+      "manufacturer_id": 2218,
+      "manufacturer_data_start": [148]
+    },
+    {
+      "manufacturer_id": 2218,
+      "manufacturer_data_start": [151]
+    },
+    {
+      "manufacturer_id": 2218,
+      "manufacturer_data_start": [152]
+    },
+    {
+      "manufacturer_id": 2218,
+      "manufacturer_data_start": [158]
     }
   ],
   "codeowners": [],

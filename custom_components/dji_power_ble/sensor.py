@@ -222,7 +222,7 @@ DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     ),
     SensorEntityDescription(
         key="firmware_secondary",
-        name="Secondary firmware",
+        name="Wireless firmware",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )

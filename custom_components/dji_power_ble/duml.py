@@ -322,15 +322,19 @@ def _report_records(payload: bytes) -> list[Tlv]:
     return parse_tlvs(body)
 
 
-def _parse_input_voltage(port: bytes) -> float | None:
-    """Decode the firmware-proven 0x3035 -> 0x3036 input-voltage path."""
+def _parse_consumer_info(port: bytes) -> list[str]:
+    """Return a port's 0x3035 -> 0x3036 consumer rows as raw hex.
+
+    DJI Home shows each row as a device charging from the port, such as a drone
+    battery. The rows stay raw until a station sample confirms their layout.
+    """
     if len(port) < 8:
-        return None
-    for container in _records(parse_tlvs(port[8:]), 0x3035):
-        for record in _records(parse_tlvs(container), 0x3036):
-            if len(record) >= 3 and record[0] == 1:
-                return int.from_bytes(record[1:3], "little") / 1000
-    return None
+        return []
+    return [
+        row.hex()
+        for container in _records(parse_tlvs(port[8:]), 0x3035)
+        for row in _records(parse_tlvs(container), 0x3036)
+    ]
 
 
 ACCESSORY_INPUT_FORMS = {1: "solar", 2: "car", 3: "grid"}
@@ -430,8 +434,8 @@ def parse_report(payload: bytes) -> dict[str, object]:
                         "output_w": output_w,
                         "input_w": input_w,
                     }
-                    if (input_voltage := _parse_input_voltage(port)) is not None:
-                        item["input_voltage_v"] = input_voltage
+                    if consumer_info := _parse_consumer_info(port):
+                        item["consumer_info"] = consumer_info
                     if (accessory := _parse_accessory_inputs(port)) is not None:
                         item["accessory_type"], item["accessory_inputs"] = accessory
                     interfaces.append(item)
@@ -827,11 +831,12 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
 
     if len(base := keyed.get(0x00, b"")) >= 40:
         firmware = _ascii_field(base[7:23])
-        bms_firmware = _ascii_field(base[24:40])
+        # DJI Home shows the wireless module's firmware as Dongle Version.
+        wireless_firmware = _ascii_field(base[24:40])
         if firmware:
             data["firmware"] = firmware
-        if bms_firmware:
-            data["firmware_secondary"] = bms_firmware
+        if wireless_firmware:
+            data["firmware_secondary"] = wireless_firmware
     if len(base) >= 46:
         data["battery_cycle_count"] = int.from_bytes(base[44:46], "little")
     if len(base) >= 53:
@@ -861,8 +866,9 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
         with contextlib.suppress(ProtocolError):
             data["accessories"] = parse_accessories(keyed[ACCESSORIES_KEY])
 
-    if len(display := keyed.get(0x0C, b"")) >= 10:
-        data["display_timeout_s"] = int.from_bytes(display[0:2], "little")
+    if len(display := keyed.get(0x0C, b"")) >= 8:
+        # Device, screen, then AC output timeouts in u32 seconds; 0 means never.
+        data["display_timeout_s"] = int.from_bytes(display[4:8], "little")
 
     if CAR_CHARGERS_KEY in keyed:
         data["car_chargers"] = None
@@ -883,11 +889,13 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
                     data["ac_enabled"] = switch["sw"] == 1
 
     if RULES_KEY in keyed:
-        # Rule 0 selects DJI Home's Auto car-charger layout with one threshold.
-        data["car_auto_threshold"] = None
+        # DJI Home offers features by which station rules are set. Rule 0
+        # selects its Auto car-charger layout with one threshold.
+        data.update(station_rules=None, car_auto_threshold=None)
         with contextlib.suppress(ProtocolError):
             count, mask = parse_station_rules(keyed[RULES_KEY])
-            data["car_auto_threshold"] = count > 0 and bool(mask & 1)
+            rules = [n for n in range(min(count, mask.bit_length())) if mask >> n & 1]
+            data.update(station_rules=rules, car_auto_threshold=0 in rules)
 
     if len(timezone := keyed.get(0x15, b"")) == 2:
         data["timezone_offset_min"] = int.from_bytes(timezone, "little", signed=True)
@@ -1417,6 +1425,9 @@ MODEL_NAMES = {
     0x98: "DJI Power 1000 Mini",
     0x94: "DJI Power 2000",
 }
+# Codes DJI Home registers as Power stations, including the not yet modeled
+# 0x9E Power Auro 2000 Elite. Other DJI products share the manufacturer ID.
+POWER_MODEL_CODES = frozenset({*MODEL_NAMES, 0x9E})
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

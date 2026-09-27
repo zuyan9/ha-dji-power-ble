@@ -50,7 +50,7 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
         flow.async_set_unique_id = AsyncMock()
         flow._abort_if_unique_id_configured = Mock()
         for name in (
-            "async_show_form", "async_abort", "async_create_entry",
+            "async_show_form", "async_show_menu", "async_abort", "async_create_entry",
             "add_suggested_values_to_schema",
         ):
             setattr(flow, name, getattr(_OptionsFlow, name).__get__(flow))
@@ -314,6 +314,68 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
             form = await flow.async_step_manual()
         submitted = self.input_for("manual", "AA:BB:CC:DD:EE:02")
         self.assertEqual(form["data_schema"](submitted), submitted)
+
+    async def test_discovery_accepts_power_station_codes(self):
+        for manufacturer_data, model in (
+            (b"\x94\x10", "DJI Power 2000"),
+            (b"\x98\x00", "DJI Power 1000 Mini"),
+            (b"\x9e\x10", "DJI Power (0x9E)"),
+        ):
+            with self.subTest(manufacturer_data=manufacturer_data):
+                flow = self.flow()
+                flow.context = {}
+                result = await flow.async_step_bluetooth(
+                    advertisement(ADDRESS, manufacturer_data)
+                )
+                self.assertEqual((result["type"], result["step_id"]), ("menu", "user"))
+                self.assertEqual(flow._discovered_model, model)
+                flow.async_set_unique_id.assert_awaited_once_with(ADDRESS)
+
+    async def test_discovery_ignores_other_dji_devices(self):
+        # Romo vacuums advertise 0x90, 0x95, and 0x9A under the same ID.
+        for manufacturer_data in (b"\x95\x10", b"\x90\x00", b"\x9a", b"\x94", b""):
+            with self.subTest(manufacturer_data=manufacturer_data):
+                flow = self.flow()
+                flow.context = {}
+                result = await flow.async_step_bluetooth(
+                    advertisement(ADDRESS, manufacturer_data)
+                )
+                self.assertEqual(result, {"type": "abort", "reason": "not_supported"})
+                flow.async_set_unique_id.assert_not_awaited()
+
+    async def test_station_list_omits_other_dji_devices(self):
+        vacuum = advertisement("AA:BB:CC:DD:EE:02", b"\x95\x10")
+        flow = self.flow()
+        with patch.object(
+            flow_module, "async_discovered_service_info",
+            return_value=[vacuum, advertisement(ADDRESS)],
+        ):
+            self.assertEqual(
+                flow._discovered_stations(),
+                {ADDRESS: f"Synthetic station ({ADDRESS})"},
+            )
+        # With only another DJI device advertising, the address stays free text.
+        with patch.object(
+            flow_module, "async_discovered_service_info", return_value=[vacuum]
+        ):
+            form = await flow.async_step_manual()
+        submitted = self.input_for("manual", "AA:BB:CC:DD:EE:03")
+        self.assertEqual(form["data_schema"](submitted), submitted)
+
+    def test_manifest_matches_only_power_station_codes(self):
+        manifest = json.loads(
+            (Path(flow_module.__file__).parent / "manifest.json").read_text()
+        )
+        self.assertEqual(
+            sorted(
+                (matcher["manufacturer_id"], *matcher["manufacturer_data_start"])
+                for matcher in manifest["bluetooth"]
+            ),
+            sorted(
+                (flow_module.MANUFACTURER_ID, code)
+                for code in flow_module.POWER_MODEL_CODES
+            ),
+        )
 
     async def test_account_rejects_blank_credentials_before_fetching_captcha(self):
         for field in ("email", "password"):
