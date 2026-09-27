@@ -239,6 +239,19 @@ class DjiPowerDevice:
         return self._sequence
 
     def _merge_data(self, update: dict[str, object]) -> None:
+        if "battery_time_type" in update or "input_w" in update:
+            # Battery and power records can arrive separately. Match the app's
+            # green bar using the newest value of each, before publishing.
+            time_type = update.get(
+                "battery_time_type", self.data.get("battery_time_type")
+            )
+            input_w = update.get("input_w", self.data.get("input_w"))
+            charging = None
+            if time_type in (0, 2):
+                charging = False
+            elif time_type == 1 and isinstance(input_w, (int, float)):
+                charging = input_w > 0
+            update = {**update, "charging": charging}
         changed = any(self.data.get(key) != value for key, value in update.items())
         if not changed:
             return

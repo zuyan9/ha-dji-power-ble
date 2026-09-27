@@ -243,6 +243,13 @@ BATTERY_TIME_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     ),
 )
 
+PRIMARY_BATTERY_STATUS_DESCRIPTION = SensorEntityDescription(
+    key="primary_battery_status",
+    translation_key="primary_battery_status",
+    device_class=SensorDeviceClass.ENUM,
+    options=["recharging", "discharging"],
+)
+
 EXPANSION_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
         key="battery_percent",
@@ -322,6 +329,25 @@ async def async_setup_entry(
         DjiPowerBatteryTimeSensor(coordinator, description)
         for description in BATTERY_TIME_DESCRIPTIONS
     )
+    primary_status_added = False
+
+    @callback
+    def async_discover_primary_battery_status() -> None:
+        """Add primary status once an extended battery report contains it."""
+        nonlocal primary_status_added
+        if primary_status_added or not coordinator.last_update_success:
+            return
+        if (coordinator.data or {}).get("primary_io_status") is None:
+            return
+        primary_status_added = True
+        async_add_entities(
+            [DjiPowerSensor(coordinator, PRIMARY_BATTERY_STATUS_DESCRIPTION)]
+        )
+
+    entry.async_on_unload(
+        coordinator.async_add_listener(async_discover_primary_battery_status)
+    )
+    async_discover_primary_battery_status()
     async_discover_feature(
         coordinator, entry, async_add_entities, ModelFeature.TARIFF_SCHEDULE,
         lambda: [DjiPowerTimePeriodsSensor(coordinator)],

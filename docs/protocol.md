@@ -279,25 +279,45 @@ record, unknown status `0`, or an unrecognized status clears the previous readin
 ### Battery time and charging
 
 The battery record's duration (`0x3020[2:4]`, minutes) and time type
-(`0x3020[4]`) control the charging and time entities:
+(`0x3020[4]`) control the time entities. **Charging** also requires total input
+power (`0x3030[2:4]`) above 0 W, matching DJI Home's green battery bar:
 
-| Time type | Charging | Remaining Time | Recharging Time |
-| --- | --- | --- | --- |
-| `1` | Charging | Unavailable | Reported duration |
-| `0` or `2` | Not charging | Reported duration | Unavailable |
-| Other or no battery data | Unknown | Unavailable | Unavailable |
+| Time type | Total input | Charging | Remaining Time | Recharging Time |
+| --- | --- | --- | --- | --- |
+| `1` | Above 0 W | Charging | Unavailable | Reported duration |
+| `1` | 0 W | Not charging | Unavailable | Reported duration |
+| `1` | Not yet reported | Unknown | Unavailable | Reported duration |
+| `0` or `2` | Any | Not charging | Reported duration | Unavailable |
+| Other or no battery data | Any | Unknown | Unavailable | Unavailable |
 
-External input power does not determine charging status: input can supply the
-station's outputs while the battery is not charging. **Not charging** includes
-both discharging and neutral operation. Type `0` is treated like `2` for these
-entities; the raw type remains available in diagnostic data.
+Battery and power reports can arrive separately. Charging is recalculated when
+either reading changes, using the latest reported value of each. Input power
+alone cannot turn Charging on: input can supply the station's outputs while the
+battery is not charging. **Not charging** includes discharging and neutral
+operation. Type `0` is treated like `2`; the raw type remains in diagnostic data.
+
+DJI Home's time label and charging icon depend only on the time type. The time
+sensors follow that rule, so **Recharging Time** can remain available with 0 W
+input while **Charging** is off. Transitions are not smoothed, and there is no
+separate sustaining state.
 
 **Remaining Time** replaces the **Runtime remaining** name while retaining its
 existing entity ID and history. Its value is unavailable during recharging;
 automations that need the charging estimate should use **Recharging Time**.
 Reported durations, including zero and 5,940 minutes (99 hours), are preserved.
 A 99-hour reading can be a capped estimate or a fallback and does not identify
-a distinct sustaining state. Primary battery runtime is a separate reading.
+a distinct sustaining state.
+
+**Primary battery status** is added when the station reports `0x3020[12]`:
+`1` means **Recharging**, `2` means **Discharging**, and other values are
+**Unknown**. This describes the station's own battery independently of the
+aggregate time type, input power, and expansion-pack status. A short battery
+record clears the old status to Unknown; reports without a battery record keep
+the last status. The raw byte is retained as `primary_io_status` in diagnostics.
+
+**Primary battery runtime** (`0x3020[7:9]`) remains a separate, disabled-by-default
+sensor for compatibility. It preserves the station's value, including zero, and
+is never filled from the aggregate duration.
 
 ## Writes and acknowledgement
 
