@@ -181,17 +181,68 @@ class LimitNumberTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator = types.SimpleNamespace(
             entry=types.SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"}),
             last_update_success=True,
-            data={"discharge_limit": 10, "recharge_limit": 80},
+            data={
+                "discharge_limit": 10,
+                "discharge_limit_min": 5,
+                "discharge_limit_max": 40,
+                "recharge_limit": 80,
+                "recharge_limit_min": 50,
+                "recharge_limit_max": 95,
+            },
             async_set_charge_limits=AsyncMock(),
         )
         self.entities = [
             number.DjiPowerLimitNumber(
-                self.coordinator, "discharge_limit", "Discharge limit", 0, 15
+                self.coordinator, "discharge_limit", "Discharge limit"
             ),
             number.DjiPowerLimitNumber(
-                self.coordinator, "recharge_limit", "Recharge limit", 70, 100
+                self.coordinator, "recharge_limit", "Recharge limit"
             ),
         ]
+
+    def test_bounds_follow_fresh_station_values(self) -> None:
+        for entity, initial, updated in zip(
+            self.entities, ((5, 40, 10), (50, 95, 80)),
+            ((7, 30, 20), (55, 90, 65)), strict=True,
+        ):
+            with self.subTest(key=entity._key):
+                self.assertTrue(entity.available)
+                self.assertEqual(entity.native_min_value, initial[0])
+                self.assertEqual(entity.native_max_value, initial[1])
+                self.coordinator.data.update({
+                    f"{entity._key}_min": updated[0],
+                    f"{entity._key}_max": updated[1],
+                    entity._key: updated[2],
+                })
+                self.assertTrue(entity.available)
+                self.assertEqual(entity.native_min_value, updated[0])
+                self.assertEqual(entity.native_max_value, updated[1])
+                self.assertEqual(entity.native_value, updated[2])
+
+    def test_missing_or_invalid_bounds_and_values_are_unavailable(self) -> None:
+        original = dict(self.coordinator.data)
+        for entity in self.entities:
+            key = entity._key
+            for suffix in ("", "_min", "_max"):
+                with self.subTest(key=key, missing=suffix):
+                    self.coordinator.data = dict(original)
+                    self.coordinator.data.pop(f"{key}{suffix}")
+                    self.assertFalse(entity.available)
+            for suffix, value in (
+                ("_min", None), ("_max", None), ("_min", -1), ("_max", 101),
+                ("_min", original[f"{key}_max"]),
+                ("_min", original[f"{key}_max"] + 1),
+                ("_min", "0"), ("_min", False), ("_max", 100.0),
+                ("", original[f"{key}_min"] - 1),
+                ("", original[f"{key}_max"] + 1),
+                ("", None), ("", "10"), ("", True), ("", 80.0),
+            ):
+                with self.subTest(key=key, suffix=suffix, value=value):
+                    self.coordinator.data = original | {f"{key}{suffix}": value}
+                    self.assertFalse(entity.available)
+        self.coordinator.data = original
+        for entity in self.entities:
+            self.assertTrue(entity.available)
 
     def test_cleared_limits_are_unavailable_until_fresh_values_arrive(self) -> None:
         for entity in self.entities:

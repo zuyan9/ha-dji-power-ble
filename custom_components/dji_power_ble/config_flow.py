@@ -659,7 +659,7 @@ class DjiPowerOptionsFlow(OptionsFlow):
         if self._periods is None:
             try:
                 periods = await coordinator.async_get_time_periods()
-                self._periods = normalize_time_periods(periods)
+                self._periods = normalize_time_periods(periods, allow_overlap=True)
             except (HomeAssistantError, ProtocolError) as err:
                 return self.async_show_form(
                     step_id="time_periods",
@@ -766,7 +766,16 @@ class DjiPowerOptionsFlow(OptionsFlow):
                     candidate[self._edit_index] = period
                 else:
                     candidate.append(period)
-                self._periods = normalize_time_periods(candidate)
+                allow_overlap = False
+                try:
+                    normalize_time_periods(self._periods)
+                except ProtocolError:
+                    # Loaded drafts are structurally valid, but repairing all
+                    # station-reported overlaps can require multiple edits.
+                    allow_overlap = True
+                self._periods = normalize_time_periods(
+                    candidate, allow_overlap=allow_overlap
+                )
             except (vol.Invalid, ProtocolError) as err:
                 errors["base"] = "invalid_period"
                 reason = str(err)

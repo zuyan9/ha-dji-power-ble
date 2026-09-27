@@ -32,8 +32,8 @@ async def async_setup_entry(
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[NumberEntity] = [
-        DjiPowerLimitNumber(coordinator, "discharge_limit", "Discharge limit", 0, 15),
-        DjiPowerLimitNumber(coordinator, "recharge_limit", "Recharge limit", 70, 100),
+        DjiPowerLimitNumber(coordinator, "discharge_limit", "Discharge limit"),
+        DjiPowerLimitNumber(coordinator, "recharge_limit", "Recharge limit"),
     ]
     if supports_feature(coordinator.device.model, ModelFeature.TOU_POWER_CONTROL):
         entities.extend(
@@ -73,19 +73,40 @@ class DjiPowerLimitNumber(DjiPowerEntity, NumberEntity):
     _attr_native_step = 1
     _attr_mode = NumberMode.SLIDER
 
-    def __init__(
-        self, coordinator, key: str, name: str, minimum: int, maximum: int
-    ) -> None:
+    def __init__(self, coordinator, key: str, name: str) -> None:
         super().__init__(coordinator)
         self._key = key
         self._attr_name = name
-        self._attr_native_min_value = minimum
-        self._attr_native_max_value = maximum
         self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_{key}"
+
+    def _bounds(self) -> tuple[int, int] | None:
+        data = self.coordinator.data or {}
+        minimum, maximum = data.get(f"{self._key}_min"), data.get(f"{self._key}_max")
+        if (
+            type(minimum) is int and type(maximum) is int
+            and 0 <= minimum < maximum <= 100
+        ):
+            return minimum, maximum
+        return None
 
     @property
     def available(self) -> bool:
-        return super().available and isinstance(self.native_value, int)
+        bounds = self._bounds()
+        return (
+            super().available and bounds is not None
+            and type(self.native_value) is int
+            and bounds[0] <= self.native_value <= bounds[1]
+        )
+
+    @property
+    def native_min_value(self) -> int:
+        bounds = self._bounds()
+        return bounds[0] if bounds is not None else 0
+
+    @property
+    def native_max_value(self) -> int:
+        bounds = self._bounds()
+        return bounds[1] if bounds is not None else 100
 
     @property
     def native_value(self) -> int | None:

@@ -20,7 +20,7 @@ from tests.test_device import (
 )
 
 ADAPTER = "AA:BB:CC:DD:EE:01"
-LIMITS = b"".join(value.to_bytes(4, "little") for value in (1, 2, 80, 3, 4, 10))
+LIMITS = b"".join(value.to_bytes(4, "little") for value in (100, 70, 80, 15, 0, 10))
 VALID_PROBE = bytes(4) + duml.build_keyed_set_payload(
     [(duml.CHARGE_LIMIT_KEY, LIMITS)], timestamp_ms=1
 )

@@ -17,8 +17,13 @@ limit; with a 5 % discharge limit and a 90 % recharge limit, that is 10–90 %. 
 range follows later limit changes. The station does not check the level itself, so the
 integration reads fresh limits and rejects values outside the range before writing.
 
-Each change reads the current setting, writes only the requested field, requires a
-successful acknowledgement, and then reads the setting again to confirm it. The
+The discharge and recharge limit sliders use the station's reported minimum and
+maximum values. Changing either limit also adjusts a reported stored reserve to the
+new limits in the same write, even while the custom reserve is off or unavailable.
+The integration confirms both settings before reporting success.
+
+Direct reserve changes read the current setting, write only the requested field,
+require a successful acknowledgement, and then read the setting again to confirm it. The
 existing **Energy reserve** diagnostic sensor continues to report the level.
 
 While its phone is online, DJI Home saves settings through the DJI cloud, which may

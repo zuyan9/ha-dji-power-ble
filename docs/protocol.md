@@ -149,7 +149,7 @@ or a complete configuration snapshot. It decodes these fields:
 | `0x01` | Expansion batteries | Per-pack battery percentage, cycles, rated capacity, optional temperature and firmware |
 | `0x02` | Network state | Cloud connected |
 | `0x04` | Accessories | Type and firmware of each attached accessory; serial numbers are discarded |
-| `0x05` | Charge limits | Recharge and discharge limits |
+| `0x05` | Charge limits | Recharge and discharge limits and their reported bounds |
 | `0x06` | Energy storage | Backup reserve availability, switch, and level |
 | `0x0C` | Display | Display (screen) timeout |
 | `0x0D` | Power switch | AC, SDC, and USB output states |
@@ -263,7 +263,9 @@ them as a device charging from the port, such as a drone battery. Until a statio
 sample confirms their layout, diagnostics keep them as raw hex in `consumer_info`.
 
 Extended battery records include temperature at `0x3020[9:11]`, encoded as signed
-16-bit hundredths of a degree Celsius. Shorter records omit temperature.
+16-bit hundredths of a degree Celsius. The following status byte must be `1`
+(normal), `2` (high), or `3` (low) for the reading to be available. A shorter battery
+record, unknown status `0`, or an unrecognized status clears the previous reading.
 
 ### Battery time and charging
 
@@ -292,14 +294,29 @@ a distinct sustaining state. Primary battery runtime is a separate reading.
 
 AC output writes use keys `0x0D` and `0x0E`. Key `0x0E` carries the client rules record
 that DJI Home 1.6.9 sends with its writes: a u16 LE length followed by the ASCII hex
-string `1e00efffff3f`. Charge-limit writes use key `0x05`, a six-value structure in
-which the integration changes only the recharge and discharge fields and preserves the
-other values from a fresh `0x05` read before writing.
+string `1e00efffff3f`.
+
+Charge limits use key `0x05`: six u32 LE values containing recharge maximum, minimum,
+and current limit, followed by discharge maximum, minimum, and current limit. The
+sliders and writes use these reported bounds. Missing or inconsistent records make
+the controls unavailable. Each write reads fresh limits, changes only the requested
+limit fields, and includes `0x0E`.
+
+Charge-limit reads accept GET result `0` (success) or `2` (unsupported keys missing).
+Incomplete responses, including result `1` or `3`, prevent the write rather than
+being treated as proof that an optional reserve record is absent.
+
+If a fresh `0x06` record is present, the same SET includes it with its stored level
+adjusted to `min(max(level, discharge + 5), recharge)`. Availability, switch state,
+and any additional bytes are preserved, including when the reserve is not offered
+or is switched off. An absent record is not created; an incomplete record prevents
+the write. Confirmation requires fresh matching limits and, when included, reserve
+readback.
 
 Backup reserve writes use keys `0x06` and `0x0E`. Key `0x06` holds availability
 (`1` offered), the switch (`1` on, `2` off), and the level as a u16 LE percentage.
-The integration writes only when the setting is offered, changes only the requested
-switch or level, and preserves any additional bytes. The station stores the level
+Direct reserve changes require the setting to be offered, change only the requested
+switch or level, and preserve any additional bytes. The station stores the level
 without checking it. Like DJI Home, the integration limits it to the discharge limit
 plus 5 % through the recharge limit, from a fresh `0x05` read.
 
@@ -337,11 +354,13 @@ schedule in key `0x16`. Scheduled Periods and Time of Use share this list.
 Each 10-byte period contains a type, a recurrence type, a 32-bit weekday mask, and
 four bytes for the start/end hours and minutes. The list uses outer key `0x1016`
 with individual key `0x0016` records on writes. On reads, each nested record is
-decoded using the tariff schema, independent of its child tag. The integration
-validates up to eight periods per tariff type, rejects overlaps across midnight
-and week boundaries, and uses
-the station's timezone without changing it. An explicit empty list is distinct
-from an omitted or malformed key.
+decoded using the tariff schema, independent of its child tag. Structurally valid
+station schedules can contain overlaps and remain readable by the sensor and editor.
+Outgoing schedules allow up to eight periods per tariff type and reject overlaps,
+including across midnight and week boundaries. The editor retains the original
+snapshot for conflict detection while overlaps are corrected. Schedules use the
+station's timezone without changing it. An explicit empty list is distinct from an
+omitted or malformed key.
 
 Schedule writes require fresh schedule and Eco configuration, preserve the selected
 mode, and include the same `0x0E` rules record as AC output writes. Both keys require
@@ -359,10 +378,10 @@ requested values appear or the operation times out.
 The first confirmation read follows the acknowledgement immediately. If the reported
 values do not match, the client makes up to eight further attempts, waiting two
 seconds between attempts. Each read also has a transport timeout. AC output is
-confirmed with an explicit `0x0D` GET, percentage limits with `0x05`, eco-mode power
-controls with `0x18`, and tariff periods with `0x16`. Unrelated expansion-battery
-or configuration reads are excluded from write confirmation. Cached values cannot
-substitute for missing readback fields.
+confirmed with an explicit `0x0D` GET, percentage limits with `0x05` and any included
+reserve with `0x06`, eco-mode power controls with `0x18`, and tariff periods with
+`0x16`. Unrelated expansion-battery or configuration reads are excluded from write
+confirmation. Cached values cannot substitute for missing readback fields.
 Writes remain serialized until confirmation completes, and confirmed values are
 published immediately regardless of the Home Assistant update interval.
 
