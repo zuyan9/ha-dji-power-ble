@@ -707,6 +707,19 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
                 await method(value)
                 self.sleep_mock.assert_not_awaited()
 
+    async def test_auro_sends_the_power_2000_eco_writes(self):
+        self.device.model = "DJI Power Auro 2000 Elite"
+        await self.device.set_discharge_power(422)
+        await self.device.set_charge_power(700)
+        self.assertEqual(self.device.data["discharge_power_w"], 422)
+        self.assertEqual(self.device.data["charge_power_w"], 700)
+        await self.device.set_power_adjustment("Automatic")
+        self.assertEqual(self.device.data["power_adjustment"], "Automatic")
+        self.assertEqual(
+            [command for command, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND] * 3,
+        )
+
     async def test_stale_first_readback_retries_until_station_applies_write(self):
         self.client.apply_set = False
 
@@ -1076,11 +1089,12 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
         for model in ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 1000 Mini"):
             with self.subTest(model=model):
                 self.device.model = model
-                with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+                unsupported = "not supported on this model"
+                with self.assertRaisesRegex(device_module.DjiPowerError, unsupported):
                     await self.device.set_discharge_power(422)
-                with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+                with self.assertRaisesRegex(device_module.DjiPowerError, unsupported):
                     await self.device.set_charge_power(700)
-                with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+                with self.assertRaisesRegex(device_module.DjiPowerError, unsupported):
                     await self.device.set_power_adjustment("Automatic")
         self.assertEqual(self.client.requests, [])
 
@@ -1323,7 +1337,10 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(device.data["hms_raw"], "00000000")
 
     async def test_plaintext_models_keep_plaintext_wire_authentication(self):
-        for model in ("DJI Power 1000 V2", "DJI Power 1000 Mini", "DJI Power 2000"):
+        for model in (
+            "DJI Power 1000 V2", "DJI Power 1000 Mini", "DJI Power 2000",
+            "DJI Power Auro 2000 Elite",
+        ):
             with self.subTest(model=model):
                 device, client = self._station(model, encrypted=False)
                 await device._authenticate()
@@ -1357,7 +1374,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         old_nonce, new_nonce = bytes.fromhex("11223344"), bytes.fromhex("55667788")
         for model in (
             "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 1000 Mini",
-            "DJI Power 2000",
+            "DJI Power 2000", "DJI Power Auro 2000 Elite",
         ):
             with self.subTest(model=model):
                 device, client = self._station(
@@ -1774,6 +1791,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
             ("DJI Power 1000 V2", False),
             ("DJI Power 1000 Mini", False),
             ("DJI Power 2000", False),
+            ("DJI Power Auro 2000 Elite", False),
         ):
             with self.subTest(model=model):
                 device, client = self._station(model, encrypted=encrypted)
@@ -1786,7 +1804,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
                     (duml.GET_COMMAND, bytes.fromhex("00 01 10")),
                     (duml.GET_COMMAND, INITIAL_CONFIG_GET),
                 ]
-                if model == "DJI Power 2000":
+                if model in ("DJI Power 2000", "DJI Power Auro 2000 Elite"):
                     requests += [
                         (duml.GET_COMMAND, bytes.fromhex("00 18 10")),
                         (duml.GET_COMMAND, bytes.fromhex("00 16 10")),

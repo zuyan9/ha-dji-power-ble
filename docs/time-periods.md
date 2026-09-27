@@ -1,10 +1,10 @@
-# Power 2000 Electricity Price Periods
+# Electricity Price Periods
 
-The **Electricity price time periods** sensor displays the number of scheduled periods configured on the station. Its `periods` attribute details the full schedule, while the `timezone_offset_min` attribute reflects the station's UTC offset in minutes (when reported). If the station fails to report a valid schedule, the sensor becomes unavailable. This sensor and its schedule updates are not supported on other station models.
+The **Electricity price time periods** sensor displays the number of scheduled periods configured on the station. Its `periods` attribute details the full schedule, while the `timezone_offset_min` attribute reflects the station's UTC offset in minutes (when reported). If the station fails to report a valid schedule, the sensor becomes unavailable. This sensor and its schedule updates are available on the Power 2000 and Power Auro 2000 Elite and are not supported on other station models.
 
 Open **Settings → Devices & services → DJI Power → Configure → Electricity price periods** to edit the schedule directly. The editor reads the current periods from the connected station.
 
-For automation, select your Power 2000 under **DJI Power: Set electricity price time periods**. Under **Time periods**, click **Add** to set the peak/off-peak rate, start/end times, and optional weekdays. Use the edit or delete buttons on each row to modify the schedule. To apply the schedule daily, leave the weekdays blank or select all seven days. Keep seconds set to `00`.
+For automation, select your Power 2000 or Power Auro 2000 Elite under **DJI Power: Set electricity price time periods**. Under **Time periods**, click **Add** to set the peak/off-peak rate, start/end times, and optional weekdays. Use the edit or delete buttons on each row to modify the schedule. To apply the schedule daily, leave the weekdays blank or select all seven days. Keep seconds set to `00`.
 
 These forms define the payload sent by the automation; they do not load or immediately alter the station's schedule. Each run replaces all peak and off-peak periods on the selected station. To load and edit the current schedule directly, use **Configure** above.
 
@@ -13,7 +13,7 @@ This action is also available under **Developer Tools → Actions** or in YAML:
 ```yaml
 action: dji_power_ble.set_time_periods
 data:
-  device_id: YOUR_POWER_2000_DEVICE_ID
+  device_id: YOUR_STATION_DEVICE_ID
   periods:
     - type: off_peak
       start: "00:30"

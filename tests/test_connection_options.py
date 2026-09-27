@@ -290,7 +290,7 @@ class ConnectionOptionsTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_models_can_enable_retention_on_selected_local_adapter(self):
         for model in (
             "DJI Power 1000", "DJI Power 2000", "DJI Power 1000 V2",
-            "DJI Power 1000 Mini", "DJI Power",
+            "DJI Power 1000 Mini", "DJI Power Auro 2000 Elite", "DJI Power",
         ):
             with self.subTest(model=model):
                 self.flow.config_entry.data["model"] = model

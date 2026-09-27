@@ -88,20 +88,34 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(model=model):
                 self.device.model = model
-                with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerError, "not supported on this model"
+                ):
                     await self.device.set_time_periods([OFF_PEAK])
                 self.assertEqual(self.client.requests, [])
 
     async def test_only_supported_model_requests_optional_schedule(self):
-        for model in ("DJI Power 2000", "DJI Power 1000 V2", "DJI Power 1000 Mini"):
+        supported = ("DJI Power 2000", "DJI Power Auro 2000 Elite")
+        for model in (*supported, "DJI Power 1000 V2", "DJI Power 1000 Mini"):
             with self.subTest(model=model):
                 self.device.model = model
                 self.client.requests.clear()
                 await self.device.refresh_config()
                 schedule_get = (duml.GET_COMMAND, b"\x00\x16\x10")
                 self.assertEqual(
-                    schedule_get in self.client.requests, model == "DJI Power 2000"
+                    schedule_get in self.client.requests, model in supported
                 )
+
+    async def test_auro_replaces_and_confirms_the_schedule(self):
+        self.device.model = "DJI Power Auro 2000 Elite"
+        await self.device.set_time_periods([OFF_PEAK])
+        self.assertEqual(
+            [command for command, _ in self.client.requests],
+            [duml.GET_COMMAND, duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+        )
+        self.assertEqual(
+            self.device.data["time_periods"], duml.normalize_time_periods([OFF_PEAK])
+        )
 
     async def test_editor_read_returns_fresh_independent_schedule(self):
         self.device.data["time_periods"] = duml.normalize_time_periods([OFF_PEAK])
@@ -124,7 +138,9 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_editor_read_rejects_unsupported_model_before_io(self):
         self.device.model = "DJI Power 1000 V2"
-        with self.assertRaisesRegex(device_module.DjiPowerError, "Power 2000"):
+        with self.assertRaisesRegex(
+            device_module.DjiPowerError, "not supported on this model"
+        ):
             await self.device.get_time_periods()
         self.assertEqual(self.client.requests, [])
 

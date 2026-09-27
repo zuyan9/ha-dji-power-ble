@@ -31,7 +31,7 @@ from .const import (
 )
 from .coordinator import DjiPowerCoordinator
 from .device import DjiPowerDevice
-from .duml import ProtocolError, parse_manufacturer_data
+from .duml import MODEL_NAMES, ProtocolError, parse_manufacturer_data, resolve_model
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def _matches_connection(entry: ConfigEntry, device: DjiPowerDevice) -> bool:
         model = device.model
     return device.matches_connection(
         entry.data[CONF_ADDRESS], entry.data[CONF_PAIR_KEY],
-        local_adapter=_local_adapter(entry), model=model,
+        local_adapter=_local_adapter(entry), model=resolve_model(model),
     )
 
 
@@ -248,7 +248,8 @@ def _model_from_discovery(
 ) -> str:
     configured = entry.data.get(CONF_MODEL)
     if isinstance(configured, str) and configured and configured != "DJI Power":
-        return configured
+        # Entries set up before their model code was named store a placeholder.
+        return resolve_model(configured)
     if discovery_info is not None and (
         model := _model_from_manufacturer_data(discovery_info.manufacturer_data)
     ):
@@ -363,11 +364,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ConfigEntryNotReady(
                 f"Device {device.address} disconnected during setup"
             )
+        stored_model = entry.data.get(CONF_MODEL)
         if (
-            device.model != "DJI Power"
-            and entry.data.get(CONF_MODEL) in (None, "DJI Power")
+            device.model not in ("DJI Power", stored_model)
+            and stored_model not in MODEL_NAMES.values()
         ):
-            # Retained connections may not advertise at the next HA startup.
+            # Retained connections may not advertise at the next HA startup, and
+            # a placeholder saved before its model code was named is replaced.
             hass.config_entries.async_update_entry(
                 entry, data={**entry.data, CONF_MODEL: device.model}
             )

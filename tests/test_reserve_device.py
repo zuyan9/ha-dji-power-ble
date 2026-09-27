@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, patch
 from tests.test_accessory_device import AccessoryClient
 from tests.test_device import FakeBleDevice, device_module, duml
 
-RESERVE_MODELS = ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000")
+RESERVE_MODELS = (
+    "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
+    "DJI Power Auro 2000 Elite",
+)
 RESERVE_OFF = bytes.fromhex("01025000")
 # Recharge limit 90 %, discharge limit 5 %: DJI Home's reserve range is 10-90 %.
 CHARGE_LIMITS = struct.pack("<6I", 100, 70, 90, 15, 0, 5)

@@ -17,6 +17,7 @@ from .accessory import (
     DjiPowerCarChargerEntity,
     async_discover_accessories,
     async_discover_backup_reserve,
+    port_switches_offered,
 )
 from .const import DOMAIN
 from .entity import DjiPowerEntity
@@ -58,6 +59,7 @@ async def async_setup_entry(
         },
         feature=ModelFeature.USB_CONTROLS,
         interface_types=USB_INTERFACE_TYPES,
+        offered=port_switches_offered,
     )
 
 
@@ -170,7 +172,7 @@ class DjiPowerSdcSwitch(_DjiPowerPortSwitch):
 
 
 class DjiPowerUsbSwitch(_DjiPowerPortSwitch):
-    """Control a USB-A or USB-C output only when its switch row is reported."""
+    """Control a USB-A or USB-C output the station reports and offers."""
 
     _attr_device_class = SwitchDeviceClass.OUTLET
     _interface_types = USB_INTERFACE_TYPES
@@ -180,6 +182,12 @@ class DjiPowerUsbSwitch(_DjiPowerPortSwitch):
         interface_type, seq, _ = identity
         port = "USB-A" if interface_type == 3 else "USB-C"
         self._attr_name = f"{port}{seq} output"
+
+    @property
+    def available(self) -> bool:
+        return super().available and port_switches_offered(
+            self.coordinator.data or {}
+        )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_usb(*self._identity[:2], True)

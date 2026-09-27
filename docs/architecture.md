@@ -61,22 +61,25 @@ retrieval are setup concerns, not part of normal runtime. See the
 [BLE protocol reference](protocol.md) for GATT UUIDs, framing, commands, and payload
 layouts.
 
-On Power 1000, Power 1000 V2, and Power 2000, the same connection also reads expansion
-pack state every 30 seconds, serialized with writes. Each discovered pack becomes a
-separate Home Assistant device linked to the station. Pack serial numbers identify
-devices and entities independently of connection order. Missing packs retain their
-registry entries and history with unavailable sensors, including after a reload.
+On Power 1000, Power 1000 V2, Power 2000, and Power Auro 2000 Elite, the same
+connection also reads expansion pack state every 30 seconds, serialized with writes.
+Each discovered pack becomes a separate Home Assistant device linked to the station.
+Pack serial numbers identify devices and entities independently of connection order.
+Missing packs retain their registry entries and history with unavailable sensors,
+including after a reload.
 
 On these same models, optional SDC switch, car-charger, and accessory-list
 configuration is first read in the background after setup, then refreshed with the
 packs every 30 seconds, together with the backup reserve setting and, while a car
 charger is reported, the station rules that pick its Auto layout. Power 1000 Mini
-reads its switch list on the same schedule for USB output switches, without pack
-reads. The entity platforms discover controls from supported reported rows,
-identified by interface, port sequence, and charger type, and add the backup reserve
-controls once the station offers that setting. Missing or invalid snapshots invalidate
-the affected controls without removing their entities. These controls remain on the
-station's device and use its existing connection.
+reads its switch list on the same schedule, without pack reads. On every station,
+reported USB rows become USB output switches when the station's rules include rule
+11; the rules are read again while such a row is reported. The entity platforms
+discover controls from supported reported rows, identified by interface, port
+sequence, and charger type, and add the backup reserve controls once the station
+offers that setting. Missing or invalid snapshots invalidate the affected controls
+without removing their entities. These controls remain on the station's device and use
+its existing connection.
 
 ## Writes and consistency
 

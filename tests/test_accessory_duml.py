@@ -179,12 +179,18 @@ class StationRulesTests(unittest.TestCase):
             (b"0000ff", []),
             (b"0100", []),
             (b"", []),
+            # Rule 11 needs a count above 11 and the second mask byte's bit 3.
+            (b"0c000008", [11]),
+            (b"0b000008", []),
+            (b"0c0000f7", [8, 9, 10]),
         ):
             with self.subTest(text=text):
                 parsed = duml.parse_telemetry(record(0x100E, rules_value(text)))
                 self.assertEqual(parsed["station_rules"], rules)
                 # Rule 0 selects the Auto layout with one threshold.
                 self.assertIs(parsed["car_auto_threshold"], 0 in rules)
+                # Rule 11 offers per-port switches.
+                self.assertIs(parsed["port_switches_offered"], 11 in rules)
 
     def test_malformed_rules_are_unknown_without_hiding_other_state(self) -> None:
         for value in (
@@ -204,12 +210,14 @@ class StationRulesTests(unittest.TestCase):
                 )
                 self.assertIsNone(parsed["station_rules"])
                 self.assertIsNone(parsed["car_auto_threshold"])
+                self.assertIsNone(parsed["port_switches_offered"])
                 self.assertTrue(parsed["cloud_connected"])
 
     def test_missing_rules_preserve_the_previous_layout(self) -> None:
         parsed = duml.parse_telemetry(record(0x1002, b"\x01"))
         self.assertNotIn("station_rules", parsed)
         self.assertNotIn("car_auto_threshold", parsed)
+        self.assertNotIn("port_switches_offered", parsed)
 
     def test_numbers_follow_dji_home_mode_layouts(self) -> None:
         for mode, rule, expected in (

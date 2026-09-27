@@ -1,7 +1,7 @@
 # Custom backup reserve level
 
-Power 1000, Power 1000 V2, and Power 2000 expose DJI Home's **Custom Backup Reserve
-Level** setting as two configuration entities:
+Power 1000, Power 1000 V2, Power 2000, and Power Auro 2000 Elite expose DJI Home's
+**Custom Backup Reserve Level** setting as two configuration entities:
 
 | Entity | Behavior |
 | --- | --- |

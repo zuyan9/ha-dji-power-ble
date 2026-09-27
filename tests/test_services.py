@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import types
 import unittest
@@ -29,7 +30,7 @@ def _module(name: str, **attributes) -> types.ModuleType:
     return module
 
 
-def _load_services() -> types.ModuleType:
+def _load_services() -> tuple[types.ModuleType, types.ModuleType]:
     modules = {
         PACKAGE: _module(PACKAGE, __path__=[str(COMPONENT)]),
         "homeassistant": _module("homeassistant"),
@@ -54,10 +55,11 @@ def _load_services() -> types.ModuleType:
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-    return module
+        duml = sys.modules[f"{PACKAGE}.duml"]
+    return module, duml
 
 
-services = _load_services()
+services, duml = _load_services()
 PERIOD = {"type": "off_peak", "start": "00:30", "end": "05:30"}
 
 
@@ -182,15 +184,34 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.invoke([])
         self.coordinator.async_set_time_periods.assert_awaited_once_with([])
 
+    async def test_auro_accepts_the_power_2000_schedule(self) -> None:
+        self.coordinator.device.model = "DJI Power Auro 2000 Elite"
+        await self.invoke()
+        self.coordinator.async_set_time_periods.assert_awaited_once()
+
     async def test_other_models_are_rejected_before_write(self) -> None:
         for model in ("DJI Power 1000 V2", "DJI Power 1000 Mini", "DJI Power 1000"):
             with self.subTest(model=model):
                 self.coordinator.device.model = model
                 with self.assertRaisesRegex(
-                    ServiceValidationError, "only on Power 2000"
+                    ServiceValidationError,
+                    "only on Power 2000 and Power Auro 2000 Elite",
                 ):
                     await self.invoke()
         self.coordinator.async_set_time_periods.assert_not_awaited()
+
+    def test_device_selector_offers_every_schedule_model(self) -> None:
+        text = (COMPONENT / "services.yaml").read_text()
+        self.assertCountEqual(
+            re.findall(r"^ +model: (.+)$", text, re.MULTILINE),
+            [
+                model
+                for model in duml.MODEL_NAMES.values()
+                if services.supports_feature(
+                    model, services.ModelFeature.TARIFF_SCHEDULE
+                )
+            ],
+        )
 
     async def test_child_and_unrelated_devices_cannot_target_station(self) -> None:
         for identifiers in (

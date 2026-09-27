@@ -48,7 +48,10 @@ class SettingsReportAckTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(device._settings_ack_tasks)
 
     async def test_fragmented_reports_ack_with_model_cipher_and_preserve_state(self):
-        for model in ("DJI Power 2000", "DJI Power 1000 V2", "DJI Power 1000"):
+        for model in (
+            "DJI Power 2000", "DJI Power Auro 2000 Elite", "DJI Power 1000 V2",
+            "DJI Power 1000",
+        ):
             for command_type in (0x20, 0x40, 0x60):
                 for encrypted_report in (False, True):
                     if encrypted_report and model != "DJI Power 1000":

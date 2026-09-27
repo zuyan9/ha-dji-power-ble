@@ -209,7 +209,7 @@
     "abort": {
       "schedule_saved": "Electricity price periods saved and confirmed by the station.",
       "schedule_cancelled": "Draft discarded.",
-      "schedule_not_supported": "Electricity price periods are supported only on the Power 2000.",
+      "schedule_not_supported": "Electricity price periods are supported only on the Power 2000 and Power Auro 2000 Elite.",
       "station_unavailable": "The station is unavailable. Enable the integration and reconnect before editing its schedule."
     }
   },
@@ -253,11 +253,11 @@
   "services": {
     "set_time_periods": {
       "name": "Set electricity price time periods",
-      "description": "Replace all peak and off-peak periods on a Power 2000 when this action runs. Times use the station's timezone and whole minutes (seconds 00). This does not change the Energy Optimization mode.",
+      "description": "Replace all peak and off-peak periods on a Power 2000 or Power Auro 2000 Elite when this action runs. Times use the station's timezone and whole minutes (seconds 00). This does not change the Energy Optimization mode.",
       "fields": {
         "device_id": {
           "name": "Power station",
-          "description": "The Power 2000 to update."
+          "description": "The Power 2000 or Power Auro 2000 Elite to update."
         },
         "periods": {
           "name": "Time periods",

@@ -122,6 +122,9 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
             ("DJI Power 1000", [advertisement(ADDRESS)], "DJI Power 1000"),
             ("DJI Power", [advertisement(ADDRESS.upper())], "DJI Power 2000"),
             (None, [advertisement(ADDRESS, b"\x98\x10")], "DJI Power 1000 Mini"),
+            # Entries from before the Auro was named keep its placeholder.
+            ("DJI Power (0x9E)", [], "DJI Power Auro 2000 Elite"),
+            ("DJI Power (0x9E)", [advertisement(ADDRESS)], "DJI Power Auro 2000 Elite"),
         ):
             with self.subTest(configured=configured, expected=expected):
                 flow, _ = self.reconfigure_flow(configured)
@@ -319,7 +322,7 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
         for manufacturer_data, model in (
             (b"\x94\x10", "DJI Power 2000"),
             (b"\x98\x00", "DJI Power 1000 Mini"),
-            (b"\x9e\x10", "DJI Power (0x9E)"),
+            (b"\x9e\x10", "DJI Power Auro 2000 Elite"),
         ):
             with self.subTest(manufacturer_data=manufacturer_data):
                 flow = self.flow()

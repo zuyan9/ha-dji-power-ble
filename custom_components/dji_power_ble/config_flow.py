@@ -74,6 +74,7 @@ from .duml import (
     normalize_pair_key,
     normalize_time_periods,
     parse_manufacturer_data,
+    resolve_model,
 )
 from .features import ModelFeature, supports_feature
 from .local_ble import async_local_adapters
@@ -195,6 +196,8 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="reconfigure_successful")
 
         current = entry.data.get(CONF_MODEL)
+        if isinstance(current, str):
+            current = resolve_model(current)
         if current not in models:
             current = self._model_for_address(entry.data[CONF_ADDRESS])
         model_field = (

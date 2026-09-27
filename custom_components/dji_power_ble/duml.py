@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import re
 import time
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
@@ -58,6 +59,9 @@ POWER_SWITCH_KEY = 0x0D
 RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
+
+# Station rule with which DJI Home offers per-port SDC and USB switches.
+PORT_SWITCH_RULE = 11
 
 TIME_PERIOD_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -891,11 +895,17 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
     if RULES_KEY in keyed:
         # DJI Home offers features by which station rules are set. Rule 0
         # selects its Auto car-charger layout with one threshold.
-        data.update(station_rules=None, car_auto_threshold=None)
+        data.update(
+            station_rules=None, car_auto_threshold=None, port_switches_offered=None
+        )
         with contextlib.suppress(ProtocolError):
             count, mask = parse_station_rules(keyed[RULES_KEY])
             rules = [n for n in range(min(count, mask.bit_length())) if mask >> n & 1]
-            data.update(station_rules=rules, car_auto_threshold=0 in rules)
+            data.update(
+                station_rules=rules,
+                car_auto_threshold=0 in rules,
+                port_switches_offered=PORT_SWITCH_RULE in rules,
+            )
 
     if len(timezone := keyed.get(0x15, b"")) == 2:
         data["timezone_offset_min"] = int.from_bytes(timezone, "little", signed=True)
@@ -1424,10 +1434,18 @@ MODEL_NAMES = {
     0x97: "DJI Power 1000 V2",
     0x98: "DJI Power 1000 Mini",
     0x94: "DJI Power 2000",
+    0x9E: "DJI Power Auro 2000 Elite",
 }
-# Codes DJI Home registers as Power stations, including the not yet modeled
-# 0x9E Power Auro 2000 Elite. Other DJI products share the manufacturer ID.
-POWER_MODEL_CODES = frozenset({*MODEL_NAMES, 0x9E})
+# Other DJI products, such as Romo vacuums, share the manufacturer ID.
+POWER_MODEL_CODES = frozenset(MODEL_NAMES)
+_UNMODELED_NAME = re.compile(r"DJI Power \(0x([0-9A-F]{2})\)")
+
+
+def resolve_model(model: str) -> str:
+    """Rename a stored placeholder whose model code has since been named."""
+    if match := _UNMODELED_NAME.fullmatch(model):
+        return MODEL_NAMES.get(int(match[1], 16), model)
+    return model
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
