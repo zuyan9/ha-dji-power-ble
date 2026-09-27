@@ -85,6 +85,7 @@ _INITIAL_CONFIG_KEYS = (
     ENERGY_STORAGE_KEY,
     0x0C,  # Display settings.
     POWER_SWITCH_KEY,
+    RULES_KEY,  # Station rules, which DJI Home reads from every model.
     0x15,  # Timezone.
 )
 
@@ -94,7 +95,11 @@ _RESERVE_INVALIDATION = {
     "energy_reserve_available": None,
     "energy_reserve_enabled": None,
 }
-_RULES_INVALIDATION = {"key_0e": None, "car_auto_threshold": None}
+_RULES_INVALIDATION = {
+    "key_0e": None,
+    "station_rules": None,
+    "car_auto_threshold": None,
+}
 
 
 class DjiPowerError(Exception):
@@ -950,7 +955,9 @@ class DjiPowerDevice:
             ) from error
         if "key_0e" not in update:
             # Without rules, DJI Home shows both direction voltages in Auto.
-            self._merge_data({"key_0e": None, "car_auto_threshold": False})
+            self._merge_data(
+                {"key_0e": None, "station_rules": [], "car_auto_threshold": False}
+            )
 
     async def _wait_for_energy_reserve(self, expected: dict[str, object]) -> None:
         """Confirm the reserve from fresh reads, delaying only later attempts."""

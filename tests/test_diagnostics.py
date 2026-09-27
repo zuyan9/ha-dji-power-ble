@@ -101,6 +101,8 @@ class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             "serial_number": "TEST-STATION",
             "key_01": b"TEST-PACK-ONE\x00TEST-PACK-TWO".hex(),
             "key_0e": b"TEST-STATION".hex(),
+            # Decoded rule numbers carry no identifiers, unlike raw records.
+            "station_rules": [0, 1, 2, 3, 12, 13, 14, 16],
             "expansion_batteries": packs,
             "battery_percent": 80,
         }
@@ -148,6 +150,7 @@ class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 "serial_number": REDACTED,
                 "key_01": REDACTED,
                 "key_0e": REDACTED,
+                "station_rules": [0, 1, 2, 3, 12, 13, 14, 16],
                 "expansion_batteries": [
                     pack | {"serial_number": REDACTED} for pack in packs
                 ],

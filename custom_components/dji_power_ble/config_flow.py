@@ -67,7 +67,9 @@ from .const import (
 )
 from .duml import (
     MODEL_NAMES,
+    POWER_MODEL_CODES,
     TIME_PERIOD_DAYS,
+    AdvertisementInfo,
     ProtocolError,
     normalize_pair_key,
     normalize_time_periods,
@@ -89,6 +91,20 @@ def _normalize_address(value: str | None) -> str | None:
     if re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", address):
         return address
     return None
+
+
+def _power_advertisement(
+    manufacturer_data: dict[int, bytes] | None,
+) -> AdvertisementInfo | None:
+    """Decode a DJI Power advertisement, ignoring other DJI products."""
+    value = (manufacturer_data or {}).get(MANUFACTURER_ID)
+    if not value:
+        return None
+    try:
+        advertisement = parse_manufacturer_data(value)
+    except ProtocolError:
+        return None
+    return advertisement if advertisement.model_code in POWER_MODEL_CODES else None
 
 
 OPTIONS_SCHEMA = vol.Schema(
@@ -138,16 +154,14 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         self, discovery_info: BluetoothServiceInfoBleak
     ) -> FlowResult:
         """Handle a manufacturer-matched DJI Power advertisement."""
+        advertisement = _power_advertisement(discovery_info.manufacturer_data)
+        if advertisement is None:
+            return self.async_abort(reason="not_supported")
         await self.async_set_unique_id(format_mac(discovery_info.address))
         self._abort_if_unique_id_configured()
         self._discovered_address = discovery_info.address
         self._discovered_name = discovery_info.name or "DJI Power"
-        manufacturer_data = discovery_info.manufacturer_data.get(MANUFACTURER_ID)
-        if manufacturer_data:
-            with contextlib.suppress(ProtocolError):
-                self._discovered_model = parse_manufacturer_data(
-                    manufacturer_data
-                ).model
+        self._discovered_model = advertisement.model
         self.context["title_placeholders"] = {"name": self._discovered_name}
         return await self.async_step_user()
 
@@ -213,9 +227,8 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         for info in async_discovered_service_info(self.hass, connectable=True):
             if _normalize_address(info.address) in configured:
                 continue
-            name = info.name or ""
-            if MANUFACTURER_ID in (info.manufacturer_data or {}):
-                out[info.address] = f"{name or 'DJI Power'} ({info.address})"
+            if _power_advertisement(info.manufacturer_data):
+                out[info.address] = f"{info.name or 'DJI Power'} ({info.address})"
         return out
 
     def _model_for_address(self, address: str) -> str:

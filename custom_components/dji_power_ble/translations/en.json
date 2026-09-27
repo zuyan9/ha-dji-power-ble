@@ -85,7 +85,8 @@
       "reconfigure_successful": "Station model updated.",
       "cannot_connect": "Could not reach the DJI cloud to fetch the pair key.",
       "no_devices": "No DJI devices with a local pair key were found on this account.",
-      "setup_incomplete": "Setup information is missing. Start setup again."
+      "setup_incomplete": "Setup information is missing. Start setup again.",
+      "not_supported": "This DJI device is not a DJI Power station."
     }
   },
   "options": {

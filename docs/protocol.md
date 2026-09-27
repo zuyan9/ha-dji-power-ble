@@ -19,6 +19,10 @@ MAC address.
 | `0x98` | DJI Power 1000 Mini |
 | `0x94` | DJI Power 2000 |
 
+Discovery also offers `0x9E`, which DJI Home registers as the Power Auro 2000 Elite;
+the integration does not model it yet. Other DJI products, such as Romo vacuums,
+advertise under the same manufacturer ID with other codes and are ignored.
+
 The client selects one complete layout from the discovered services on each
 connection, preferring `a002` when both are present. Notify and write
 characteristics must belong to the same service; selection is independent of model.
@@ -133,29 +137,37 @@ payloads begin with a 16-byte header:
 Each following record is `key:u8`, marker `0x10`, `length:u16`, and `value[length]`.
 GET requests contain operation `0x00` followed by requested key IDs plus `0x1000`,
 each encoded as a little-endian uint16. Initial setup requests base information,
-network state, charge limits, energy reserve, display, power switches, and timezone
-in one GET for keys `0x00`, `0x02`, `0x05`, `0x06`, `0x0C`, `0x0D`, and `0x15`.
-Expansion batteries use a separate `0x01` read; Power 2000 also requests `0x18`
-and `0x16`. Each key selects one property, not a group or a complete configuration
+network state, charge limits, energy reserve, display, power switches, rules, and
+timezone in one GET for keys `0x00`, `0x02`, `0x05`, `0x06`, `0x0C`, `0x0D`, `0x0E`,
+and `0x15`. Expansion batteries use a separate `0x01` read; Power 2000 also requests
+`0x18` and `0x16`. Each key selects one property, not a group or a complete configuration
 snapshot. It decodes these fields:
 
 | Key | Meaning | Exposed values |
 | --- | --- | --- |
-| `0x00` | Base information | Primary and secondary firmware, battery cycle count, maintenance charging |
+| `0x00` | Base information | Firmware, wireless module firmware, battery cycle count, maintenance charging |
 | `0x01` | Expansion batteries | Per-pack battery percentage, cycles, rated capacity, optional temperature and firmware |
 | `0x02` | Network state | Cloud connected |
 | `0x04` | Accessories | Type and firmware of each attached accessory; serial numbers are discarded |
 | `0x05` | Charge limits | Recharge and discharge limits |
 | `0x06` | Energy storage | Backup reserve availability, switch, and level |
-| `0x0C` | Display | Display timeout |
+| `0x0C` | Display | Display (screen) timeout |
 | `0x0D` | Power switch | AC output state; Power 1000 Mini USB output states |
-| `0x0E` | Rules | Auto car-charger layout (rule 0) |
+| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0) |
 | `0x15` | Timezone | UTC offset in minutes |
 | `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
 
 Raw keyed values are retained internally as `key_XX` hexadecimal state. Downloaded
 diagnostics redact records containing known private identifiers, including expansion
-packs (`key_01`), parallel devices (`key_03`), and accessories (`key_04`).
+packs (`key_01`), parallel devices (`key_03`), and accessories (`key_04`). The raw
+rules record (`key_0e`) is also redacted; diagnostics keep its decoded rule numbers as
+`station_rules`.
+
+### Display
+
+Key `0x0C` holds three u32 timeouts in seconds, for the whole device, its screen, and
+AC output, followed by a u8 temperature unit. A timeout of `0` means never.
+**Display timeout** reports the screen timeout.
 
 ### Base information
 
@@ -169,7 +181,7 @@ The Power 1000 V2 sends 53 bytes; the original Power 1000 sends the first 47.
 | `6` | 1 | Version status; not exposed |
 | `7` | 16 | Primary firmware, ASCII |
 | `23` | 1 | Mode; not exposed |
-| `24` | 16 | Secondary firmware, ASCII |
+| `24` | 16 | Wireless module firmware, ASCII; DJI Home shows it as Dongle Version |
 | `40` | 4 | Capacity in Wh; not exposed |
 | `44` | 2 | Built-in battery cycle count |
 | `46` | 1 | Grid connection status; not exposed |
@@ -228,7 +240,7 @@ Command `0x61` starts with the same 16-byte header and then uses nested records 
 | `0x3031` | Interface container |
 | `0x3032` | Power, AC, USB, SDC, 12 V, or XT60 group |
 | `0x3034` | Individual interface record |
-| `0x3035` → `0x3036` | Input voltage when present |
+| `0x3035` → `0x3036` | Consumer rows when present, kept raw |
 | `0x3038` → `0x3039` → `0x303A` | Attached accessory type and per-input rows when present |
 
 An interface record identifies its group, one-based port sequence, type, switch state,
@@ -243,6 +255,10 @@ input: form (`1` solar, `2` car, `3` grid), output and input watts as u16 LE, th
 output and input voltage as u32 LE hundredths of a volt. Rows keep the station's order
 and omit inputs that carry no power. The integration exposes recognized forms as
 sensors; other rows appear only in diagnostics as part of `accessory_inputs`.
+
+A port can also carry nine-byte `0x3036` consumer rows inside `0x3035`. DJI Home shows
+them as a device charging from the port, such as a drone battery. Until a station
+sample confirms their layout, diagnostics keep them as raw hex in `consumer_info`.
 
 Extended battery records include temperature at `0x3020[9:11]`, encoded as signed
 16-bit hundredths of a degree Celsius. Shorter records omit temperature.
@@ -393,8 +409,9 @@ client record sent with writes. The value is a u16 LE text length followed by AS
 hex, which the station can end with NUL. The hex decodes to a u16 LE rule count and
 a little-endian mask; rule *n* is set when *n* is below the count and mask bit *n*
 is `1`. As in DJI Home, text shorter than four characters means no rules. The
-integration reads `0x0E` while a charger is reported. Malformed rules or a failed
-read leave the Auto layout unknown, and Auto then offers only the two powers.
+integration reads `0x0E` at connection and again with each accessory refresh while a
+charger is reported. Malformed rules or a failed read leave the Auto layout unknown,
+and Auto then offers only the two powers.
 
 Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
 `type, sequence, switch`. AC is type `2`, sequence `1`; USB-A and USB-C use
@@ -419,7 +436,7 @@ does not prove physical charging or switching behavior.
 ## Known limits
 
 - HMS `0x66` reports remain raw diagnostics; active-alarm entities are not implemented.
-- SDC voltage fields are not exposed without accessory-specific validation.
+- Consumer rows, such as drone-battery charging, remain raw diagnostics.
 - Cell-level BMS values are not present on the known app-facing BLE command path.
 - Writes remain experimental on models without model-specific hardware tests.
 

@@ -204,11 +204,15 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_refresh_reads_station_rules_for_reported_chargers(self):
-        for value, expected in (
-            (bytes.fromhex("0b00") + b"11000f7001\x00", True),
-            (bytes.fromhex("0600") + b"0200fe", False),
-            (None, False),  # DJI Home also treats omitted rules as rule 0 off.
-            (b"bad", None),
+        for value, rules, expected in (
+            (
+                bytes.fromhex("0b00") + b"11000f7001\x00",
+                [0, 1, 2, 3, 12, 13, 14, 16],
+                True,
+            ),
+            (bytes.fromhex("0600") + b"0200fe", [1], False),
+            (None, [], False),  # DJI Home also treats omitted rules as rule 0 off.
+            (b"bad", None, None),
         ):
             with self.subTest(value=value):
                 self.reset_device()
@@ -219,6 +223,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                     [payload[1] for _, payload in self.client.requests][:4],
                     [0x0A, 0x0D, 0x04, 0x0E],
                 )
+                self.assertEqual(self.device.data["station_rules"], rules)
                 self.assertIs(self.device.data["car_auto_threshold"], expected)
 
     async def test_rules_are_read_only_while_a_charger_is_reported(self):
@@ -231,6 +236,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_rules_read_clears_the_previous_layout(self):
         self.client.values[0x0E] = bytes.fromhex("0600") + b"010001"
         await self.device._refresh_accessory_config()
+        self.assertEqual(self.device.data["station_rules"], [0])
         self.assertIs(self.device.data["car_auto_threshold"], True)
         read = self.device._read_config
 
@@ -241,6 +247,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(self.device, "_read_config", side_effect=fail_rules):
             await self.device._refresh_accessory_config()
+        self.assertIsNone(self.device.data["station_rules"])
         self.assertIsNone(self.device.data["car_auto_threshold"])
         self.assertIsNone(self.device.data["key_0e"])
         self.assertEqual(self.car_row()["sw"], 1)
@@ -451,13 +458,14 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
     def test_malformed_push_invalidates_accessories_and_clears_stale_controls(self):
         self.device.data.update(
             car_chargers=[{}], power_switches=[{}], key_0a="old",
-            key_0e="old", car_auto_threshold=True,
+            key_0e="old", station_rules=[0], car_auto_threshold=True,
         )
         self.client.send(duml.TELEMETRY_COMMAND, b"\x0a\x10\x41\x00\x01")
         self.assertIsNone(self.device.data["car_chargers"])
         self.assertIsNone(self.device.data["power_switches"])
         self.assertIsNone(self.device.data["key_0a"])
         self.assertIsNone(self.device.data["key_0e"])
+        self.assertIsNone(self.device.data["station_rules"])
         self.assertIsNone(self.device.data["car_auto_threshold"])
 
     def test_pushed_rules_update_the_auto_layout(self):
@@ -467,6 +475,9 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 [(duml.RULES_KEY, bytes.fromhex("0b00") + b"11000f7001\x00")],
                 timestamp_ms=1,
             ),
+        )
+        self.assertEqual(
+            self.device.data["station_rules"], [0, 1, 2, 3, 12, 13, 14, 16]
         )
         self.assertIs(self.device.data["car_auto_threshold"], True)
 
