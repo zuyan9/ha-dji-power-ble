@@ -290,6 +290,27 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._accessories(), [])
         self.assertEqual(self.coordinator.listeners, [])
 
+    async def test_auro_creates_power_2000_controls_from_reported_rows(self) -> None:
+        self.coordinator.device.model = "DJI Power Auro 2000 Elite"
+        self.coordinator.data = {
+            # Only recognized chargers get controls; other types are ignored.
+            "car_chargers": [_car(), _car(seq=2, type=6)],
+            "power_switches": [
+                {"type": 2, "seq": 1, "sw": 1},
+                {"type": 3, "seq": 1, "sw": 1},
+                {"type": 5, "seq": 1, "sw": 1},
+            ],
+        }
+        await self._setup()
+        names = [entity._attr_name for entity in self._accessories()]
+        self.assertEqual(len(names), 8)
+        self.assertIn("SDC 1 power", names)
+        self.assertTrue(all(name.startswith("SDC 1 ") for name in names))
+        self.assertFalse(any(
+            isinstance(entity, switch.DjiPowerUsbSwitch)
+            for entity in self._accessories()
+        ))
+
     async def test_usb_model_creates_only_reported_usb_switches(self) -> None:
         self.coordinator.device.model = "DJI Power 1000 Mini"
         self.coordinator.data = {
@@ -651,7 +672,7 @@ class BackupReserveEntityTests(unittest.IsolatedAsyncioTestCase):
     async def test_created_only_for_validated_model_with_stable_identity(self) -> None:
         for model in (
             "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
-            "DJI Power 1000 Mini", "DJI Power",
+            "DJI Power Auro 2000 Elite", "DJI Power 1000 Mini", "DJI Power",
         ):
             with self.subTest(model=model):
                 self.coordinator.device.model = model

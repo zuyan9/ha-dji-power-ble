@@ -77,7 +77,10 @@ AUTHENTICATION_ATTEMPTS = 2
 READBACK_RETRIES = 8
 READBACK_RETRY_INTERVAL = 2.0
 EXPANSION_REFRESH_INTERVAL = 30.0
-EXPANSION_MODELS = {"DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"}
+EXPANSION_MODELS = {
+    "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
+    "DJI Power Auro 2000 Elite",
+}
 _INITIAL_CONFIG_KEYS = (
     0x00,  # Firmware versions.
     0x02,  # Network state.
@@ -995,9 +998,9 @@ class DjiPowerDevice:
         return periods
 
     async def get_time_periods(self) -> list[dict[str, object]]:
-        """Read a fresh Power 2000 schedule without interrupting a write."""
+        """Read a fresh tariff schedule without interrupting a write."""
         if not supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
-            raise DjiPowerError("time periods are only enabled for Power 2000")
+            raise DjiPowerError("time periods are not supported on this model")
         async with self._operation_lock:
             # Return an independent normalized copy for editors to retain.
             return normalize_time_periods(await self._read_time_periods())
@@ -1005,9 +1008,9 @@ class DjiPowerDevice:
     async def set_time_periods(
         self, periods: object, *, expected_periods: object | None = None
     ) -> None:
-        """Replace Power 2000 tariff periods and confirm a fresh matching list."""
+        """Replace tariff periods and confirm a fresh matching list."""
         if not supports_feature(self.model, ModelFeature.TARIFF_SCHEDULE):
-            raise DjiPowerError("time-period control is only enabled for Power 2000")
+            raise DjiPowerError("time-period control is not supported on this model")
         try:
             requested = normalize_time_periods(periods)
             expected = (
@@ -1265,11 +1268,9 @@ class DjiPowerDevice:
             await self._wait_for_energy_reserve(expected)
 
     async def set_charge_power(self, watts: int) -> None:
-        """Set Power 2000 manual recharge watts and require matching readback."""
+        """Set manual Time of Use recharge watts and require matching readback."""
         if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
-            raise DjiPowerError(
-                "charge-power control is only enabled for Power 2000"
-            )
+            raise DjiPowerError("charge-power control is not supported on this model")
         async with self._operation_lock:
             current = await self._read_eco_mode()
             try:
@@ -1282,10 +1283,10 @@ class DjiPowerDevice:
             )
 
     async def set_discharge_power(self, watts: int) -> None:
-        """Set Power 2000 manual discharge watts and require matching readback."""
+        """Set manual Time of Use discharge watts and require matching readback."""
         if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError(
-                "discharge-power control is only enabled for Power 2000"
+                "discharge-power control is not supported on this model"
             )
         async with self._operation_lock:
             current = await self._read_eco_mode()
@@ -1302,7 +1303,7 @@ class DjiPowerDevice:
         """Select Automatic/Manual power adjustment and confirm its readback."""
         if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError(
-                "power-adjustment control is only enabled for Power 2000"
+                "power-adjustment control is not supported on this model"
             )
         async with self._operation_lock:
             current = await self._read_eco_mode()

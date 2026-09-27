@@ -272,6 +272,12 @@ EXPANSION_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
 )
 
 
+# The Power Auro 2000 Elite takes its own packs; other stations share the 2000.
+EXPANSION_BATTERY_MODELS = {
+    "DJI Power Auro 2000 Elite": "DJI Power Auro 2000 Elite Expansion Battery",
+}
+DEFAULT_EXPANSION_BATTERY_MODEL = "DJI Power Expansion Battery 2000"
+
 # Per-input readings by input kind: unique-ID suffix, name, and row field.
 INPUT_METRICS: dict[str, tuple[tuple[str, str, str], ...]] = {
     "solar": (
@@ -488,7 +494,9 @@ class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEnti
             identifiers={(DOMAIN, f"expansion_{self._serial}")},
             name=f"Expansion battery {self._serial[-4:]}",
             manufacturer="DJI",
-            model="DJI Power Expansion Battery 2000",
+            model=EXPANSION_BATTERY_MODELS.get(
+                self.coordinator.device.model, DEFAULT_EXPANSION_BATTERY_MODEL
+            ),
             serial_number=self._serial,
             via_device=(DOMAIN, self.coordinator.device.address),
         )

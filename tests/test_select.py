@@ -27,7 +27,7 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
         )
         self.entity = select.DjiPowerAdjustmentSelect(self.coordinator)
 
-    async def test_only_power_2000_gets_selector_before_config_arrives(self) -> None:
+    async def test_only_power_2000_models_get_selector_before_config(self) -> None:
         self.coordinator.data = {}
         entry = types.SimpleNamespace(entry_id="station", async_on_unload=Mock())
         hass = types.SimpleNamespace(
@@ -35,6 +35,7 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
         )
         for model in (
             "DJI Power 2000",
+            "DJI Power Auro 2000 Elite",
             "DJI Power 1000",
             "DJI Power 1000 V2",
             "DJI Power 1000 Mini",
@@ -43,7 +44,7 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
                 self.coordinator.device.model = model
                 add_entities = Mock()
                 await select.async_setup_entry(hass, entry, add_entities)
-                if model == "DJI Power 2000":
+                if model in ("DJI Power 2000", "DJI Power Auro 2000 Elite"):
                     entities = add_entities.call_args.args[0]
                     self.assertEqual(len(entities), 1)
                     self.assertIsInstance(entities[0], select.DjiPowerAdjustmentSelect)

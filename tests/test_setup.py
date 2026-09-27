@@ -318,7 +318,7 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_automatic_retention_rejected_before_connect_for_every_model(self):
         for model in ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 1000 Mini",
-                      "DJI Power 2000", "DJI Power"):
+                      "DJI Power 2000", "DJI Power Auro 2000 Elite", "DJI Power"):
             with self.subTest(model=model):
                 self.entry.options = {"connection_source": "automatic",
                                       "keep_connection": True}
@@ -332,7 +332,7 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
         self.entry.options["keep_connection"] = True
         bluetooth.async_last_service_info.return_value = None
         for model in ("DJI Power 1000 V2", "DJI Power 1000 Mini", "DJI Power 2000",
-                      "DJI Power"):
+                      "DJI Power Auro 2000 Elite", "DJI Power"):
             with self.subTest(model=model):
                 self.entry.data["model"] = model
 
@@ -356,6 +356,43 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
         self.hass.config_entries.async_update_entry.assert_called_once_with(
             self.entry, data={**self.entry.data, "model": "DJI Power 1000"}
         )
+
+    async def test_placeholder_for_a_named_model_is_renamed_and_saved(self):
+        self.entry.data["model"] = "DJI Power (0x9E)"
+        # A Power 2000 advertisement cannot override the stored model code.
+        self.service_info.manufacturer_data = {
+            integration.MANUFACTURER_ID: b"\x94\x10"
+        }
+
+        self.assertTrue(await integration.async_setup_entry(self.hass, self.entry))
+
+        self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
+                         "DJI Power Auro 2000 Elite")
+        self.hass.config_entries.async_update_entry.assert_called_once_with(
+            self.entry,
+            data={**self.entry.data, "model": "DJI Power Auro 2000 Elite"},
+        )
+        # A live session still matches the stored placeholder before it is saved.
+        self.assertTrue(integration._matches_connection(self.entry, self.device))
+        self.assertEqual(
+            self.device.matches_connection.call_args.kwargs["model"],
+            "DJI Power Auro 2000 Elite",
+        )
+
+    async def test_unnamed_or_chosen_models_are_not_rewritten(self):
+        for configured in ("DJI Power (0xA0)", "DJI Power 2000"):
+            with self.subTest(configured=configured):
+                self.hass.config_entries.async_update_entry.reset_mock()
+                self.entry.data["model"] = configured
+                self.service_info.manufacturer_data = {
+                    integration.MANUFACTURER_ID: b"\x9e\x10"
+                }
+                await integration.async_setup_entry(self.hass, self.entry)
+                self.assertEqual(
+                    integration.DjiPowerDevice.call_args.kwargs["model"], configured
+                )
+                self.hass.config_entries.async_update_entry.assert_not_called()
+                await integration.async_unload_entry(self.hass, self.entry)
 
     async def test_legacy_local_model_recovers_from_bluez_manufacturer_data(self):
         self.entry.data["model"] = "DJI Power"

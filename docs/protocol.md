@@ -18,10 +18,10 @@ MAC address.
 | `0x97` | DJI Power 1000 V2 |
 | `0x98` | DJI Power 1000 Mini |
 | `0x94` | DJI Power 2000 |
+| `0x9E` | DJI Power Auro 2000 Elite |
 
-Discovery also offers `0x9E`, which DJI Home registers as the Power Auro 2000 Elite;
-the integration does not model it yet. Other DJI products, such as Romo vacuums,
-advertise under the same manufacturer ID with other codes and are ignored.
+Other DJI products, such as Romo vacuums, advertise under the same manufacturer ID
+with other codes and are ignored.
 
 The client selects one complete layout from the discovered services on each
 connection, preferring `a002` when both are present. Notify and write
@@ -71,7 +71,7 @@ the request sequence. Transport attributes depend on the model:
 | Model | Requests | Responses | Pushes | Payload encoding |
 | --- | --- | --- | --- | --- |
 | Original Power 1000 | `0x26` | `0x86` | `0x06` | AES-256-CBC with PKCS#7 padding |
-| Power 1000 V2, Mini, 2000 | `0x20` | `0x80` | `0x00` | Plaintext in the implemented path |
+| Power 1000 V2, Mini, 2000, Auro 2000 Elite | `0x20` | `0x80` | `0x00` | Plaintext in the implemented path |
 
 Power 1000 uses a fixed transport key and IV, separate from the account's `pair_key`.
 Encryption covers the command payload, including authentication, configuration, and
@@ -139,9 +139,9 @@ GET requests contain operation `0x00` followed by requested key IDs plus `0x1000
 each encoded as a little-endian uint16. Initial setup requests base information,
 network state, charge limits, energy reserve, display, power switches, rules, and
 timezone in one GET for keys `0x00`, `0x02`, `0x05`, `0x06`, `0x0C`, `0x0D`, `0x0E`,
-and `0x15`. Expansion batteries use a separate `0x01` read; Power 2000 also requests
-`0x18` and `0x16`. Each key selects one property, not a group or a complete configuration
-snapshot. It decodes these fields:
+and `0x15`. Expansion batteries use a separate `0x01` read; Power 2000 and Power Auro
+2000 Elite also request `0x18` and `0x16`. Each key selects one property, not a group
+or a complete configuration snapshot. It decodes these fields:
 
 | Key | Meaning | Exposed values |
 | --- | --- | --- |
@@ -200,9 +200,11 @@ station.
 
 The client requests key `0x01` with `00 01 10`. Its value contains repeated nested
 `0x100F` TLVs, one per slot, decoded with the same layout for Power 1000, Power 1000 V2,
-and Power 2000. The original Power 1000 retains its encrypted transport. Polling runs
-every 30 seconds on these models; keyed pushes can update the same state immediately,
-subject to the configured Home Assistant publication interval.
+Power 2000, and Power Auro 2000 Elite. The Power Auro 2000 Elite takes its own pack
+family, which the integration names DJI Power Auro 2000 Elite Expansion Battery. The
+original Power 1000 retains its encrypted transport. Polling runs every 30 seconds on
+these models; keyed pushes can update the same state immediately, subject to the
+configured Home Assistant publication interval.
 
 | Row offset | Width | Field |
 | --- | --- | --- |
@@ -301,9 +303,9 @@ switch or level, and preserves any additional bytes. The station stores the leve
 without checking it. Like DJI Home, the integration limits it to the discharge limit
 plus 5 % through the recharge limit, from a fresh `0x05` read.
 
-Power 2000 manual **Recharge power** and **Discharge power** writes use key `0x18`
-(`eco_mode`). The app-derived layout stores each setting as little-endian uint32
-values:
+Power 2000 and Power Auro 2000 Elite manual **Recharge power** and **Discharge power**
+writes use key `0x18` (`eco_mode`). The app-derived layout stores each setting as
+little-endian uint32 values:
 
 | Setting | Maximum offset | Minimum offset | Setpoint offset |
 | --- | --- | --- | --- |
@@ -322,7 +324,7 @@ including the opposite setpoint and any extended tail. Missing, incomplete, or
 incompatible records leave both numbers unavailable. Invalid bounds or a current
 value outside the bounds disable only the affected number.
 
-The Power 2000 **Power adjustment** selector changes only `chg_mode` (byte 17):
+The **Power adjustment** selector changes only `chg_mode` (byte 17):
 **Automatic** = 1, **Manual** = 2. It requires an existing grid-tied Time of Use
 configuration and preserves both watt setpoints and all other settings. Automatic
 also requires a linked smart meter (`src_dev_id`); link it in DJI Home first.
@@ -330,8 +332,8 @@ Both watt numbers are available only in Manual with valid reported limits.
 Initial grid installation, Time of Use selection, and meter linking remain in DJI
 Home. These controls do not construct missing configuration.
 
-The Power 2000 **Set electricity price time periods** action replaces the complete
-tariff schedule in key `0x16`. Scheduled Periods and Time of Use share this list.
+The **Set electricity price time periods** action replaces the complete tariff
+schedule in key `0x16`. Scheduled Periods and Time of Use share this list.
 Each 10-byte period contains a type, a recurrence type, a 32-bit weekday mask, and
 four bytes for the start/end hours and minutes. The list uses outer key `0x1016`
 with individual key `0x0016` records on writes. On reads, each nested record is
@@ -345,8 +347,9 @@ Schedule writes require fresh schedule and Eco configuration, preserve the selec
 mode, and include the same `0x0E` rules record as AC output writes. Both keys require
 successful acknowledgements, followed by matching tariff readback. Clearing the
 last period is rejected while scheduled or grid operation is active. Schedule
-entities, reads, and writes are restricted to Power 2000. The codec and offline
-confirmation tests do not establish physical Power 2000 schedule execution.
+entities, reads, and writes are restricted to Power 2000 and Power Auro 2000 Elite.
+The codec and offline confirmation tests do not establish physical schedule execution
+on either model.
 
 A `0x63` response contains a four-byte status for each requested key. Every key must be
 present with status zero. An acknowledgement means the command was accepted, not that
@@ -356,21 +359,23 @@ requested values appear or the operation times out.
 The first confirmation read follows the acknowledgement immediately. If the reported
 values do not match, the client makes up to eight further attempts, waiting two
 seconds between attempts. Each read also has a transport timeout. AC output is
-confirmed with an explicit `0x0D` GET, percentage limits with `0x05`, Power 2000
-power controls with `0x18`, and tariff periods with `0x16`. Unrelated expansion-battery
+confirmed with an explicit `0x0D` GET, percentage limits with `0x05`, eco-mode power
+controls with `0x18`, and tariff periods with `0x16`. Unrelated expansion-battery
 or configuration reads are excluded from write confirmation. Cached values cannot
 substitute for missing readback fields.
 Writes remain serialized until confirmation completes, and confirmed values are
 published immediately regardless of the Home Assistant update interval.
 
-The Power 2000 controls' encoding and mode checks are verified against the app.
-Manual discharge control has been reported working on hardware.
+The eco-mode controls' encoding and mode checks are verified against the app.
+Manual discharge control has been reported working on Power 2000 hardware; the
+Power Auro 2000 Elite shares the Power 2000's app profile and has not been
+hardware-tested.
 
 ## SDC and car-charger configuration
 
-Optional SDC controls are enabled for Power 1000, Power 1000 V2, and Power 2000
-when their configuration reports supported rows. A telemetry interface alone is
-insufficient to create a switch.
+Optional SDC controls are enabled for Power 1000, Power 1000 V2, Power 2000, and
+Power Auro 2000 Elite when their configuration reports supported rows. A telemetry
+interface alone is insufficient to create a switch.
 
 Key `0x04` (`accessories`) lists attached accessories in 33-byte rows: a 16-byte
 serial number, the accessory type, and a 16-byte ASCII firmware version. The
@@ -418,7 +423,8 @@ Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
 types `3` and `4`, and SDC and SDC Lite use types `5` and `6`, each with their
 reported one-based sequence. All switch writes retain other rows, including AC,
 and modify only the addressed switch byte. USB switches are enabled only on
-Power 1000 Mini; SDC controls only on Power 1000, Power 1000 V2, and Power 2000.
+Power 1000 Mini; SDC controls only on Power 1000, Power 1000 V2, Power 2000, and
+Power Auro 2000 Elite.
 
 SET uses child tags `0x000A` and `0x000D` inside outer properties `0x100A` and
 `0x100D`. Readback child tags can differ; parsing follows the enclosing property's

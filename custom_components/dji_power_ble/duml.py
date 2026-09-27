@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import re
 import time
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
@@ -1424,10 +1425,18 @@ MODEL_NAMES = {
     0x97: "DJI Power 1000 V2",
     0x98: "DJI Power 1000 Mini",
     0x94: "DJI Power 2000",
+    0x9E: "DJI Power Auro 2000 Elite",
 }
-# Codes DJI Home registers as Power stations, including the not yet modeled
-# 0x9E Power Auro 2000 Elite. Other DJI products share the manufacturer ID.
-POWER_MODEL_CODES = frozenset({*MODEL_NAMES, 0x9E})
+# Other DJI products, such as Romo vacuums, share the manufacturer ID.
+POWER_MODEL_CODES = frozenset(MODEL_NAMES)
+_UNMODELED_NAME = re.compile(r"DJI Power \(0x([0-9A-F]{2})\)")
+
+
+def resolve_model(model: str) -> str:
+    """Rename a stored placeholder whose model code has since been named."""
+    if match := _UNMODELED_NAME.fullmatch(model):
+        return MODEL_NAMES.get(int(match[1], 16), model)
+    return model
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

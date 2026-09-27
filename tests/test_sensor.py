@@ -481,6 +481,19 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
                 "diagnostic" if key in ("cycle_count", "rated_capacity_wh") else None,
             )
 
+    async def test_auro_packs_are_named_for_its_own_pack_family(self) -> None:
+        self.coordinator.device.model = "DJI Power Auro 2000 Elite"
+        await self.setup([_pack()])
+        self.assertEqual(len(self.packs()), 3)
+        self.assertEqual(
+            {entity.device_info["model"] for entity in self.packs()},
+            {"DJI Power Auro 2000 Elite Expansion Battery"},
+        )
+        self.assertEqual(
+            {entity.device_info["via_device"] for entity in self.packs()},
+            {(DOMAIN, ADDRESS)},
+        )
+
     async def test_hotplug_and_reordering_preserve_identity(self) -> None:
         await self.setup([])
         self.assertEqual(self.packs(), [])
@@ -620,9 +633,12 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             "Electricity price time periods",
         )
 
-    async def test_time_period_sensor_created_only_for_power_2000(self) -> None:
+    async def test_time_period_sensor_created_only_for_power_2000_models(
+        self,
+    ) -> None:
+        power_2000_models = ("DJI Power 2000", "DJI Power Auro 2000 Elite")
         for model in (
-            "DJI Power 2000", "DJI Power 1000 V2", "DJI Power 1000 Mini",
+            *power_2000_models, "DJI Power 1000 V2", "DJI Power 1000 Mini",
             "DJI Power 1000", "DJI Power",
         ):
             with self.subTest(model=model):
@@ -633,7 +649,7 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
                     item for item in self.entities
                     if isinstance(item, sensor.DjiPowerTimePeriodsSensor)
                 ]
-                self.assertEqual(len(schedules), int(model == "DJI Power 2000"))
+                self.assertEqual(len(schedules), int(model in power_2000_models))
                 if schedules:
                     self.assertEqual(
                         schedules[0]._attr_unique_id, f"{ADDRESS}_time_periods"
@@ -837,6 +853,26 @@ class SdcAccessorySensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sdc_entities()["5_1_car_1_voltage"].native_value, 12.4)
         self.assertEqual(
             self.sdc_entities()["5_1_accessory"].native_value, "car_power_outlet_cable"
+        )
+
+    async def test_auro_adds_reported_accessory_inputs(self) -> None:
+        self.coordinator.device.model = "DJI Power Auro 2000 Elite"
+        grid = {
+            "form": 3, "form_name": "grid", "output_w": 800, "input_w": 0,
+            "output_voltage_v": 230.0, "input_voltage_v": 0.0,
+        }
+        await self.setup(
+            interfaces=[_sdc(grid, seq=2, accessory_type=5)],
+            accessories=[{"type": 5, "firmware": "01.00.00.00"}],
+        )
+        self.assertEqual(
+            {key: entity.native_value for key, entity in self.sdc_entities().items()},
+            {
+                "5_2_accessory": "poe_cable",
+                "5_2_accessory_firmware": "01.00.00.00",
+                "5_2_grid_1_power": 800,
+                "5_2_grid_1_voltage": 230.0,
+            },
         )
 
     async def test_firmware_matches_ports_by_type_and_order_only_when_unambiguous(

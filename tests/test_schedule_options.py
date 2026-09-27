@@ -71,6 +71,17 @@ class ScheduleOptionsTests(IsolatedAsyncioTestCase):
         )
         self.coordinator.async_set_time_periods.assert_not_awaited()
 
+    async def test_auro_menu_offers_the_schedule_editor(self):
+        self.coordinator.device.model = "DJI Power Auro 2000 Elite"
+        self.flow.config_entry.data["model"] = self.coordinator.device.model
+
+        result = await self.flow.async_step_init()
+
+        self.assertEqual(result["menu_options"], ["connection", "time_periods"])
+        result = await self.flow.async_step_time_periods()
+        self.assertEqual(result["type"], "menu")
+        self.coordinator.async_get_time_periods.assert_awaited_once_with()
+
     async def test_live_model_takes_precedence_over_stored_model(self):
         self.flow.config_entry.data["model"] = "DJI Power"
 

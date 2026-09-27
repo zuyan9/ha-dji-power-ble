@@ -112,7 +112,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.client.requests[2][1], b"\x00\x0a\x10")
 
     async def test_all_supported_transports_handle_accessory_controls(self):
-        for model in ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"):
+        for model in (
+            "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
+            "DJI Power Auro 2000 Elite",
+        ):
             with self.subTest(model=model):
                 self.reset_device(model)
                 await self.device.set_car_charger(5, 1, 4, recharge_power_w=475)
@@ -149,7 +152,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.requests, [])
 
     async def test_sdc_models_reject_usb_controls_without_requests(self):
-        for model in ("DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000"):
+        for model in (
+            "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
+            "DJI Power Auro 2000 Elite",
+        ):
             with self.subTest(model=model):
                 self.reset_device(model)
                 self.client.values[0x0D] = USB_SWITCHES

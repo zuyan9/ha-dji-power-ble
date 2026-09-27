@@ -38,7 +38,7 @@ async def async_setup_entry(
 
 
 class DjiPowerAdjustmentSelect(DjiPowerEntity, SelectEntity):
-    """Select automatic or manual power adjustment on Power 2000."""
+    """Select automatic or manual power adjustment for grid-tied Time of Use."""
 
     _attr_name = "Power adjustment"
     _attr_entity_category = EntityCategory.CONFIG

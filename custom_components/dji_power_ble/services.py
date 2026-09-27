@@ -64,7 +64,8 @@ def async_setup_services(hass: HomeAssistant) -> None:
                 coordinator.device.model, ModelFeature.TARIFF_SCHEDULE
             ):
                 raise ServiceValidationError(
-                    "Electricity price time periods are supported only on Power 2000"
+                    "Electricity price time periods are supported only on "
+                    "Power 2000 and Power Auro 2000 Elite"
                 )
             if (
                 not coordinator.last_update_success

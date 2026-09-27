@@ -1338,6 +1338,26 @@ class AdvertisementTests(unittest.TestCase):
                 duml.parse_manufacturer_data(bytes((code, 0x01))).model,
                 duml.MODEL_NAMES[code],
             )
+        self.assertEqual(
+            duml.parse_manufacturer_data(b"\x9e\x10").model,
+            "DJI Power Auro 2000 Elite",
+        )
+        self.assertEqual(
+            duml.parse_manufacturer_data(b"\xa0\x10").model, "DJI Power (0xA0)"
+        )
+
+    def test_stored_placeholder_resolves_once_its_code_is_named(self) -> None:
+        for stored, expected in (
+            ("DJI Power (0x9E)", "DJI Power Auro 2000 Elite"),
+            ("DJI Power (0x94)", "DJI Power 2000"),
+            ("DJI Power (0xA0)", "DJI Power (0xA0)"),
+            ("DJI Power (0x9e)", "DJI Power (0x9e)"),
+            ("DJI Power (0x9E) ", "DJI Power (0x9E) "),
+            ("DJI Power", "DJI Power"),
+            ("DJI Power 1000 V2", "DJI Power 1000 V2"),
+        ):
+            with self.subTest(stored=stored):
+                self.assertEqual(duml.resolve_model(stored), expected)
 
 
 if __name__ == "__main__":

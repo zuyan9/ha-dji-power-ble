@@ -128,7 +128,7 @@ number, coordinator_module, select = _load_modules()
 
 
 class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
-    async def test_only_power_2000_gets_both_controls_before_config_arrives(
+    async def test_only_power_2000_models_get_both_controls_before_config(
         self,
     ) -> None:
         coordinator = types.SimpleNamespace(
@@ -140,8 +140,9 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         entry = types.SimpleNamespace(entry_id="station", async_on_unload=Mock())
         hass = types.SimpleNamespace(data={"dji_power_ble": {"station": coordinator}})
+        power_2000_models = ("DJI Power 2000", "DJI Power Auro 2000 Elite")
         for model in (
-            "DJI Power 2000",
+            *power_2000_models,
             "DJI Power 1000",
             "DJI Power 1000 V2",
             "DJI Power 1000 Mini",
@@ -160,7 +161,7 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
                         for entity in entities
                         if isinstance(entity, entity_class)
                     ]
-                    self.assertEqual(len(controls), int(model == "DJI Power 2000"))
+                    self.assertEqual(len(controls), int(model in power_2000_models))
                     if controls:
                         self.assertFalse(controls[0].available)
                 # The reserve level waits until the station offers the setting.
@@ -171,7 +172,7 @@ class NumberSetupTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 self.assertEqual(
-                    len(entities), {"DJI Power 2000": 4}.get(model, 2)
+                    len(entities), 4 if model in power_2000_models else 2
                 )
 
 
