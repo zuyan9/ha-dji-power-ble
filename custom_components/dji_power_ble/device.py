@@ -102,6 +102,7 @@ _RULES_INVALIDATION = {
     "key_0e": None,
     "station_rules": None,
     "car_auto_threshold": None,
+    "port_switches_offered": None,
 }
 
 
@@ -784,9 +785,11 @@ class DjiPowerDevice:
                 raise
             except DjiPowerError as error:
                 _LOGGER.debug("Accessory configuration unavailable: %s", error)
-        # The rules only choose the Auto layout of a reported car charger.
-        if self.data.get("car_chargers") and supports_feature(
-            self.model, ModelFeature.SDC_CONTROLS
+        # The rules choose a reported car charger's Auto layout and offer USB
+        # switches.
+        if self._reports_usb_switch or (
+            self.data.get("car_chargers")
+            and supports_feature(self.model, ModelFeature.SDC_CONTROLS)
         ):
             try:
                 await self._read_station_rules()
@@ -801,6 +804,14 @@ class DjiPowerDevice:
                 raise
             except DjiPowerError as error:
                 _LOGGER.debug("Backup reserve configuration unavailable: %s", error)
+
+    @property
+    def _reports_usb_switch(self) -> bool:
+        """Return whether the last switch list has a USB-A or USB-C row."""
+        rows = self.data.get("power_switches")
+        return isinstance(rows, list) and any(
+            isinstance(row, dict) and row.get("type") in (3, 4) for row in rows
+        )
 
     async def _read_accessory_config(
         self, key: int, state_key: str
@@ -943,7 +954,7 @@ class DjiPowerDevice:
         return current
 
     async def _read_station_rules(self) -> None:
-        """Read the rules that choose DJI Home's Auto car-charger layout."""
+        """Read the rules for the Auto car-charger layout and port switches."""
         try:
             async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
                 update = await self._read_config(RULES_KEY)
@@ -957,9 +968,15 @@ class DjiPowerDevice:
                 f"cannot read station rules: {str(error) or 'timed out'}"
             ) from error
         if "key_0e" not in update:
-            # Without rules, DJI Home shows both direction voltages in Auto.
+            # Without rules, DJI Home shows both direction voltages in Auto and
+            # no port switches.
             self._merge_data(
-                {"key_0e": None, "station_rules": [], "car_auto_threshold": False}
+                {
+                    "key_0e": None,
+                    "station_rules": [],
+                    "car_auto_threshold": False,
+                    "port_switches_offered": False,
+                }
             )
 
     async def _wait_for_energy_reserve(self, expected: dict[str, object]) -> None:
@@ -1124,6 +1141,8 @@ class DjiPowerDevice:
         """Set a reported USB output while retaining all other switch rows."""
         if not supports_feature(self.model, ModelFeature.USB_CONTROLS):
             raise DjiPowerError("USB output controls are not supported on this model")
+        if self.data.get("port_switches_offered") is not True:
+            raise DjiPowerError("the station does not offer USB output controls")
         await self._set_port_switch(
             build_usb_switch_set_payload, interface_type, seq, enabled
         )

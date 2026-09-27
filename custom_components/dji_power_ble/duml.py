@@ -60,6 +60,9 @@ RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
 
+# Station rule with which DJI Home offers per-port SDC and USB switches.
+PORT_SWITCH_RULE = 11
+
 TIME_PERIOD_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 # DJI Home keeps the backup reserve this far above the discharge limit.
@@ -892,11 +895,17 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
     if RULES_KEY in keyed:
         # DJI Home offers features by which station rules are set. Rule 0
         # selects its Auto car-charger layout with one threshold.
-        data.update(station_rules=None, car_auto_threshold=None)
+        data.update(
+            station_rules=None, car_auto_threshold=None, port_switches_offered=None
+        )
         with contextlib.suppress(ProtocolError):
             count, mask = parse_station_rules(keyed[RULES_KEY])
             rules = [n for n in range(min(count, mask.bit_length())) if mask >> n & 1]
-            data.update(station_rules=rules, car_auto_threshold=0 in rules)
+            data.update(
+                station_rules=rules,
+                car_auto_threshold=0 in rules,
+                port_switches_offered=PORT_SWITCH_RULE in rules,
+            )
 
     if len(timezone := keyed.get(0x15, b"")) == 2:
         data["timezone_offset_min"] = int.from_bytes(timezone, "little", signed=True)

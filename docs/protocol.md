@@ -152,8 +152,8 @@ or a complete configuration snapshot. It decodes these fields:
 | `0x05` | Charge limits | Recharge and discharge limits |
 | `0x06` | Energy storage | Backup reserve availability, switch, and level |
 | `0x0C` | Display | Display (screen) timeout |
-| `0x0D` | Power switch | AC output state; Power 1000 Mini USB output states |
-| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0) |
+| `0x0D` | Power switch | AC, SDC, and USB output states |
+| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0); USB output switches (rule 11) |
 | `0x15` | Timezone | UTC offset in minutes |
 | `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
 
@@ -415,16 +415,17 @@ hex, which the station can end with NUL. The hex decodes to a u16 LE rule count 
 a little-endian mask; rule *n* is set when *n* is below the count and mask bit *n*
 is `1`. As in DJI Home, text shorter than four characters means no rules. The
 integration reads `0x0E` at connection and again with each accessory refresh while a
-charger is reported. Malformed rules or a failed read leave the Auto layout unknown,
-and Auto then offers only the two powers.
+charger or USB switch is reported. Malformed rules or a failed read leave the Auto
+layout unknown, and Auto then offers only the two powers. They also make USB switches
+unavailable.
 
 Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
 `type, sequence, switch`. AC is type `2`, sequence `1`; USB-A and USB-C use
 types `3` and `4`, and SDC and SDC Lite use types `5` and `6`, each with their
 reported one-based sequence. All switch writes retain other rows, including AC,
-and modify only the addressed switch byte. USB switches are enabled only on
-Power 1000 Mini; SDC controls only on Power 1000, Power 1000 V2, Power 2000, and
-Power Auro 2000 Elite.
+and modify only the addressed switch byte. As in DJI Home, a USB switch needs its
+reported row and station rule 11, on any station. SDC controls are enabled only on
+Power 1000, Power 1000 V2, Power 2000, and Power Auro 2000 Elite.
 
 SET uses child tags `0x000A` and `0x000D` inside outer properties `0x100A` and
 `0x100D`. Readback child tags can differ; parsing follows the enclosing property's

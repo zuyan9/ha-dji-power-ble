@@ -2,6 +2,8 @@
 
 from enum import StrEnum
 
+from .duml import MODEL_NAMES
+
 
 class ModelFeature(StrEnum):
     """Features that require explicit model validation."""
@@ -22,7 +24,8 @@ _FEATURE_MODELS = {
     ModelFeature.SDC_CONTROLS: frozenset(
         {"DJI Power 1000", "DJI Power 1000 V2", *_POWER_2000_MODELS}
     ),
-    ModelFeature.USB_CONTROLS: frozenset({"DJI Power 1000 Mini"}),
+    # As in DJI Home, the station's rules and switch list decide USB switches.
+    ModelFeature.USB_CONTROLS: frozenset(MODEL_NAMES.values()),
     ModelFeature.RESERVE_CONTROL: frozenset(
         {"DJI Power 1000", "DJI Power 1000 V2", *_POWER_2000_MODELS}
     ),

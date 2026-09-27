@@ -151,17 +151,37 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_sdc(5, 1, True)
         self.assertEqual(self.client.requests, [])
 
-    async def test_sdc_models_reject_usb_controls_without_requests(self):
+    async def test_usb_controls_follow_the_station_rule_on_every_named_model(self):
         for model in (
             "DJI Power 1000", "DJI Power 1000 V2", "DJI Power 2000",
-            "DJI Power Auro 2000 Elite",
+            "DJI Power Auro 2000 Elite", "DJI Power 1000 Mini",
         ):
-            with self.subTest(model=model):
-                self.reset_device(model)
-                self.client.values[0x0D] = USB_SWITCHES
-                with self.assertRaises(device_module.DjiPowerError):
+            for offered in (None, False, True):
+                with self.subTest(model=model, offered=offered):
+                    self.reset_device(model)
+                    self.client.values[0x0D] = USB_SWITCHES
+                    self.device.data["port_switches_offered"] = offered
+                    if not offered:
+                        with self.assertRaisesRegex(
+                            device_module.DjiPowerError, "does not offer"
+                        ):
+                            await self.device.set_usb(3, 1, False)
+                        self.assertEqual(self.client.requests, [])
+                        continue
                     await self.device.set_usb(3, 1, False)
-                self.assertEqual(self.client.requests, [])
+                    self.assertEqual(
+                        [command for command, _ in self.client.requests],
+                        [duml.GET_COMMAND, duml.SET_COMMAND, duml.GET_COMMAND],
+                    )
+                    self.assertEqual(
+                        self.device.data["power_switches"][1],
+                        {"type": 3, "seq": 1, "sw": 2},
+                    )
+                    self.assertTrue(all(
+                        packet.encryption_type
+                        == (6 if model == "DJI Power 1000" else 0)
+                        for packet in self.client.wire_requests
+                    ))
 
     async def test_sdc_and_ac_updates_preserve_other_switches(self):
         await self.device.set_sdc(5, 1, False)
@@ -464,7 +484,8 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
     def test_malformed_push_invalidates_accessories_and_clears_stale_controls(self):
         self.device.data.update(
             car_chargers=[{}], power_switches=[{}], key_0a="old",
-            key_0e="old", station_rules=[0], car_auto_threshold=True,
+            key_0e="old", station_rules=[0, 11], car_auto_threshold=True,
+            port_switches_offered=True,
         )
         self.client.send(duml.TELEMETRY_COMMAND, b"\x0a\x10\x41\x00\x01")
         self.assertIsNone(self.device.data["car_chargers"])
@@ -473,6 +494,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.device.data["key_0e"])
         self.assertIsNone(self.device.data["station_rules"])
         self.assertIsNone(self.device.data["car_auto_threshold"])
+        self.assertIsNone(self.device.data["port_switches_offered"])
 
     def test_pushed_rules_update_the_auto_layout(self):
         self.client.send(
@@ -486,6 +508,8 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.device.data["station_rules"], [0, 1, 2, 3, 12, 13, 14, 16]
         )
         self.assertIs(self.device.data["car_auto_threshold"], True)
+        # Power 1000 V2 rules: no rule 11, so DJI Home offers no port switches.
+        self.assertIs(self.device.data["port_switches_offered"], False)
 
 
 class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
@@ -497,6 +521,8 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = AccessoryClient(self.device)
         self.client.values = {0x0D: USB_SWITCHES}
+        # Rule 11, which the connection's initial rules read reports.
+        self.device.data["port_switches_offered"] = True
         self.device._client = self.client
         self.device._write_characteristic = object()
         retry = patch.object(device_module, "READBACK_RETRY_INTERVAL", 0)
@@ -514,7 +540,11 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
             for enabled in (False, True):
                 with self.subTest(port=(interface_type, seq), enabled=enabled):
                     self.client.requests.clear()
-                    before = self.switches() if self.device.data else None
+                    before = (
+                        self.switches()
+                        if "power_switches" in self.device.data
+                        else None
+                    )
                     with patch.object(
                         device_module.asyncio, "sleep", AsyncMock()
                     ) as sleep:
@@ -579,6 +609,29 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_usb(4, 1, False)
         self.assertEqual(self.switches()[(4, 1)], 1)
         self.assertEqual(len(self.client.requests), device_module.READBACK_RETRIES + 3)
+
+    async def test_refresh_rereads_the_rules_while_usb_rows_are_reported(self):
+        for value, offered in (
+            (bytes.fromhex("0c00") + b"1e00efffff3f", True),
+            (bytes.fromhex("0b00") + b"11000f7001\x00", False),
+            (None, False),  # Like DJI Home, omitted rules offer no switches.
+            (b"bad", None),
+        ):
+            with self.subTest(value=value):
+                self.client.requests.clear()
+                self.client.values.pop(0x0E, None)
+                if value is not None:
+                    self.client.values[0x0E] = value
+                await self.device._refresh_accessory_config()
+                self.assertEqual(
+                    [payload for _, payload in self.client.requests],
+                    [b"\x00\x0d\x10", b"\x00\x0e\x10"],
+                )
+                self.assertIs(self.device.data["port_switches_offered"], offered)
+        self.client.values[0x0D] = struct.pack("<HHBBB", 0x1014, 3, 2, 1, 1)
+        self.client.requests.clear()
+        await self.device._refresh_accessory_config()
+        self.assertEqual(self.client.requests, [(duml.GET_COMMAND, b"\x00\x0d\x10")])
 
     async def test_failed_switch_refresh_clears_usb_and_ac_state(self):
         await self.device._refresh_accessory_config()

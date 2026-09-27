@@ -29,6 +29,11 @@ SDC_ACCESSORY_NAMES = {
 ACCESSORY_INPUT_FORMS = ("solar", "car", "grid")
 
 
+def port_switches_offered(data: dict) -> bool:
+    """Return whether the station's rules offer per-port switches."""
+    return data.get("port_switches_offered") is True
+
+
 def port_name(interface_type: int, seq: int) -> str:
     """Return the station label for an SDC-family port."""
     return f"{'SDC' if interface_type == 5 else 'SDC Lite'} {seq}"
@@ -137,19 +142,26 @@ def async_discover_accessories(
     *,
     feature: ModelFeature = ModelFeature.SDC_CONTROLS,
     interface_types: set[int] = SDC_INTERFACE_TYPES,
+    offered: Callable[[dict], bool] | None = None,
 ) -> None:
-    """Add each reported accessory once, including after setup or reconnection."""
+    """Add each reported accessory once, including after setup or reconnection.
+
+    ``offered`` is a further station condition for creating the entities.
+    """
     if not supports_feature(coordinator.device.model, feature):
         return
     seen: set[tuple[str, AccessoryIdentity]] = set()
 
     @callback
     def discover() -> None:
-        if not coordinator.last_update_success:
+        data = coordinator.data or {}
+        if not coordinator.last_update_success or (
+            offered is not None and not offered(data)
+        ):
             return
         entities = []
         for key, factory in factories.items():
-            rows = reported_rows(coordinator.data or {}, key, interface_types)
+            rows = reported_rows(data, key, interface_types)
             for identity, row in rows.items():
                 state = row.get("sw")
                 if type(state) is not int or state not in (1, 2):

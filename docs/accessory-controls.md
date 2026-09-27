@@ -1,8 +1,8 @@
 # SDC accessories, car-charger, and USB output controls
 
-These use the existing Bluetooth connection. SDC accessory readings and SDC and car-charger 
-controls are enabled on Power 1000, Power 1000 V2, Power 2000, and Power Auro 2000 Elite;
-USB output switches are enabled on Power 1000 Mini.
+These use the existing Bluetooth connection. SDC accessory readings and SDC and
+car-charger controls are enabled on Power 1000, Power 1000 V2, Power 2000, and Power
+Auro 2000 Elite. USB output switches appear on any station that offers them.
 
 ## Accessory information and input readings
 
@@ -83,9 +83,11 @@ Power 1000 reports only its AC switch, so it has no SDC power switch.
 
 ## USB outputs
 
-On Power 1000 Mini, a **USB-A1 output**, **USB-A2 output**, **USB-C1 output**, or
-**USB-C2 output** switch appears for each USB port with an explicit supported switch
-record. Other models do not create USB switches.
+A **USB-A1 output**, **USB-A2 output**, **USB-C1 output**, or **USB-C2 output**
+switch appears for each USB port with an explicit supported switch record, on any
+station whose rules include rule 11. DJI Home uses the same two conditions for its
+USB toggles. A station that reports USB rows without rule 11 gets no USB switches, and
+existing USB switches become unavailable while the rules are unknown.
 
 AC, SDC, and USB writes retain the complete reported switch list and change only the
 addressed switch.
@@ -95,7 +97,7 @@ addressed switch.
 Accessory discovery runs after connection setup and refreshes every 30 seconds,
 alongside expansion-pack refreshes where supported. The refresh reads the charger
 settings, the switch list, and the accessory list, plus the station's rules while a
-car charger is reported. Telemetry reports update the
+car charger or USB switch is reported. Telemetry reports update the
 accessory type and input readings as they arrive. Device pushes can update the
 controls sooner.
 Newly attached accessories are discovered automatically. Missing, malformed, or failed

@@ -29,9 +29,10 @@ used only during setup to retrieve the device's local credential.
   - Discharge and recharge limit
   - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
   - SDC accessory [info and controls](docs/accessory-controls.md)
+  - Individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs),
+    where the station offers them
 - Model Specific:
   - Power 2000 and Power Auro 2000 Elite: discharge/recharge watts control, and [electricity price periods](docs/time-periods.md)
-  - Power 1000 Mini: individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs)
 
 
 ## Requirements
