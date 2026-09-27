@@ -861,14 +861,25 @@ class DjiPowerDevice:
         if "expansion_batteries" not in update:
             self._merge_data({"expansion_batteries": None})
 
-    async def _read_config(self, key: int, *additional_keys: int) -> dict[str, object]:
+    async def _read_config(
+        self, key: int, *additional_keys: int, require_complete: bool = False
+    ) -> dict[str, object]:
         """Read one or more explicitly requested configuration keys."""
         payload = b"\x00" + b"".join(
             bytes((item, 0x10)) for item in (key, *additional_keys)
         )
         response = await self._request(GET_COMMAND, payload)
         try:
-            update = parse_telemetry(self._decode_payload(response))
+            decoded = self._decode_payload(response)
+            if require_complete and (
+                len(decoded) < 20 or decoded[6:8] != b"\x10\x00"
+                or int.from_bytes(decoded[:4], "little") not in (0, 2)
+            ):
+                # Success (0) and missing unsupported keys (2) are complete.
+                # An oversized/partial response cannot establish absence of
+                # an optional record before a combined settings write.
+                raise DjiPowerError("station did not return complete config data")
+            update = parse_telemetry(decoded)
         except ProtocolError as error:
             raise DjiPowerError("station returned malformed config data") from error
         self._merge_data(update)
@@ -905,13 +916,27 @@ class DjiPowerDevice:
             raise DjiPowerError(str(error)) from error
         return current
 
-    async def _read_charge_limits(self) -> dict[str, object]:
+    async def _read_charge_limits(
+        self, *, include_reserve: bool = False
+    ) -> dict[str, object]:
         """Invalidate unreadable limits, returning only a fresh complete record."""
         invalidated = {
-            "key_05": None, "recharge_limit": None, "discharge_limit": None
+            "key_05": None,
+            **{
+                f"{key}{suffix}": None
+                for key in ("recharge_limit", "discharge_limit")
+                for suffix in ("", "_min", "_max")
+            },
         }
+        reserve_invalidated = {**_RESERVE_INVALIDATION, "energy_reserve": None}
+        if include_reserve:
+            invalidated.update(reserve_invalidated)
         try:
-            update = await self._read_config(CHARGE_LIMIT_KEY)
+            update = await self._read_config(
+                CHARGE_LIMIT_KEY,
+                *((ENERGY_STORAGE_KEY,) if include_reserve else ()),
+                require_complete=True,
+            )
         except DjiPowerDisconnectedError:
             raise
         except DjiPowerError as error:
@@ -919,6 +944,11 @@ class DjiPowerDevice:
                 raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
             self._merge_data(invalidated)
             raise
+        if include_reserve and (
+            not isinstance(update.get("key_06"), str)
+            or len(update["key_06"]) < 8
+        ):
+            self._merge_data(reserve_invalidated)
         if (
             isinstance(update.get("key_05"), str)
             and isinstance(update.get("recharge_limit"), int)
@@ -1020,7 +1050,9 @@ class DjiPowerDevice:
             raise DjiPowerError("time periods are not supported on this model")
         async with self._operation_lock:
             # Return an independent normalized copy for editors to retain.
-            return normalize_time_periods(await self._read_time_periods())
+            return normalize_time_periods(
+                await self._read_time_periods(), allow_overlap=True
+            )
 
     async def set_time_periods(
         self, periods: object, *, expected_periods: object | None = None
@@ -1031,7 +1063,7 @@ class DjiPowerDevice:
         try:
             requested = normalize_time_periods(periods)
             expected = (
-                normalize_time_periods(expected_periods)
+                normalize_time_periods(expected_periods, allow_overlap=True)
                 if expected_periods is not None
                 else None
             )
@@ -1068,12 +1100,14 @@ class DjiPowerDevice:
         except ProtocolError as error:
             raise DjiPowerError(str(error)) from error
 
-    async def _wait_for_charge_limits(self, expected: dict[str, int]) -> None:
-        """Confirm fresh limits, delaying only subsequent attempts."""
+    async def _wait_for_charge_limits(self, expected: dict[str, object]) -> None:
+        """Confirm fresh limits and any written reserve in the same snapshot."""
         for attempt in range(READBACK_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(READBACK_RETRY_INTERVAL)
-            update = await self._read_charge_limits()
+            update = await self._read_charge_limits(
+                include_reserve="key_06" in expected
+            )
             if all(
                 key in update and update[key] == value
                 for key, value in expected.items()
@@ -1224,7 +1258,7 @@ class DjiPowerDevice:
     ) -> None:
         """Set one or both energy-management limits."""
         async with self._operation_lock:
-            update = await self._read_charge_limits()
+            update = await self._read_charge_limits(include_reserve=True)
             current = update.get("key_05")
             old_discharge = update.get("discharge_limit")
             old_recharge = update.get("recharge_limit")
@@ -1242,17 +1276,20 @@ class DjiPowerDevice:
             )
             try:
                 payload = build_charge_limits_set_payload(
-                    current, requested_discharge, requested_recharge
+                    current, requested_discharge, requested_recharge,
+                    reserve_value=update.get("key_06"),
                 )
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (CHARGE_LIMIT_KEY,))
-            await self._wait_for_charge_limits(
-                {
-                    "discharge_limit": requested_discharge,
-                    "recharge_limit": requested_recharge,
-                },
-            )
+            written = parse_keyed_values(payload)
+            await self._set(payload, tuple(written))
+            expected: dict[str, object] = {
+                "discharge_limit": requested_discharge,
+                "recharge_limit": requested_recharge,
+            }
+            if ENERGY_STORAGE_KEY in written:
+                expected["key_06"] = written[ENERGY_STORAGE_KEY].hex()
+            await self._wait_for_charge_limits(expected)
 
     async def set_energy_reserve(
         self, *, enabled: bool | None = None, percent: int | None = None

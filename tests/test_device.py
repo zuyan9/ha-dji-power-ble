@@ -273,9 +273,13 @@ class ConfigControlClient(StationClient):
             duml.POWER_SWITCH_KEY: bytes.fromhex("0d000300020102"),
         }
         self.ack_value = bytes(4)
+        self.ack_values = {}
         self.apply_set = True
         self.did_set = False
         self.omit_after_set = False
+        self.readback_values = {}
+        self.get_status = bytes(4)
+        self.get_shared_header = None
 
     async def write_gatt_char(self, uuid, value, *, response):  # noqa: ARG002
         request = duml.DumlPacket.decode(value)
@@ -285,22 +289,34 @@ class ConfigControlClient(StationClient):
         )
         self.requests.append((request.command_id, payload))
         if request.command_id == duml.GET_COMMAND:
-            assert len(payload) == 3 and payload[0] == 0 and payload[2] == 0x10
-            key = payload[1]
-            assert key in (duml.CHARGE_LIMIT_KEY, duml.POWER_SWITCH_KEY)
-            current = self.values.get(key)
-            entries = (
-                [] if current is None or self.did_set and self.omit_after_set
-                else [(key, current)]
+            keys = requested_config_keys(payload)
+            assert set(keys) <= {0x05, 0x06, 0x0D}
+            entries = []
+            for key in keys:
+                current = self.values.get(key)
+                if self.did_set:
+                    current = self.readback_values.get(key, current)
+                    if self.omit_after_set:
+                        current = None
+                if current is not None:
+                    entries.append((key, current))
+            body = duml.build_keyed_set_payload(entries, timestamp_ms=1)
+            header = (
+                body[:16] if self.get_shared_header is None
+                else self.get_shared_header
             )
-            reply = bytes(4) + duml.build_keyed_set_payload(entries, timestamp_ms=1)
+            reply = self.get_status + header + body[16:]
         elif request.command_id == duml.SET_COMMAND:
             requested = duml.parse_keyed_values(payload)
-            entries = [] if self.ack_value is None else [
-                (key, self.ack_value) for key in requested
+            entries = [
+                (key, ack) for key in requested
+                if (ack := self.ack_values.get(key, self.ack_value)) is not None
             ]
             reply = duml.build_keyed_set_payload(entries, timestamp_ms=1)
-            if self.apply_set and self.ack_value == bytes(4):
+            if self.apply_set and all(
+                self.ack_values.get(key, self.ack_value) == bytes(4)
+                for key in requested
+            ):
                 self.values.update(requested)
             self.did_set = True
         else:
@@ -354,7 +370,11 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
                     get = (duml.GET_COMMAND, bytes((0, key, 0x10)))
                     reads = [item for item in client.requests
                              if item[0] == duml.GET_COMMAND]
-                    self.assertEqual(reads, [get] * 2)
+                    first = (
+                        (duml.GET_COMMAND, b"\x00\x05\x10\x06\x10")
+                        if key == 0x05 else get
+                    )
+                    self.assertEqual(reads, [first, get])
                     self.assertEqual(client.requests[-1], get)
 
     async def test_charge_limit_write_preserves_fresh_other_fields(self):
@@ -368,6 +388,206 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.values[0x05][:20], fresh[:20])
         self.assertEqual(self.device.data["recharge_limit"], 90)
         self.assertEqual(self.device.data["discharge_limit"], 5)
+
+    async def test_charge_limits_use_fresh_reported_bounds(self):
+        for encrypted in (False, True):
+            for discharge, recharge, accepted in (
+                (25, 60, True), (31, 60, False), (25, 49, False),
+            ):
+                with self.subTest(
+                    encrypted=encrypted, discharge=discharge, recharge=recharge,
+                ):
+                    device, client = self.make_station(encrypted=encrypted)
+                    fresh = b"".join(
+                        value.to_bytes(4, "little")
+                        for value in (95, 50, 90, 30, 10, 20)
+                    )
+                    client.values[0x05] = fresh
+                    if accepted:
+                        await device.set_charge_limits(
+                            discharge_limit=discharge, recharge_limit=recharge,
+                        )
+                        self.assertEqual(device.data["discharge_limit"], discharge)
+                        self.assertEqual(device.data["recharge_limit"], recharge)
+                        written = duml.parse_keyed_values(client.requests[1][1])
+                        self.assertEqual(set(written), {0x05, 0x0E})
+                        self.assertEqual(written[0x0E], b"\x0c\x001e00efffff3f")
+                        self.assertEqual(written[0x05][:8], fresh[:8])
+                        self.assertEqual(written[0x05][12:20], fresh[12:20])
+                    else:
+                        with self.assertRaises(device_module.DjiPowerError):
+                            await device.set_charge_limits(
+                                discharge_limit=discharge, recharge_limit=recharge,
+                            )
+                        self.assertFalse(client.did_set)
+                    self.assertEqual(device.data["discharge_limit_min"], 10)
+                    self.assertEqual(device.data["discharge_limit_max"], 30)
+                    self.assertEqual(device.data["recharge_limit_min"], 50)
+                    self.assertEqual(device.data["recharge_limit_max"], 95)
+
+    async def test_inconsistent_fresh_bounds_never_write_cached_limits(self):
+        for values in (
+            (70, 70, 70, 15, 0, 0),
+            (100, 70, 60, 15, 0, 0),
+            (100, 70, 100, 0, 0, 0),
+            (100, 70, 100, 15, 0, 16),
+        ):
+            with self.subTest(values=values):
+                device, client = self.make_station()
+                client.values[0x05] = b"".join(
+                    value.to_bytes(4, "little") for value in values
+                )
+                with self.assertRaisesRegex(device_module.DjiPowerError, "unavailable"):
+                    await device.set_charge_limits(recharge_limit=80)
+                self.assertFalse(client.did_set)
+                self.assert_charge_limits_unavailable(device)
+
+    async def test_charge_limit_write_reclamps_present_reserve_atomically(self):
+        for encrypted in (False, True):
+            for reserve, kwargs, expected in (
+                (bytes.fromhex("01025a00"), {"recharge_limit": 80}, 80),
+                (bytes.fromhex("01010200"), {"discharge_limit": 15}, 20),
+                (bytes.fromhex("00035000cafe"), {"recharge_limit": 80}, 80),
+                (bytes.fromhex("0002ffffcafe"), {"recharge_limit": 80}, 80),
+            ):
+                with self.subTest(encrypted=encrypted, reserve=reserve, kwargs=kwargs):
+                    device, client = self.make_station(encrypted=encrypted)
+                    device.data.update(duml.parse_telemetry(
+                        duml.build_keyed_set_payload(
+                            [(0x06, bytes.fromhex("01013200"))], timestamp_ms=1,
+                        )
+                    ))
+                    client.values[0x06] = reserve
+                    await device.set_charge_limits(**kwargs)
+
+                    written = duml.parse_keyed_values(client.requests[1][1])
+                    self.assertEqual(list(written), [0x05, 0x06, 0x0E])
+                    self.assertEqual(
+                        written[0x06],
+                        reserve[:2] + expected.to_bytes(2, "little") + reserve[4:],
+                    )
+                    self.assertEqual(written[0x0E], b"\x0c\x001e00efffff3f")
+                    self.assertEqual(device.data["key_06"], written[0x06].hex())
+                    reads = [item for item in client.requests
+                             if item[0] == duml.GET_COMMAND]
+                    self.assertEqual(
+                        reads, [(duml.GET_COMMAND, b"\x00\x05\x10\x06\x10")] * 2,
+                    )
+                    self.assertFalse(device._operation_lock.locked())
+                    self.assertEqual(device._pending, {})
+
+    async def test_fresh_reserve_absence_never_reuses_cached_record(self):
+        self.device.data.update(duml.parse_telemetry(duml.build_keyed_set_payload(
+            [(0x06, bytes.fromhex("01015a00"))], timestamp_ms=1,
+        )))
+        await self.device.set_charge_limits(recharge_limit=80)
+
+        written = duml.parse_keyed_values(self.client.requests[1][1])
+        self.assertEqual(set(written), {0x05, 0x0E})
+        self.assertIsNone(self.device.data["key_06"])
+        self.assertIsNone(self.device.data["energy_reserve"])
+        self.assertEqual(
+            self.client.requests[-1], (duml.GET_COMMAND, b"\x00\x05\x10"),
+        )
+
+    async def test_malformed_present_reserve_prevents_any_write(self):
+        for reserve in (b"", b"\x01", bytes(3)):
+            with self.subTest(reserve=reserve):
+                device, client = self.make_station()
+                client.values[0x06] = reserve
+                with self.assertRaisesRegex(device_module.DjiPowerError, "reserve"):
+                    await device.set_charge_limits(recharge_limit=80)
+                self.assertFalse(client.did_set)
+                self.assertEqual(device.data["recharge_limit"], 100)
+                self.assertIsNone(device.data["key_06"])
+
+    async def test_partial_or_headerless_charge_limit_response_never_writes(self):
+        for status in (
+            b"", bytes(2), (1).to_bytes(4, "little"),
+            (3).to_bytes(4, "little"), (4).to_bytes(4, "little"),
+        ):
+            with self.subTest(status=status):
+                device, client = self.make_station()
+                client.get_status = status
+                with self.assertRaisesRegex(device_module.DjiPowerError, "complete"):
+                    await device.set_charge_limits(recharge_limit=80)
+                self.assertFalse(client.did_set)
+                self.assert_charge_limits_unavailable(device)
+                self.assertFalse(device._operation_lock.locked())
+                self.assertEqual(device._pending, {})
+
+    async def test_complete_success_or_missing_status_allows_limit_transaction(self):
+        for encrypted in (False, True):
+            for status in (0, 2):
+                for reserve_present in (False, True):
+                    with self.subTest(
+                        encrypted=encrypted, status=status, reserve=reserve_present,
+                    ):
+                        device, client = self.make_station(encrypted=encrypted)
+                        client.get_status = status.to_bytes(4, "little")
+                        if reserve_present:
+                            client.values[0x06] = bytes.fromhex("01015a00")
+                        await device.set_charge_limits(recharge_limit=80)
+                        self.assertEqual(device.data["recharge_limit"], 80)
+                        written = duml.parse_keyed_values(client.requests[1][1])
+                        self.assertEqual(0x06 in written, reserve_present)
+                        self.assertEqual(len(client.requests), 3)
+                        if reserve_present:
+                            self.assertEqual(device.data["energy_reserve"], 80)
+                        else:
+                            self.assertIsNone(device.data.get("key_06"))
+
+    async def test_captured_missing_status_envelope_allows_fresh_limit_write(self):
+        captured = duml.parse_keyed_values(CAPTURED_KEYED_CONFIG)
+        self.assertEqual(CAPTURED_KEYED_CONFIG[:4], b"\x02\x00\x00\x00")
+        self.client.get_status = CAPTURED_KEYED_CONFIG[:4]
+        self.client.get_shared_header = CAPTURED_KEYED_CONFIG[4:20]
+        self.client.values.update({key: captured[key] for key in (0x05, 0x06)})
+
+        await self.device.set_charge_limits(recharge_limit=70)
+
+        written = duml.parse_keyed_values(self.client.requests[1][1])
+        self.assertEqual(list(written), [0x05, 0x06, 0x0E])
+        self.assertEqual(written[0x06], captured[0x06][:2] + b"\x46\x00")
+        self.assertEqual(self.device.data["recharge_limit"], 70)
+        self.assertEqual(self.device.data["key_06"], written[0x06].hex())
+
+    async def test_every_written_charge_limit_key_needs_successful_ack(self):
+        for key in (0x05, 0x06, 0x0E):
+            for ack in (None, b"\x01\x00\x00\x00"):
+                with self.subTest(key=key, ack=ack):
+                    device, client = self.make_station()
+                    client.values[0x06] = bytes.fromhex("01015a00")
+                    client.ack_values[key] = ack
+                    with self.assertRaises(device_module.DjiPowerError):
+                        await device.set_charge_limits(recharge_limit=80)
+                    self.assertEqual(len(client.requests), 2)
+                    self.assertEqual(client.requests[-1][0], duml.SET_COMMAND)
+                    self.assertEqual(device.data["recharge_limit"], 100)
+                    self.assertEqual(device.data["energy_reserve"], 90)
+                    self.assertFalse(device._operation_lock.locked())
+                    self.assertEqual(device._pending, {})
+
+    async def test_bad_reserve_readback_cannot_confirm_matching_cached_record(self):
+        for reserve in (None, bytes(3), bytes.fromhex("01015a00")):
+            with self.subTest(reserve=reserve):
+                device, client = self.make_station()
+                client.values[0x06] = bytes.fromhex("01015000")
+                client.readback_values[0x06] = reserve
+                self.sleep_mock.reset_mock()
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerError, "did not report"
+                ):
+                    await device.set_charge_limits(recharge_limit=80)
+                self.assertEqual(device.data["recharge_limit"], 80)
+                self.assertEqual(self.sleep_mock.await_args_list, [call(2)] * 8)
+                if reserve is None or len(reserve) < 4:
+                    self.assertIsNone(device.data["key_06"])
+                    self.assertIsNone(device.data["energy_reserve"])
+                else:
+                    self.assertEqual(device.data["energy_reserve"], 90)
+                self.assertFalse(device._operation_lock.locked())
+                self.assertEqual(device._pending, {})
 
     async def test_missing_fresh_limits_never_writes_cached_record(self):
         for encrypted in (False, True):
@@ -384,7 +604,8 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
                     self.assert_charge_limits_unavailable(device)
                     self.assertFalse(device.data["ac_enabled"])
                     self.assertEqual(
-                        client.requests, [(duml.GET_COMMAND, b"\x00\x05\x10")]
+                        client.requests,
+                        [(duml.GET_COMMAND, b"\x00\x05\x10\x06\x10")],
                     )
 
     async def test_missing_readback_cannot_confirm_matching_cached_values(self):
@@ -461,6 +682,12 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
                         error=error_type.__name__,
                     ):
                         device, client = self.make_station(encrypted=encrypted)
+                        client.values[0x06] = bytes.fromhex("01015a00")
+                        device.data.update(duml.parse_telemetry(
+                            duml.build_keyed_set_payload(
+                                [(0x06, client.values[0x06])], timestamp_ms=1,
+                            )
+                        ))
                         send = client.write_gatt_char
 
                         async def fail_read(
@@ -479,6 +706,8 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
                             await device.set_charge_limits(recharge_limit=80)
 
                         self.assert_charge_limits_unavailable(device)
+                        self.assertIsNone(device.data["key_06"])
+                        self.assertIsNone(device.data["energy_reserve"])
                         self.assertFalse(device.data["ac_enabled"])
                         self.assertEqual(
                             int.from_bytes(client.values[0x05][8:12], "little"),
@@ -671,6 +900,36 @@ class ConfigControlTests(unittest.IsolatedAsyncioTestCase):
         self.client.write_gatt_char = send
         await self.device.set_ac(False)
         self.assertFalse(self.device.data["ac_enabled"])
+
+    async def test_cancelled_combined_limit_confirmation_releases_lock(self):
+        self.client.values[0x06] = bytes.fromhex("01015a00")
+        reading = asyncio.Event()
+        send = self.client.write_gatt_char
+
+        async def stall_readback(*args, **kwargs):
+            if self.client.did_set:
+                reading.set()
+                await asyncio.Event().wait()
+            await send(*args, **kwargs)
+
+        self.client.write_gatt_char = stall_readback
+        task = asyncio.create_task(self.device.set_charge_limits(recharge_limit=80))
+        await reading.wait()
+        self.assertTrue(self.device._operation_lock.locked())
+        self.assertTrue(self.device._pending)
+        self.assertEqual(self.device.data["recharge_limit"], 100)
+        self.assertEqual(self.device.data["energy_reserve"], 90)
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertFalse(self.device._operation_lock.locked())
+        self.assertEqual(self.device._pending, {})
+        self.client.write_gatt_char = send
+        await self.device.set_charge_limits(recharge_limit=90)
+        self.assertEqual(self.device.data["recharge_limit"], 90)
+        self.assertEqual(self.device.data["energy_reserve"], 80)
 
 
 class EcoModeTests(unittest.IsolatedAsyncioTestCase):
@@ -1848,6 +2107,40 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.device.data["battery_percent"], 66)
         self.assertFalse(self.device.data["charging"])
         self.assertEqual(len(updates), 1)
+
+    async def test_temperature_updates_clear_stale_values_and_preserve_partial_state(
+        self,
+    ) -> None:
+        updates = []
+        self.device.add_state_listener(updates.append)
+        battery = bytes.fromhex("c819990b02c8190000ce0901")
+
+        def push(payload: bytes) -> None:
+            self.device._handle_packet(
+                duml.DumlPacket(
+                    0xAB, 0x02, 1, 0, duml.POWER_COMMAND_SET,
+                    duml.REPORT_COMMAND, payload,
+                )
+            )
+
+        for invalid in (
+            battery[:-1] + b"\x00",
+            battery[:-1] + b"\xff",
+            *(battery[:length] for length in (0, 8, 9, 10, 11)),
+        ):
+            with self.subTest(battery=invalid.hex()):
+                push(record(0x3020, battery))
+                self.assertEqual(updates[-1]["temperature"], 25.1)
+
+                push(record(0x3030, bytes.fromhex("01000200")))
+                self.assertEqual(self.device.data["temperature"], 25.1)
+
+                push(record(0x3020, invalid))
+                self.assertIsNone(self.device.data["temperature"])
+                self.assertIsNone(updates[-1]["temperature"])
+                self.assertEqual(updates[-1]["battery_percent"], 66)
+                self.assertEqual(updates[-1]["runtime_min"], 2969)
+                self.assertFalse(updates[-1]["charging"])
 
     async def test_report_transitions_keep_battery_state_across_partial_pushes(
         self,

@@ -294,10 +294,28 @@ class TimePeriodCodecTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(duml.ProtocolError):
                 duml.parse_time_periods(value)
 
-    def test_overlapping_readback_is_invalid(self) -> None:
+    def test_overlapping_readback_is_preserved_but_cannot_be_written(self) -> None:
         value = record(0x0016, self.DAILY_OFF_PEAK) * 2
+        periods = duml.parse_time_periods(value)
+
+        self.assertEqual(
+            periods, [{**period(), "days": list(duml.TIME_PERIOD_DAYS)}] * 2
+        )
         with self.assertRaisesRegex(duml.ProtocolError, "overlap"):
-            duml.parse_time_periods(value)
+            duml.build_time_periods_set_payload(periods)
+
+    def test_sunday_overlap_readback_keeps_telemetry_available(self) -> None:
+        value = record(0x1017, bytes.fromhex("02024000000016000200"))
+        value += record(0x1017, bytes.fromhex("01020100000001000300"))
+        expected = [
+            period("01:00", "03:00", kind="peak", days=["mon"]),
+            period("22:00", "02:00", days=["sun"]),
+        ]
+        payload = duml.build_keyed_set_payload([(duml.TIME_PERIODS_KEY, value)])
+
+        self.assertEqual(duml.parse_telemetry(payload)["time_periods"], expected)
+        with self.assertRaisesRegex(duml.ProtocolError, "overlap"):
+            duml.build_time_periods_set_payload(expected)
 
     def test_missing_key_preserves_and_malformed_key_clears_schedule(self) -> None:
         state = duml.parse_telemetry(

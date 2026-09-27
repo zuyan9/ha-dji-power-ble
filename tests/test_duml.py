@@ -337,6 +337,123 @@ class KeyedConfigTests(unittest.TestCase):
         )
 
 
+class ChargeLimitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.values = (95, 40, 85, 60, 5, 25)
+        self.current = self.encode(self.values)
+
+    @staticmethod
+    def encode(values: tuple[int, ...]) -> bytes:
+        return b"".join(value.to_bytes(4, "little") for value in values)
+
+    def parse(self, value: bytes) -> dict[str, object]:
+        return duml.parse_telemetry(duml.build_keyed_set_payload([(0x05, value)]))
+
+    def test_nondefault_bounds_and_values_are_decoded(self) -> None:
+        parsed = self.parse(self.current)
+
+        self.assertEqual(parsed["recharge_limit"], 85)
+        self.assertEqual(parsed["recharge_limit_min"], 40)
+        self.assertEqual(parsed["recharge_limit_max"], 95)
+        self.assertEqual(parsed["discharge_limit"], 25)
+        self.assertEqual(parsed["discharge_limit_min"], 5)
+        self.assertEqual(parsed["discharge_limit_max"], 60)
+
+    def test_invalid_record_clears_values_and_bounds(self) -> None:
+        invalid = [self.current[:length] for length in (0, 4, 23)]
+        invalid.append(self.current + b"\x00")
+        for offset in (0, 3):
+            for group in ((40, 40, 40), (40, 50, 45), (101, 5, 25),
+                          (60, 5, 4), (60, 5, 61)):
+                values = list(self.values)
+                values[offset:offset + 3] = group
+                invalid.append(self.encode(tuple(values)))
+        invalid.extend((
+            self.encode((95, 40, 50, 60, 5, 50)),
+            self.encode((95, 40, 40, 60, 5, 60)),
+        ))
+        for value in invalid:
+            with self.subTest(value=value.hex()):
+                with self.assertRaises(duml.ProtocolError):
+                    duml.parse_charge_limits(value)
+                current = self.parse(self.current)
+                current.update(self.parse(value))
+
+                for key in ("recharge_limit", "discharge_limit"):
+                    for suffix in ("", "_min", "_max"):
+                        self.assertIsNone(current[f"{key}{suffix}"])
+                self.assertEqual(current["key_05"], value.hex())
+
+    def test_unrelated_snapshot_preserves_reported_bounds(self) -> None:
+        current = self.parse(self.current)
+        update = duml.parse_telemetry(duml.build_keyed_set_payload([(0x02, b"\x01")]))
+
+        self.assertNotIn("recharge_limit", update)
+        self.assertNotIn("recharge_limit_min", update)
+        current.update(update)
+        self.assertEqual(current["recharge_limit_min"], 40)
+        self.assertEqual(current["discharge_limit_max"], 60)
+
+    def test_write_uses_reported_bounds_and_rules_without_reserve(self) -> None:
+        for discharge, recharge in ((5, 40), (60, 95)):
+            with self.subTest(discharge=discharge, recharge=recharge):
+                entries = duml.parse_keyed_values(duml.build_charge_limits_set_payload(
+                    self.current.hex(), discharge, recharge, timestamp_ms=0
+                ))
+
+                self.assertEqual(list(entries), [0x05, 0x0E])
+                self.assertEqual(entries[0x05], self.encode(
+                    (95, 40, recharge, 60, 5, discharge)
+                ))
+                self.assertEqual(entries[0x0E], b"\x0c\x00" + b"1e00efffff3f")
+
+    def test_write_rejects_nonintegers_out_of_range_and_crossed_limits(self) -> None:
+        for discharge, recharge in (
+            (4, 85), (61, 85), (25, 39), (25, 96), (50, 50), (60, 40),
+            (25.0, 85), (25, 85.0), (True, 85), (25, False),
+            ("25", 85), (25, "85"), (None, 85), (25, None),
+        ):
+            with (
+                self.subTest(discharge=discharge, recharge=recharge),
+                self.assertRaises(duml.ProtocolError),
+            ):
+                duml.build_charge_limits_set_payload(self.current, discharge, recharge)
+
+    def test_write_reclamps_present_reserve_and_preserves_flags_and_tail(self) -> None:
+        for reserve, discharge, recharge, expected in (
+            ("01010500aabb", 40, 80, "01012d00aabb"),
+            ("01025a00aabb", 25, 80, "01025000aabb"),
+            ("00020500aabb", 40, 80, "00022d00aabb"),
+            ("01013200aabb", 25, 80, "01013200aabb"),
+            ("01010001aabb", 5, 95, "01015f00aabb"),
+            ("00020000aabb", 38, 40, "00022800aabb"),
+        ):
+            for value in (reserve, bytes.fromhex(reserve)):
+                with self.subTest(reserve=reserve, value_type=type(value).__name__):
+                    entries = duml.parse_keyed_values(
+                        duml.build_charge_limits_set_payload(
+                            self.current, discharge, recharge, reserve_value=value
+                        )
+                    )
+
+                    self.assertEqual(list(entries), [0x05, 0x06, 0x0E])
+                    self.assertEqual(entries[0x06].hex(), expected)
+                    self.assertEqual(entries[0x0E], b"\x0c\x00" + b"1e00efffff3f")
+
+    def test_malformed_present_reserve_blocks_limit_write(self) -> None:
+        for reserve in (b"", b"\x01", b"\x01\x02", b"\x01\x02\x50", "zz"):
+            with self.subTest(reserve=reserve), self.assertRaises(duml.ProtocolError):
+                duml.build_charge_limits_set_payload(
+                    self.current, 25, 85, reserve_value=reserve
+                )
+
+    def test_reserve_level_reads_complete_u16(self) -> None:
+        parsed = duml.parse_telemetry(duml.build_keyed_set_payload([
+            (0x06, bytes.fromhex("00020001"))
+        ]))
+        self.assertEqual(parsed["energy_reserve"], 256)
+
+
 class ExpansionBatteryTests(unittest.TestCase):
     def parse_packs(self, value: bytes) -> dict[str, object]:
         payload = duml.build_keyed_set_payload([(0x01, value)])
@@ -928,23 +1045,42 @@ class ReportTests(unittest.TestCase):
 
     def test_battery_temperature_uses_signed_hundredths(self) -> None:
         for encoded in (-1234, -1000, -1, 0, 2510):
-            with self.subTest(encoded=encoded):
-                battery = bytes.fromhex("c819990b02c8190000")
-                battery += encoded.to_bytes(2, "little", signed=True) + b"\x01"
+            for status in (1, 2, 3):
+                with self.subTest(encoded=encoded, status=status):
+                    battery = bytes.fromhex("c819990b02c8190000")
+                    battery += encoded.to_bytes(2, "little", signed=True)
+                    battery += bytes((status,))
+
+                    parsed = duml.parse_report(record(0x3020, battery))
+
+                    self.assertEqual(parsed["temperature"], encoded / 100)
+                    self.assertEqual(parsed["battery_percent"], 66)
+
+    def test_unknown_temperature_status_preserves_other_battery_metrics(self) -> None:
+        for status in (0, 4, 255):
+            with self.subTest(status=status):
+                battery = bytes.fromhex("c819990b02c819000018fc") + bytes((status,))
 
                 parsed = duml.parse_report(record(0x3020, battery))
 
-                self.assertEqual(parsed["temperature"], encoded / 100)
+                self.assertIsNone(parsed["temperature"])
                 self.assertEqual(parsed["battery_percent"], 66)
+                self.assertEqual(parsed["runtime_min"], 2969)
+                self.assertFalse(parsed["charging"])
+                self.assertEqual(parsed["primary_battery_percent"], 66)
+                self.assertEqual(parsed["primary_runtime_min"], 0)
 
-    def test_missing_or_partial_temperature_is_not_reported(self) -> None:
+    def test_missing_or_partial_temperature_is_unknown(self) -> None:
         battery = bytes.fromhex("c819990b02c819000018fc01")
-        for length in (9, 10):
+        for length in range(12):
             with self.subTest(length=length):
                 parsed = duml.parse_report(record(0x3020, battery[:length]))
 
-                self.assertNotIn("temperature", parsed)
-                self.assertEqual(parsed["battery_percent"], 66)
+                self.assertIsNone(parsed["temperature"])
+                if length >= 9:
+                    self.assertEqual(parsed["battery_percent"], 66)
+                else:
+                    self.assertNotIn("battery_percent", parsed)
 
     def test_nested_groups_preserve_ports_and_raw_consumer_rows(self) -> None:
         interfaces = record(

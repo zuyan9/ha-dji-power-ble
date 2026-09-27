@@ -21,6 +21,12 @@ OFF_PEAK = {"type": "off_peak", "start": "00:30", "end": "05:30"}
 # Independent synthetic readback fixture. The app reads rows by their enclosing
 # schema, without depending on each child's tag value.
 PEAK_VALUE = struct.pack("<HHBBIBBBB", 0x1017, 10, 1, 1, 127, 17, 0, 20, 0)
+OVERLAPPING_PERIODS = [
+    {"type": "peak", "days": ["mon"], "start": "01:00", "end": "03:00"},
+    {"type": "off_peak", "days": ["sun"], "start": "22:00", "end": "02:00"},
+]
+OVERLAPPING_VALUE = struct.pack("<HHBBIBBBB", 0x1017, 10, 2, 2, 64, 22, 0, 2, 0)
+OVERLAPPING_VALUE += struct.pack("<HHBBIBBBB", 0x1017, 10, 1, 2, 1, 1, 0, 3, 0)
 
 
 class TimePeriodsClient(StationClient):
@@ -135,6 +141,38 @@ class TimePeriodsDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_editor_read_accepts_explicit_empty_schedule(self):
         self.client.values[0x16] = b""
         self.assertEqual(await self.device.get_time_periods(), [])
+
+    async def test_overlapping_station_schedule_can_be_read_and_repaired(self):
+        self.client.values[0x16] = OVERLAPPING_VALUE
+
+        original = await self.device.get_time_periods()
+
+        self.assertEqual(original, OVERLAPPING_PERIODS)
+        self.assertEqual(self.device.data["time_periods"], OVERLAPPING_PERIODS)
+        original[0]["days"].append("tue")
+        self.assertEqual(self.device.data["time_periods"], OVERLAPPING_PERIODS)
+        repaired = [
+            {**OVERLAPPING_PERIODS[0], "start": "02:00"}, OVERLAPPING_PERIODS[1]
+        ]
+
+        await self.device.set_time_periods(
+            repaired, expected_periods=list(reversed(OVERLAPPING_PERIODS))
+        )
+
+        self.assertTrue(self.client.did_set)
+        self.assertEqual(self.device.data["time_periods"], repaired)
+
+    async def test_stale_overlapping_baseline_still_rejects_writes(self):
+        with self.assertRaises(device_module.DjiPowerScheduleChangedError):
+            await self.device.set_time_periods(
+                [OFF_PEAK], expected_periods=OVERLAPPING_PERIODS
+            )
+        self.assertFalse(self.client.did_set)
+
+    async def test_overlapping_request_is_rejected_before_reading(self):
+        with self.assertRaisesRegex(device_module.DjiPowerError, "overlap"):
+            await self.device.set_time_periods(OVERLAPPING_PERIODS)
+        self.assertEqual(self.client.requests, [])
 
     async def test_editor_read_rejects_unsupported_model_before_io(self):
         self.device.model = "DJI Power 1000 V2"

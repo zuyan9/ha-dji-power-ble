@@ -393,8 +393,10 @@ def parse_report(payload: bytes) -> dict[str, object]:
                 primary_battery_percent=int.from_bytes(battery[5:7], "little") / 100,
                 primary_runtime_min=int.from_bytes(battery[7:9], "little"),
             )
-        # dy301 emits only the first 9 bytes; dy302+ emits temperature as well.
-        if len(battery) >= 11:
+        # dy301 emits only 9 bytes. Extended records need both temperature and
+        # status: 0 is unknown; 1, 2 and 3 mean normal, high and low.
+        data["temperature"] = None
+        if len(battery) >= 12 and battery[11] in (1, 2, 3):
             data["temperature"] = (
                 int.from_bytes(battery[9:11], "little", signed=True) / 100
             )
@@ -610,11 +612,14 @@ def _time_period_minutes(value: object) -> int:
     return hour * 60 + minute
 
 
-def normalize_time_periods(periods: object) -> list[dict[str, object]]:
+def normalize_time_periods(
+    periods: object, *, allow_overlap: bool = False
+) -> list[dict[str, object]]:
     """Validate and canonically order recurring peak and off-peak periods.
 
     Days refer to each period's start day. An end earlier than its start extends
     into the following day, including the Sunday-to-Monday boundary.
+    Station snapshots may overlap; only outgoing schedules must be disjoint.
     """
     if not isinstance(periods, list):
         raise ProtocolError("periods must be a list")
@@ -669,10 +674,11 @@ def normalize_time_periods(periods: object) -> list[dict[str, object]]:
             else:
                 intervals.append((base + start, stop))
 
-    intervals.sort()
-    for previous, current in zip(intervals, intervals[1:], strict=False):
-        if current[0] < previous[1]:
-            raise ProtocolError("periods must not overlap")
+    if not allow_overlap:
+        intervals.sort()
+        for previous, current in zip(intervals, intervals[1:], strict=False):
+            if current[0] < previous[1]:
+                raise ProtocolError("periods must not overlap")
     return [period for _, period in sorted(canonical, key=lambda item: item[0])]
 
 
@@ -705,7 +711,7 @@ def parse_time_periods(value: bytes) -> list[dict[str, object]]:
                 "end": f"{row[8]:02d}:{row[9]:02d}",
             }
         )
-    return normalize_time_periods(periods)
+    return normalize_time_periods(periods, allow_overlap=True)
 
 
 _CAR_CHARGER_FIELDS = (
@@ -817,6 +823,25 @@ def parse_station_rules(value: bytes) -> tuple[int, int]:
     return int.from_bytes(rules[:2], "little"), int.from_bytes(rules[2:], "little")
 
 
+def parse_charge_limits(value: bytes) -> dict[str, int]:
+    """Decode consistent station-reported percentage limits and their bounds."""
+    if len(value) != 24:
+        raise ProtocolError("charge-limit state must contain six u32 values")
+    values = [int.from_bytes(value[i : i + 4], "little") for i in range(0, 24, 4)]
+    result = {}
+    for key, (maximum, minimum, current) in zip(
+        ("recharge_limit", "discharge_limit"),
+        (values[:3], values[3:]),
+        strict=True,
+    ):
+        if not 0 <= minimum < maximum <= 100 or not minimum <= current <= maximum:
+            raise ProtocolError("station reported invalid charge-limit bounds or value")
+        result.update({key: current, f"{key}_min": minimum, f"{key}_max": maximum})
+    if result["discharge_limit"] >= result["recharge_limit"]:
+        raise ProtocolError("discharge limit must be lower than recharge limit")
+    return result
+
+
 def parse_telemetry(payload: bytes) -> dict[str, object]:
     """Decode the known fields of a keyed config snapshot/readback."""
     keyed = parse_keyed_values(payload)
@@ -851,13 +876,17 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
     if network := keyed.get(0x02):
         data["cloud_connected"] = bool(network[0])
 
-    if len(limits := keyed.get(CHARGE_LIMIT_KEY, b"")) == 24:
-        values = [int.from_bytes(limits[i : i + 4], "little") for i in range(0, 24, 4)]
-        data["recharge_limit"] = values[2]
-        data["discharge_limit"] = values[5]
+    if CHARGE_LIMIT_KEY in keyed:
+        data.update({
+            f"{key}{suffix}": None
+            for key in ("recharge_limit", "discharge_limit")
+            for suffix in ("", "_min", "_max")
+        })
+        with contextlib.suppress(ProtocolError):
+            data.update(parse_charge_limits(keyed[CHARGE_LIMIT_KEY]))
 
     if len(storage := keyed.get(ENERGY_STORAGE_KEY, b"")) >= 3:
-        data["energy_reserve"] = storage[2]
+        data["energy_reserve"] = int.from_bytes(storage[2:4], "little")
     if ENERGY_STORAGE_KEY in keyed:
         # The station reports availability first, then 1 for an enabled reserve.
         data.update(energy_reserve_available=None, energy_reserve_enabled=None)
@@ -1234,9 +1263,10 @@ def build_charge_limits_set_payload(
     discharge_limit: int,
     recharge_limit: int,
     *,
+    reserve_value: str | bytes | None = None,
     timestamp_ms: int | None = None,
 ) -> bytes:
-    """Build a charge-limit SET while preserving the four non-user fields."""
+    """Set reported limits and re-clamp a present reserve, preserving other fields."""
     try:
         value = bytearray(
             bytes.fromhex(current_value)
@@ -1245,18 +1275,41 @@ def build_charge_limits_set_payload(
         )
     except ValueError as error:
         raise ProtocolError("charge-limit state is not valid hex") from error
-    if len(value) != 24:
-        raise ProtocolError("charge-limit state must contain six u32 values")
-    if not 0 <= discharge_limit <= 15:
-        raise ProtocolError("discharge limit must be between 0 and 15 percent")
-    if not 70 <= recharge_limit <= 100:
-        raise ProtocolError("recharge limit must be between 70 and 100 percent")
+    limits = parse_charge_limits(value)
+    for key, requested in (
+        ("discharge_limit", discharge_limit), ("recharge_limit", recharge_limit)
+    ):
+        minimum, maximum = limits[f"{key}_min"], limits[f"{key}_max"]
+        if type(requested) is not int or not minimum <= requested <= maximum:
+            raise ProtocolError(
+                f"{key.replace('_', ' ')} must be a whole percentage "
+                f"between {minimum} and {maximum}"
+            )
     if discharge_limit >= recharge_limit:
         raise ProtocolError("discharge limit must be lower than recharge limit")
     value[8:12] = recharge_limit.to_bytes(4, "little")
     value[20:24] = discharge_limit.to_bytes(4, "little")
+    entries = [(CHARGE_LIMIT_KEY, bytes(value))]
+    if reserve_value is not None:
+        try:
+            reserve = bytearray(
+                bytes.fromhex(reserve_value)
+                if isinstance(reserve_value, str) else reserve_value
+            )
+        except ValueError as error:
+            raise ProtocolError("backup reserve state is not valid hex") from error
+        if len(reserve) < 4:
+            raise ProtocolError("backup reserve state must contain four bytes")
+        percent = min(
+            max(int.from_bytes(reserve[2:4], "little"),
+                discharge_limit + ENERGY_RESERVE_MARGIN),
+            recharge_limit,
+        )
+        reserve[2:4] = percent.to_bytes(2, "little")
+        entries.append((ENERGY_STORAGE_KEY, bytes(reserve)))
+    entries.append(_SET_STATE_RULES)
     return build_keyed_set_payload(
-        [(CHARGE_LIMIT_KEY, bytes(value))], timestamp_ms=timestamp_ms
+        entries, timestamp_ms=timestamp_ms
     )
 
 

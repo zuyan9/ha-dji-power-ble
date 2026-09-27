@@ -151,6 +151,75 @@ class ScheduleOptionsTests(IsolatedAsyncioTestCase):
         self.assertNotIn("edit_period", result["menu_options"])
         self.assertNotIn("delete_period", result["menu_options"])
 
+    async def test_overlapping_station_schedule_can_be_loaded_repaired_and_saved(self):
+        original = [
+            {**PEAK, "days": ["mon"], "start": "01:00", "end": "03:00"},
+            {**OFF_PEAK, "days": ["sun"], "start": "22:00", "end": "02:00"},
+        ]
+        self.coordinator.async_get_time_periods.return_value = deepcopy(original)
+
+        result = await self.flow.async_step_time_periods()
+
+        self.assertEqual(result["type"], "menu")
+        self.assertIn("22:00", result["description_placeholders"]["periods"])
+        self.assertEqual(self.flow._original_periods, original)
+        await self.flow.async_step_edit_period({"period": "0"})
+        repaired = {**original[0], "start": "02:00"}
+
+        result = await self.flow.async_step_change_period(repaired)
+
+        self.assertEqual(result["type"], "menu")
+        self.assertEqual(self.flow._periods, [repaired, original[1]])
+        self.assertEqual(self.flow._original_periods, original)
+        result = await self.flow.async_step_apply_periods()
+
+        self.assertEqual(result, {"type": "abort", "reason": "schedule_saved"})
+        self.coordinator.async_set_time_periods.assert_awaited_once_with(
+            [repaired, original[1]], expected_periods=original
+        )
+        self.assertEqual(self.coordinator.async_get_time_periods.return_value, original)
+
+    async def test_multiple_overlaps_can_be_repaired_one_period_at_a_time(self):
+        original = [
+            {**PEAK, "days": ["mon"], "start": "01:00", "end": "02:00"},
+            {**PEAK, "days": ["mon"], "start": "03:00", "end": "04:00"},
+            {**OFF_PEAK, "days": ["sun"], "start": "22:00", "end": "05:00"},
+        ]
+        self.coordinator.async_get_time_periods.return_value = deepcopy(original)
+        await self.flow.async_step_time_periods()
+        await self.flow.async_step_edit_period({"period": "0"})
+        first = {**original[0], "start": "05:00", "end": "06:00"}
+
+        result = await self.flow.async_step_change_period(first)
+
+        self.assertEqual(result["type"], "menu")
+        self.assertEqual(self.flow._periods, [original[1], first, original[2]])
+        self.coordinator.async_set_time_periods.assert_not_awaited()
+
+        # Canonical ordering moves the remaining conflicting period to index 0.
+        await self.flow.async_step_edit_period({"period": "0"})
+        second = {**original[1], "start": "06:00", "end": "07:00"}
+        result = await self.flow.async_step_change_period(second)
+
+        self.assertEqual(result["type"], "menu")
+        self.assertEqual(self.flow._original_periods, original)
+        repaired = [first, second, original[2]]
+        self.assertEqual(self.flow._periods, repaired)
+
+        # Once repaired, edits cannot introduce another overlap.
+        await self.flow.async_step_edit_period({"period": "0"})
+        result = await self.flow.async_step_change_period(
+            {**first, "start": "04:00"}
+        )
+        self.assertEqual(result["errors"], {"base": "invalid_period"})
+        self.assertEqual(self.flow._periods, repaired)
+        result = await self.flow.async_step_apply_periods()
+
+        self.assertEqual(result, {"type": "abort", "reason": "schedule_saved"})
+        self.coordinator.async_set_time_periods.assert_awaited_once_with(
+            repaired, expected_periods=original
+        )
+
     async def test_failed_read_can_retry_without_treating_failure_as_empty(self):
         self.coordinator.async_get_time_periods.side_effect = [
             HomeAssistantError("Station disconnected"), deepcopy([PEAK])

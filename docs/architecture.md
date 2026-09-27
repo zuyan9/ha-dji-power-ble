@@ -83,11 +83,13 @@ its existing connection.
 
 ## Writes and consistency
 
-AC output uses keyed SET entries `0x0D` and `0x0E`. Charge limits use key `0x05`; the
-builder changes only the requested limit fields and preserves the station's other four
-values. Every SET must return a zero status for every requested key. The client then
+AC output uses keyed SET entries `0x0D` and `0x0E`. Charge limits use fresh bounds from
+`0x05` and preserve the four bound fields. Their SET includes `0x05`, `0x0E`, and a
+fresh `0x06` record when present, with its stored reserve adjusted to the new limits.
+Every SET must return a zero status for every requested key. The client then
 polls configuration until the requested state is observed, preventing a successful GATT
-write from being mistaken for an applied setting.
+write from being mistaken for an applied setting. Combined limit and reserve changes
+require matching fresh readback of both records.
 
 Backup reserve writes use keys `0x06` and `0x0E` and change only the requested switch
 or level after a fresh `0x06` read.
