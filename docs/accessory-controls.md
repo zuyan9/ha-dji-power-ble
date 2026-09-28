@@ -30,7 +30,9 @@ incompatible with the Power Auro 2000 Elite, whose solar and car inputs are buil
 Its SDC switches and total SDC readings do not depend on these accessories.
 
 Inputs are numbered within their kind in the station's order: the 1.8 kW charger lists
-its dedicated solar input before its shared Car/Solar input. Input sensors are added 
+its dedicated solar input before its shared Car/Solar input. The shared input reports
+as solar 2 with solar panels, or as the car readings with a vehicle; see
+[Car chargers](#car-chargers). Input sensors are added 
 when the station first reports that input. While the accessory stays attached, an input
 that carries no power reads 0 W and its voltage is unknown. All accessory sensors 
 become unavailable when the accessory is removed.
@@ -39,10 +41,18 @@ become unavailable when the accessory is removed.
 
 The integration recognizes the 1 kW Car Charger and 1.8 kW Solar/Car Charger.
 Each reported charger adds controls to its station's device, named by its SDC or
-SDC Lite port. The station reports car settings only while the charger's Car/Solar
-input detects a 12 V or 24 V vehicle system, as established from Power 1000 firmware.
-With solar panels on that input, the station reports no car settings and no car
-controls appear; the solar readings above remain available.
+SDC Lite port.
+
+The 1.8 kW charger itself decides whether its shared Car/Solar input is a car or a
+solar connection, from a connection-detect signal and the input voltage. 
+
+Detection pin | Port voltage | Reported as
+-- | -- | --
+High | 11 V or more | 1, solar
+High | under 11 V | 0, nothing
+Low (pulled down) | over 5.7 V and under 16 V | 2, 12 V car
+Low | over 16 V and under 45 V | 3, 24 V car
+Low | 5.7 V or less, exactly 16 V, or 45 V or more | 0, nothing
 
 | Control | Behavior |
 | --- | --- |
@@ -70,6 +80,8 @@ write still requires a successful fresh rules read.
 
 A number also needs valid bounds reported by the station. The integration uses those
 bounds; it does not assume that all accessories share a fixed wattage or voltage range.
+The station keeps separate voltage settings and ranges for 12 V and 24 V vehicles, so
+the voltage numbers follow the system the charger detects.
 Power accepts whole watts and voltage accepts hundredths of a volt.
 
 Each write changes only the addressed field in the reported configuration, preserving

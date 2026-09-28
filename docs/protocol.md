@@ -450,6 +450,9 @@ Switch values are `1` enabled and `2` disabled. Modes are `1` Auto, `2` Recharge
 (car to station), and `3` Charge (station to car). Supported charger types are
 `3` (1 kW) and `4` (1.8 kW Solar/Car); supported interfaces are `5` (SDC) and
 `6` (SDC Lite). The sequence is taken from the reported row, including zero.
+A 1.8 kW charger has a row only while it reports a vehicle on its shared Car/Solar
+input; with solar panels there, that input is a form `1` accessory row instead. The
+charger classifies the input itself, and no key selects the classification.
 The implementation exposes the switch, the mode, and all five settings. A setting
 is available and writable only while the charger is enabled in a mode where DJI Home
 shows it, and only with valid bounds for that field:
