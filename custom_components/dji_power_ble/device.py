@@ -95,7 +95,7 @@ _INITIAL_CONFIG_KEYS = (
     ENERGY_STORAGE_KEY,
     0x0C,  # Display settings.
     POWER_SWITCH_KEY,
-    RULES_KEY,  # Station rules, which DJI Home reads from every model.
+    RULES_KEY,  # Station rules; some stations report them only in pushes.
     0x15,  # Timezone.
 )
 
@@ -839,14 +839,10 @@ class DjiPowerDevice:
             returned = {
                 key for key in keys if isinstance(update.get(f"key_{key:02x}"), str)
             }
-            missing = tuple(set(keys) - returned)
-            invalidated = self._config_invalidation(missing)
-            if RULES_KEY in missing:
-                invalidated.update(
-                    station_rules=[], car_auto_threshold=False,
-                    port_switches_offered=False,
-                )
-            self._merge_data(invalidated)
+            # The Power 1000 V2 omits its rules from every GET reply, DJI Home's
+            # included, and reports them in its settings pushes instead.
+            missing = tuple(set(keys) - returned - {RULES_KEY})
+            self._merge_data(self._config_invalidation(missing))
             remaining.difference_update(keys)
             found.update(returned)
 
@@ -1064,10 +1060,14 @@ class DjiPowerDevice:
         return current
 
     async def _read_station_rules(self) -> None:
-        """Read the rules for the Auto car-charger layout and port switches."""
+        """Refresh the rules for the Auto car-charger layout and port switches.
+
+        A complete reply without the rules record keeps the last reported rules:
+        some stations send them only in settings pushes, where DJI Home reads them.
+        """
         try:
             async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
-                update = await self._read_config(RULES_KEY, require_complete=True)
+                await self._read_config(RULES_KEY, require_complete=True)
         except DjiPowerDisconnectedError:
             raise
         except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
@@ -1077,17 +1077,6 @@ class DjiPowerDevice:
             raise DjiPowerError(
                 f"cannot read station rules: {str(error) or 'timed out'}"
             ) from error
-        if "key_0e" not in update:
-            # Without rules, DJI Home shows both direction voltages in Auto and
-            # no port switches.
-            self._merge_data(
-                {
-                    "key_0e": None,
-                    "station_rules": [],
-                    "car_auto_threshold": False,
-                    "port_switches_offered": False,
-                }
-            )
 
     async def _wait_for_energy_reserve(self, expected: dict[str, object]) -> None:
         """Confirm the reserve from fresh reads, delaying only later attempts."""

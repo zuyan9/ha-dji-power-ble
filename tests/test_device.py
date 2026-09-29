@@ -1387,9 +1387,30 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
                 await method(value)
         self.assertEqual(self.client.requests, [])
 
+    async def test_rules_missing_from_get_replies_keep_the_latest_rules(self):
+        for method, value in (
+            (self.device.set_discharge_power, 422),
+            (self.device.set_charge_power, 700),
+            (self.device.set_power_adjustment, "Automatic"),
+        ):
+            with self.subTest(control=method.__name__):
+                self.client.value = SYNTHETIC_ECO_MODE
+                self.client.rules = ECO_RULES
+                await self.device._read_eco_mode()
+                await self.device._read_station_rules()
+                # The Power 1000 V2 omits its rules from every GET reply.
+                self.client.rules = None
+                await method(value)
+                self.assertEqual(self.device.data["station_rules"], [5, 6])
+        self.device.data.pop("station_rules")
+        self.client.requests.clear()
+        with self.assertRaisesRegex(device_module.DjiPowerError, "does not offer"):
+            await self.device.set_charge_power(700)
+        self.assert_eco_reads_without_write()
+
     async def test_fresh_rules_override_cached_capability_and_allow_recovery(self):
         for rules in (
-            None, b"bad", b"\x04\x000000", b"\x06\x001e0020", b"\x06\x001e0040",
+            b"bad", b"\x04\x000000", b"\x06\x001e0020", b"\x06\x001e0040",
         ):
             for method, value in (
                 (self.device.set_discharge_power, 422),

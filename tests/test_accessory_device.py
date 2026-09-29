@@ -209,8 +209,10 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                             *([11] if offered else [])
                         )
                     if not offered:
+                        # A GET reply without rules leaves them unknown, not clear.
                         with self.assertRaisesRegex(
-                            device_module.DjiPowerError, "does not offer"
+                            device_module.DjiPowerError,
+                            "does not offer" if offered is False else "station rules",
                         ):
                             await self.device.set_usb(3, 1, False)
                         self.assertEqual(
@@ -285,23 +287,49 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                     ))
 
     async def test_ac_and_car_outlet_need_rows_but_not_rule_11(self):
+        for kind in (2, 7):
+            with self.subTest(kind=kind):
+                self.reset_device()
+                self.client.values[0x0D] = struct.pack(
+                    "<HHBBB", 0x1014, 3, kind, 2, 1
+                )
+                self.client.values[0x0E] = rules_value(0)
+                await self.device.set_port_switch(kind, 2, False)
+                written = duml.parse_keyed_values(self.client.requests[2][1])
+                self.assertEqual(
+                    duml.parse_power_switches(written[0x0D]),
+                    [{"type": kind, "seq": 2, "sw": 2}],
+                )
+
+    async def test_rules_missing_from_get_replies_keep_the_pushed_rules(self):
+        # The Power 1000 V2 answers every GET without its rules and reports them
+        # in settings pushes instead.
         for status in (0, 2):
-            for kind in (2, 7):
-                with self.subTest(status=status, kind=kind):
+            for pushed, rows in (((11, 21), 3), ((11,), 1), (None, 0)):
+                with self.subTest(status=status, pushed=pushed):
                     self.reset_device()
-                    self.client.values[0x0D] = struct.pack(
-                        "<HHBBB", 0x1014, 3, kind, 2, 1
-                    )
                     self.client.values.pop(0x0E)
                     self.client.get_status = status.to_bytes(4, "little")
-                    self.device.data["station_rules"] = [11, 21]
-                    await self.device.set_port_switch(kind, 2, False)
+                    if pushed is None:
+                        with self.assertRaisesRegex(
+                            device_module.DjiPowerError, "station rules"
+                        ):
+                            await self.device.set_ac(False)
+                        self.assertFalse(self.client.did_set)
+                        continue
+                    self.client.send(
+                        duml.TELEMETRY_COMMAND,
+                        duml.build_keyed_set_payload(
+                            [(duml.RULES_KEY, rules_value(*pushed))], timestamp_ms=1
+                        ),
+                    )
+                    await self.device.set_sdc(5, 1, False)
                     written = duml.parse_keyed_values(self.client.requests[2][1])
                     self.assertEqual(
-                        duml.parse_power_switches(written[0x0D]),
-                        [{"type": kind, "seq": 2, "sw": 2}],
+                        len(duml.parse_power_switches(written[0x0D])), rows
                     )
-                    self.assertEqual(self.device.data["station_rules"], [])
+                    self.assertEqual(self.device.data["station_rules"], list(pushed))
+                    self.assertEqual(self.device.data["power_switches"][1]["sw"], 2)
 
     async def test_rule_11_revocation_prevents_sdc_and_usb_writes(self):
         for kind in (3, 4, 5, 6):
@@ -423,7 +451,7 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                 True,
             ),
             (bytes.fromhex("0600") + b"0200fe", [1], False),
-            (None, [], False),  # DJI Home also treats omitted rules as rule 0 off.
+            (None, None, None),  # Unknown until the station reports them.
             (b"bad", None, None),
         ):
             with self.subTest(value=value):
@@ -436,8 +464,24 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
                     [payload[1] for _, payload in self.client.requests][:4],
                     [0x0A, 0x0D, 0x04, 0x0E],
                 )
-                self.assertEqual(self.device.data["station_rules"], rules)
-                self.assertIs(self.device.data["car_auto_threshold"], expected)
+                self.assertEqual(self.device.data.get("station_rules"), rules)
+                self.assertIs(self.device.data.get("car_auto_threshold"), expected)
+
+    async def test_refresh_keeps_pushed_rules_that_gets_omit(self):
+        self.client.values.pop(0x0E)
+        pushed = bytes.fromhex("0b00") + b"11000f7001\x00"
+        self.client.send(
+            duml.TELEMETRY_COMMAND,
+            duml.build_keyed_set_payload([(duml.RULES_KEY, pushed)], timestamp_ms=1),
+        )
+        await self.device._refresh_accessory_config()
+        self.assertIn((duml.GET_COMMAND, b"\x00\x0e\x10"), self.client.requests)
+        self.assertEqual(
+            self.device.data["station_rules"], [0, 1, 2, 3, 12, 13, 14, 16]
+        )
+        self.assertEqual(self.device.data["key_0e"], pushed.hex())
+        self.assertIs(self.device.data["car_auto_threshold"], True)
+        self.assertIs(self.device.data["port_switches_offered"], False)
 
     async def test_rules_are_refreshed_without_charger_or_usb_rows(self):
         self.client.values[0x0A] = b""
@@ -820,8 +864,8 @@ class UsbSwitchDeviceTests(unittest.IsolatedAsyncioTestCase):
     async def test_refresh_rereads_the_rules_while_usb_rows_are_reported(self):
         for value, offered in (
             (bytes.fromhex("0c00") + b"1e00efffff3f", True),
+            (None, True),  # Omitted rules keep the last reported rules.
             (bytes.fromhex("0b00") + b"11000f7001\x00", False),
-            (None, False),  # Like DJI Home, omitted rules offer no switches.
             (b"bad", None),
         ):
             with self.subTest(value=value):

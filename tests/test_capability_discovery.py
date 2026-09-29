@@ -66,6 +66,8 @@ class CapabilityDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.client.requests.clear()
                 self.device.data.update(
                     energy_reserve_available=True, station_rules=[5, 11],
+                    key_0e="pushed", car_auto_threshold=False,
+                    port_switches_offered=True,
                     power_adjustment="Manual", eco_available=True,
                 )
                 await self.device._discover_capabilities()
@@ -76,9 +78,13 @@ class CapabilityDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.device.data["discovery_keys"], [0x0D, 0x16])
                 self.assertTrue(self.device.data["capability_discovery_complete"])
                 self.assertEqual(self.device.data["time_periods"], [])
-                self.assertEqual(self.device.data["station_rules"], [])
                 self.assertIsNone(self.device.data["eco_available"])
                 self.assertIsNone(self.device.data["energy_reserve_available"])
+                # Stations such as the V2 report their rules only in pushes.
+                self.assertEqual(self.device.data["station_rules"], [5, 11])
+                self.assertEqual(self.device.data["key_0e"], "pushed")
+                self.assertIs(self.device.data["car_auto_threshold"], False)
+                self.assertIs(self.device.data["port_switches_offered"], True)
 
     async def test_over_statuses_retry_without_publishing_partial_rows(self):
         for status in (1, 3):
