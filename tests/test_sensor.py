@@ -173,8 +173,14 @@ class _DeviceRegistry:
         self.devices = {}
         self.updates = []
 
-    def async_get_device(self, *, identifiers):
-        return self.devices.get(next(iter(identifiers)))
+    def async_get_or_create(self, *, config_entry_id, **info):
+        return self.register(info, config_entry_id)
+
+    def async_get_device_by_identifier(self, identifier, config_entry_id):
+        device = self.devices.get(identifier)
+        if device and device.config_entry_id == config_entry_id:
+            return device
+        return None
 
     def async_update_device(self, device_id, **values) -> None:
         self.updates.append((device_id, values))
@@ -182,16 +188,21 @@ class _DeviceRegistry:
             if device.id == device_id:
                 device.__dict__.update(values)
 
-    def register(self, info) -> None:
-        if (via := info.get("via_device")) and via not in self.devices:
+    def register(self, info, config_entry_id="station"):
+        if "via_device" in info:
+            raise AssertionError("via_device is removed in Home Assistant 2027.8")
+        via = info.get("via_device_id")
+        if via and via not in {device.id for device in self.devices.values()}:
             raise AssertionError("Station must be registered before a linked pack")
         identifier = next(iter(info["identifiers"]))
         if identifier not in self.devices:
             self.devices[identifier] = types.SimpleNamespace(
                 id=f"device_{len(self.devices)}",
+                config_entry_id=config_entry_id,
                 sw_version=None,
             )
         self.devices[identifier].__dict__.update(info)
+        return self.devices[identifier]
 
 
 class BatteryTimeSensorTests(unittest.IsolatedAsyncioTestCase):
@@ -599,6 +610,11 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(entity, sensor.DjiPowerExpansionSensor)
         ]
 
+    def station_id(self) -> str:
+        return self.hass.device_registry.async_get_device_by_identifier(
+            (DOMAIN, ADDRESS), self.entry.entry_id
+        ).id
+
     def pack_sensor(self, serial, key):
         return next(
             entity
@@ -619,7 +635,7 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             key = entity.entity_description.key
             self.assertTrue(entity.available)
             self.assertEqual(entity.native_value, pack[key])
-            self.assertEqual(entity.device_info["via_device"], (DOMAIN, ADDRESS))
+            self.assertEqual(entity.device_info["via_device_id"], self.station_id())
             self.assertEqual(entity.device_info["serial_number"], pack["serial_number"])
             self.assertEqual(entity.device_info["sw_version"], pack["firmware"])
             self.assertEqual(entity.device_info["manufacturer"], "DJI")
@@ -642,9 +658,27 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             {"DJI Power Auro 2000 Elite Expansion Battery"},
         )
         self.assertEqual(
-            {entity.device_info["via_device"] for entity in self.packs()},
-            {(DOMAIN, ADDRESS)},
+            {entity.device_info["via_device_id"] for entity in self.packs()},
+            {self.station_id()},
         )
+
+    async def test_packs_link_to_station_before_its_entities_register(self) -> None:
+        deferred = []
+        self.coordinator.data = {"expansion_batteries": [_pack()]}
+        await sensor.async_setup_entry(self.hass, self.entry, deferred.extend)
+        packs = [
+            entity
+            for entity in deferred
+            if isinstance(entity, sensor.DjiPowerExpansionSensor)
+        ]
+        self.assertEqual(len(packs), 3)
+        self.assertEqual(
+            {entity.device_info["via_device_id"] for entity in packs},
+            {self.station_id()},
+        )
+        for entity in deferred:
+            self.hass.device_registry.register(entity.device_info)
+        self.assertEqual(len(self.hass.device_registry.devices), 2)
 
     async def test_hotplug_and_reordering_preserve_identity(self) -> None:
         await self.setup([])
@@ -717,8 +751,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
     async def test_firmware_updates_when_reported_and_is_retained(self) -> None:
         pack = _pack()
         await self.setup([pack])
-        device = self.hass.device_registry.async_get_device(
-            identifiers={(DOMAIN, f"expansion_{pack['serial_number']}")}
+        device = self.hass.device_registry.async_get_device_by_identifier(
+            (DOMAIN, f"expansion_{pack['serial_number']}"), self.entry.entry_id
         )
         self.assertIsNone(device.sw_version)
         for firmware in ("01.00.00.00", "01.01.00.00"):
@@ -746,8 +780,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
             {entity._attr_unique_id for entity in self.packs()}, unique_ids
         )
         self.assertTrue(all(not entity.available for entity in self.packs()))
-        device = self.hass.device_registry.async_get_device(
-            identifiers={(DOMAIN, f"expansion_{pack['serial_number']}")}
+        device = self.hass.device_registry.async_get_device_by_identifier(
+            (DOMAIN, f"expansion_{pack['serial_number']}"), self.entry.entry_id
         )
         self.assertEqual(device.sw_version, "01.00.00.00")
         self.publish([pack])
