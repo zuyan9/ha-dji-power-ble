@@ -353,6 +353,12 @@ async def async_setup_entry(
         lambda: [DjiPowerTimePeriodsSensor(coordinator)],
     )
     device_registry = dr.async_get(hass)
+    # Packs link to the station by device id. Entity registration is deferred, so
+    # create the station device now rather than wait for its entities.
+    station_device_id = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, coordinator.device.address)},
+    ).id
     known: set[tuple[str, str]] = set()
     restored = []
     for registered in er.async_entries_for_config_entry(registry, entry.entry_id):
@@ -367,7 +373,9 @@ async def async_setup_entry(
             serial = registered.unique_id[len(prefix) : -len(suffix)]
             if serial:
                 restored.append(
-                    DjiPowerExpansionSensor(coordinator, serial, description)
+                    DjiPowerExpansionSensor(
+                        coordinator, serial, description, station_device_id
+                    )
                 )
                 known.add((serial, description.key))
     if restored:
@@ -384,12 +392,14 @@ async def async_setup_entry(
                 if description.key == "temperature" and pack.get("temperature") is None:
                     continue
                 entities.append(
-                    DjiPowerExpansionSensor(coordinator, serial, description)
+                    DjiPowerExpansionSensor(
+                        coordinator, serial, description, station_device_id
+                    )
                 )
                 known.add((serial, description.key))
             if firmware := pack.get("firmware"):
-                device = device_registry.async_get_device(
-                    identifiers={(DOMAIN, f"expansion_{serial}")}
+                device = device_registry.async_get_device_by_identifier(
+                    (DOMAIN, f"expansion_{serial}"), entry.entry_id
                 )
                 if device and device.sw_version != firmware:
                     device_registry.async_update_device(device.id, sw_version=firmware)
@@ -517,9 +527,11 @@ class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEnti
         coordinator: DjiPowerCoordinator,
         serial: str,
         description: SensorEntityDescription,
+        station_device_id: str,
     ) -> None:
         super().__init__(coordinator)
         self._serial = serial
+        self._station_device_id = station_device_id
         self.entity_description = description
         self._attr_unique_id = f"expansion_{serial}_{description.key}"
 
@@ -533,7 +545,7 @@ class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEnti
                 self.coordinator.device.model, DEFAULT_EXPANSION_BATTERY_MODEL
             ),
             serial_number=self._serial,
-            via_device=(DOMAIN, self.coordinator.device.address),
+            via_device_id=self._station_device_id,
         )
         pack = _expansion_batteries(self.coordinator).get(self._serial, {})
         if firmware := pack.get("firmware"):

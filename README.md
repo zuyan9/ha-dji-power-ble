@@ -40,7 +40,7 @@ used only during setup to retrieve the device's local credential.
 ## Requirements
 
 - DJI Power Station set up and linked to the DJI account in the DJI Home app
-- Home Assistant 2025.8 or newer with Bluetooth, local adapter or Bluetooth proxy
+- Home Assistant 2026.8 or newer with Bluetooth, local adapter or Bluetooth proxy
 - [HACS](https://hacs.xyz/) installed (recommended method)
 
 ## Installation
