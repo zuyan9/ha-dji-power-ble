@@ -75,7 +75,9 @@ limit, with eight seconds per request, and optional failures leave normal teleme
 running. Diagnostics record the returned key IDs and whether discovery completed.
 
 Car-charger settings, switch rows, accessory information, reserve, and station rules
-refresh every 30 seconds on every known model, including the Mini. Pack polling
+refresh every 30 seconds on every known model, including the Mini. Station rules also
+arrive in settings reports, which are the only source on some stations, so a GET reply
+without them keeps the last reported rules. Pack polling
 remains limited to models with expansion batteries. Entity platforms add controls
 when their records and feature-specific gates become usable. Reserve uses its
 availability flag; schedules require a valid list, Eco availability and rule 5;
@@ -99,11 +101,12 @@ require matching fresh readback of both records.
 Backup reserve writes use keys `0x06` and `0x0E` and change only the requested switch
 or level after a fresh `0x06` read.
 
-Port switches read the switch list and station rules inside the operation lock.
+Port switches read the switch list inside the operation lock and use the latest
+station rules.
 Rule 21 selects a full-list SET; otherwise only the addressed row is sent. Row
 bodies and extension bytes are preserved. Car-charger controls use keys `0x0A` and `0x0E`, preserve the full list of
 chargers, and validate the selected setting against fresh reported bounds and the
-modes that use it; in Auto, freshly read station rules decide. These
+modes that use it; in Auto, the latest station rules decide. These
 paths require a fresh matching row after the keyed acknowledgement. Optional reads
 and writes share the operation lock, including the confirmation period.
 

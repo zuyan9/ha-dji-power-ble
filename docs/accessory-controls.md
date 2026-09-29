@@ -74,9 +74,11 @@ number is available only in the modes that use it:
 | Auto | Both powers and the auto switching voltage, or both powers and both voltages |
 
 In Auto, the station's rules choose between the two layouts, as they do in DJI Home.
-The integration reads the rules with the charger settings and again before a
-write. If a refresh cannot read the rules, Auto displays only the two powers; a
-write still requires a successful fresh rules read.
+The integration requests the rules with the charger settings and again before a
+write. Some stations, such as the Power 1000 V2, send them only in their periodic
+settings reports; a reply without the rules then keeps the last reported ones. While
+the rules are unknown, Auto displays only the two powers. A write fails if its rules
+read fails.
 
 A number also needs valid bounds reported by the station. The integration uses those
 bounds; it does not assume that all accessories share a fixed wattage or voltage range.
@@ -111,11 +113,13 @@ AC outputs and car outlets (interface type 7) appear when the station reports a
 valid switch row, without requiring rule 11. The existing main **AC output** entity
 keeps its identity; additional outputs use their reported port sequences.
 
-All port writes read fresh switch rows and rules under the same operation lock.
+All port writes read fresh switch rows and request the rules under the same operation
+lock.
 With rule 21, the SET includes the complete list; otherwise it includes only the
 addressed row. The selected row's extra bytes are preserved in both cases, and
-full-list writes also preserve every other row. Missing rules in a complete reply
-mean clear bits; a failed or malformed rules read prevents the write.
+full-list writes also preserve every other row. A reply without the rules keeps the
+last reported ones. The write is refused if the rules read fails or the rules are
+unknown, including malformed rules and a station that has not reported them yet.
 
 ## Discovery and confirmation
 

@@ -147,7 +147,9 @@ Each key selects one property. GET status is a little-endian u32 before the shar
 header: `0` (success) and `2` (missing unsupported keys) are complete responses;
 `1` (over) and `3` (over and missing) trigger individual-key fallback during
 capability discovery. The probe is bounded to 45 seconds overall and eight seconds
-per request. Failed or unvisited keys cannot retain stale capability state.
+per request. Failed or unvisited keys cannot retain stale capability state. A
+complete reply without rules key `0x0E` does not clear the rules; see
+[SDC and car-charger configuration](#sdc-and-car-charger-configuration).
 Accessory key `0x04` is read separately; Mini does not poll expansion packs.
 The integration decodes these fields:
 
@@ -464,14 +466,22 @@ shows it, and only with valid bounds for that field:
 | `1` Auto, rule 0 set | Both powers and the Auto voltage |
 | `1` Auto, rule 0 clear or no rules | Both powers and both direction voltages |
 
-A GET of key `0x0E` (`rules`) returns the station's own rules, which differ from the
-client record sent with writes. The value is a u16 LE text length followed by ASCII
-hex, which the station can end with NUL. The hex decodes to a u16 LE rule count and
-a little-endian mask; rule *n* is set when *n* is below the count and mask bit *n*
-is `1`. As in DJI Home, text shorter than four characters means no rules. The
-integration reads `0x0E` at connection, with every accessory refresh and before
-rule-dependent writes. Malformed rules or a failed read leave the Auto
-layout unknown, and Auto then offers only the two powers. They also make SDC/USB switches and rule-gated energy controls unavailable.
+Key `0x0E` (`rules`) holds the station's own rules, which differ from the client
+record sent with writes. The value is a u16 LE text length followed by ASCII hex,
+which the station can end with NUL. The hex decodes to a u16 LE rule count and a
+little-endian mask; rule *n* is set when *n* is below the count and mask bit *n* is
+`1`. As in DJI Home, text shorter than four characters means no rules.
+
+Not every station returns `0x0E` to a GET. The Power 1000 V2 leaves it out of every
+GET reply, including DJI Home's settings request, and sends it in the `0x62`
+settings report it pushes about every ten seconds. DJI Home takes the rules from
+that report. The integration accepts rules from settings reports and from any GET
+reply that contains them. It requests `0x0E` at connection, with every accessory
+refresh and before rule-dependent writes; a complete reply without it keeps the
+last reported rules. Malformed rules or a failed read make the rules unknown, as
+they are before the station first reports them. Unknown rules leave the Auto layout
+with only the two powers and make SDC/USB switches and rule-gated energy controls
+unavailable.
 
 Key `0x0D` (`power_sw`) contains nested rows beginning with three bytes:
 `type, sequence, switch`. AC is type `2` (the legacy main output uses sequence `1`);
@@ -481,12 +491,13 @@ outlets need valid matching rows; SDC and USB additionally need rule 11. These
 checks apply to discovery, availability and fresh write validation on every known
 model.
 
-Port writes read the complete switch list and station rules inside the operation
-lock. Rule 21 selects the full list; a clear bit selects only the addressed row.
-Both forms change only its switch byte and preserve extended row bodies. A missing
-rules record in a complete response means clear bits; failed or malformed reads
-cannot select a write policy. The client rules declaration included in SET is
-separate from the station rules used for these decisions.
+Port writes read the complete switch list and request the station rules inside the
+operation lock. Rule 21 selects the full list; a clear bit selects only the addressed
+row. Both forms change only its switch byte and preserve extended row bodies. A
+complete response without a rules record keeps the last reported rules. Unknown
+rules cannot select a write policy, so the write is refused. The client rules
+declaration included in SET is separate from the station rules used for these
+decisions.
 
 SET uses child tags `0x000A` and `0x000D` inside outer properties `0x100A` and
 `0x100D`. Readback child tags can differ; parsing follows the enclosing property's
