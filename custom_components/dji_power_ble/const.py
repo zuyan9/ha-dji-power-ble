@@ -10,6 +10,8 @@ CONF_SERIAL_NUMBER = "serial_number"
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_CONNECTION_SOURCE = "connection_source"
 CONF_KEEP_CONNECTION = "keep_connection"
+# Unsupported: lets manual recharge power go below the station's minimum.
+CONF_RECHARGE_POWER_MINIMUM = "recharge_power_minimum"
 
 CONNECTION_SOURCE_AUTOMATIC = "automatic"
 

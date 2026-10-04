@@ -189,6 +189,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             connect=AsyncMock(),
             disconnect=AsyncMock(),
             keep_connection=False,
+            set_charge_power_minimum=Mock(),
         )
         self.coordinator = coordinator_module.DjiPowerCoordinator(
             self.hass, self.entry, self.device
@@ -359,6 +360,28 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.coordinator.data, {"battery_percent": 63})
         self.assertIsNone(self.coordinator._pending_data)
         self.assertIsNone(self.coordinator._push_timer)
+        self.device.connect.assert_not_awaited()
+        self.device.disconnect.assert_not_awaited()
+        self.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    def test_recharge_power_minimum_reaches_device_at_setup_and_live(self):
+        self.device.set_charge_power_minimum.assert_called_once_with(None)
+        self.device.set_charge_power_minimum.reset_mock()
+        self.entry.options["recharge_power_minimum"] = 300
+        coordinator_module.DjiPowerCoordinator(self.hass, self.entry, self.device)
+        self.device.set_charge_power_minimum.assert_called_once_with(300)
+
+        for minimum in (250, None):
+            with self.subTest(minimum=minimum):
+                self.device.set_charge_power_minimum.reset_mock()
+                if minimum is None:
+                    del self.entry.options["recharge_power_minimum"]
+                else:
+                    self.entry.options["recharge_power_minimum"] = minimum
+
+                self.coordinator.async_apply_options()
+
+                self.device.set_charge_power_minimum.assert_called_once_with(minimum)
         self.device.connect.assert_not_awaited()
         self.device.disconnect.assert_not_awaited()
         self.hass.config_entries.async_schedule_reload.assert_not_called()

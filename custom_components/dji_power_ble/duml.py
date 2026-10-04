@@ -610,16 +610,23 @@ def _parse_manual_discharge_power(value: bytes | bytearray) -> tuple[int, int, i
     return minimum, maximum, watts
 
 
-def _parse_manual_charge_power(value: bytes | bytearray) -> tuple[int, int, int]:
-    """Read charge watts when Time of Use power adjustment is manual."""
+def _parse_manual_charge_power(
+    value: bytes | bytearray, minimum: int | None = None
+) -> tuple[int, int, int]:
+    """Read charge watts when Time of Use power adjustment is manual.
+
+    ``minimum`` is a user-chosen lower limit. It only lowers the station's
+    minimum; the station's maximum always applies.
+    """
     if _parse_power_adjustment(value) != "Manual":
         raise ProtocolError("station is not using manual power adjustment")
     maximum = int.from_bytes(value[18:22], "little")
-    minimum = int.from_bytes(value[22:26], "little")
+    station_minimum = int.from_bytes(value[22:26], "little")
     watts = int.from_bytes(value[26:30], "little")
-    if not minimum <= watts <= maximum:
+    lowest = station_minimum if minimum is None else min(minimum, station_minimum)
+    if station_minimum > maximum or not lowest <= watts <= maximum:
         raise ProtocolError("station reported invalid charge-power bounds or value")
-    return minimum, maximum, watts
+    return lowest, maximum, watts
 
 
 def _energy_saver_mode(value: bytes | bytearray) -> str | None:
@@ -917,8 +924,14 @@ def parse_charge_limits(value: bytes) -> dict[str, int]:
     return result
 
 
-def parse_telemetry(payload: bytes) -> dict[str, object]:
-    """Decode the known fields of a keyed config snapshot/readback."""
+def parse_telemetry(
+    payload: bytes, *, charge_power_minimum: int | None = None
+) -> dict[str, object]:
+    """Decode the known fields of a keyed config snapshot/readback.
+
+    ``charge_power_minimum`` lowers the manual recharge-power minimum, as
+    configured by the user; see ``_parse_manual_charge_power``.
+    """
     keyed = parse_keyed_values(payload)
     data: dict[str, object] = {
         f"key_{key:02x}": value.hex() for key, value in keyed.items()
@@ -1064,7 +1077,9 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
         with contextlib.suppress(ProtocolError):
             data["power_adjustment"] = _parse_power_adjustment(keyed[ECO_MODE_KEY])
         try:
-            minimum, maximum, watts = _parse_manual_charge_power(keyed[ECO_MODE_KEY])
+            minimum, maximum, watts = _parse_manual_charge_power(
+                keyed[ECO_MODE_KEY], charge_power_minimum
+            )
         except ProtocolError:
             pass
         else:
@@ -1572,21 +1587,41 @@ def build_charge_power_set_payload(
     current_value: str | bytes,
     watts: int,
     *,
+    minimum: int | None = None,
     timestamp_ms: int | None = None,
 ) -> bytes:
-    """Change only manual charge watts in the complete eco-mode readback."""
+    """Change only manual charge watts in the complete eco-mode readback.
+
+    ``minimum`` lowers the station's minimum; see ``_parse_manual_charge_power``.
+    """
     if type(watts) is not int:
         raise ProtocolError("charge power must be a whole number of watts")
     value = _eco_mode_bytes(current_value)
-    minimum, maximum, _ = _parse_manual_charge_power(value)
-    if not minimum <= watts <= maximum:
+    lowest, maximum, _ = _parse_manual_charge_power(value, minimum)
+    if not lowest <= watts <= maximum:
         raise ProtocolError(
-            f"charge power must be between {minimum} and {maximum} watts"
+            f"charge power must be between {lowest} and {maximum} watts"
         )
     value[26:30] = watts.to_bytes(4, "little")
     return build_keyed_set_payload(
         [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )
+
+
+def charge_power_readbacks(current_value: str | bytes, watts: int) -> frozenset[int]:
+    """Return the recharge-power readbacks that confirm writing ``watts``.
+
+    Below its own minimum, a Power 2000 kept charging at the written power but
+    reported the midpoint of its range within seconds (1450 W for 600–2300 W).
+    The rounding of an odd sum is unknown, so both neighbours are accepted.
+    """
+    value = _eco_mode_bytes(current_value)
+    maximum = int.from_bytes(value[18:22], "little")
+    minimum = int.from_bytes(value[22:26], "little")
+    if watts >= minimum:
+        return frozenset({watts})
+    total = minimum + maximum
+    return frozenset({watts, total // 2, (total + 1) // 2})
 
 
 def build_power_adjustment_set_payload(

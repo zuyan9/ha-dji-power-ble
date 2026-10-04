@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     CONF_KEEP_CONNECTION,
+    CONF_RECHARGE_POWER_MINIMUM,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
@@ -41,6 +42,7 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         self._last_push = 0.0
         self._pending_data: dict[str, object] | None = None
         self._push_timer: asyncio.TimerHandle | None = None
+        device.set_charge_power_minimum(entry.options.get(CONF_RECHARGE_POWER_MINIMUM))
         self._unsub_state = device.add_state_listener(self._handle_state)
         self._unsub_disconnect = device.add_disconnect_listener(self._handle_disconnect)
 
@@ -51,6 +53,9 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             return
         self.device.keep_connection = self.entry.options.get(
             CONF_KEEP_CONNECTION, False
+        )
+        self.device.set_charge_power_minimum(
+            self.entry.options.get(CONF_RECHARGE_POWER_MINIMUM)
         )
         interval = float(
             self.entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)

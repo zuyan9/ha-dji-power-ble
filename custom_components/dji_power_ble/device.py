@@ -56,6 +56,7 @@ from .duml import (
     build_power_adjustment_set_payload,
     build_scheduled_switch_set_payload,
     build_time_periods_set_payload,
+    charge_power_readbacks,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
     energy_reserve_bounds,
@@ -192,6 +193,7 @@ class DjiPowerDevice:
         self._settings_ack_tasks: set[asyncio.Task[None]] = set()
         self._expansion_refresh_task: asyncio.Task[None] | None = None
         self._disconnecting = False
+        self._charge_power_minimum: int | None = None
         self.data: dict[str, object] = {}
 
     @property
@@ -250,6 +252,27 @@ class DjiPowerDevice:
         self._sequence = (self._sequence + 1) & 0xFFFF
         return self._sequence
 
+    def set_charge_power_minimum(self, watts: int | None) -> None:
+        """Let manual recharge power go below the station's minimum, or not.
+
+        Cached readings are decoded again, so the limit applies immediately.
+        """
+        if watts == self._charge_power_minimum:
+            return
+        self._charge_power_minimum = watts
+        if isinstance(eco := self.data.get("key_18"), str):
+            self._merge_data(
+                self._parse_config(
+                    build_keyed_set_payload([(ECO_MODE_KEY, bytes.fromhex(eco))])
+                )
+            )
+
+    def _parse_config(self, payload: bytes) -> dict[str, object]:
+        """Decode a keyed record with the configured recharge-power minimum."""
+        return parse_telemetry(
+            payload, charge_power_minimum=self._charge_power_minimum
+        )
+
     def _merge_data(self, update: dict[str, object]) -> None:
         if "battery_time_type" in update or "input_w" in update:
             # Battery and power records can arrive separately. Match the app's
@@ -304,7 +327,7 @@ class DjiPowerDevice:
                     self._merge_data(update)
                     self._report_event.set()
             elif packet.command_id == TELEMETRY_COMMAND:
-                update = parse_telemetry(self._decode_payload(packet))
+                update = self._parse_config(self._decode_payload(packet))
                 if update:
                     self._merge_data(update)
             elif packet.command_id == HMS_COMMAND:
@@ -566,7 +589,7 @@ class DjiPowerDevice:
                 or len(parse_keyed_values(payload).get(CHARGE_LIMIT_KEY, b"")) != 24
             ):
                 return False
-            self._merge_data(parse_telemetry(payload))
+            self._merge_data(self._parse_config(payload))
         except DjiPowerDisconnectedError:
             raise
         except (DjiPowerError, BleakError, ProtocolError, TimeoutError):
@@ -971,7 +994,7 @@ class DjiPowerDevice:
                 # An oversized/partial response cannot establish absence of
                 # an optional record before a combined settings write.
                 raise DjiPowerError("station did not return complete config data")
-            update = parse_telemetry(decoded)
+            update = self._parse_config(decoded)
         except ProtocolError as error:
             raise DjiPowerError("station returned malformed config data") from error
         self._merge_data(update)
@@ -1094,12 +1117,16 @@ class DjiPowerDevice:
                 return
         raise DjiPowerError("station did not report the requested backup reserve")
 
-    async def _wait_for_eco_mode_values(self, expected: dict[str, object]) -> None:
+    async def _wait_for_eco_mode_values(self, *expected: dict[str, object]) -> None:
+        """Re-read the eco record until it matches any of the expected values."""
         for attempt in range(READBACK_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(READBACK_RETRY_INTERVAL)
             await self._read_eco_mode()
-            if all(self.data.get(key) == value for key, value in expected.items()):
+            if any(
+                all(self.data.get(key) == value for key, value in values.items())
+                for values in expected
+            ):
                 return
         raise DjiPowerError("station did not report the requested eco-mode values")
 
@@ -1396,19 +1423,27 @@ class DjiPowerDevice:
             await self._wait_for_energy_reserve(expected)
 
     async def set_charge_power(self, watts: int) -> None:
-        """Set manual Time of Use recharge watts and require matching readback."""
+        """Set manual Time of Use recharge watts and require matching readback.
+
+        Below the station's minimum, the midpoint it reports instead also counts.
+        """
         if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError("charge-power control is not supported on this model")
         async with self._operation_lock:
             current = await self._read_eco_mode()
             await self._require_tou_capability()
             try:
-                payload = build_charge_power_set_payload(current, watts)
+                payload = build_charge_power_set_payload(
+                    current, watts, minimum=self._charge_power_minimum
+                )
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
             await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
             await self._wait_for_eco_mode_values(
-                {"charge_power_available": True, "charge_power_w": watts}
+                *(
+                    {"charge_power_available": True, "charge_power_w": readback}
+                    for readback in sorted(charge_power_readbacks(current, watts))
+                )
             )
 
     async def set_discharge_power(self, watts: int) -> None:
