@@ -106,7 +106,8 @@
         },
         "menu_options": {
           "connection": "Connection options",
-          "time_periods": "Electricity price periods"
+          "time_periods": "Electricity price periods",
+          "advanced": "Advanced"
         }
       },
       "connection": {
@@ -121,6 +122,16 @@
           "update_interval": "Set to 0 for immediate updates.",
           "connection_source": "Automatic allows local adapters and Bluetooth proxies.",
           "keep_connection": "Require local adapter, keep BLE connection through HA Core restarts and reloads."
+        }
+      },
+      "advanced": {
+        "title": "Advanced",
+        "description": "Unsupported options that go beyond what DJI Home allows. Use them at your own risk.",
+        "data": {
+          "recharge_power_minimum": "Recharge power minimum"
+        },
+        "data_description": {
+          "recharge_power_minimum": "Lets Time of Use Recharge power go below the station's own minimum. Leave blank to use the station's minimum. Below it, the station keeps charging at your value but reports the midpoint of its range instead, and any other Energy Saver change sends the midpoint back."
         }
       },
       "time_periods": {
@@ -202,6 +213,7 @@
       "invalid_connection_source": "Select Automatic or one of the listed local Bluetooth adapters.",
       "invalid_keep_connection": "Select whether to keep the Bluetooth connection.",
       "invalid_connection_options": "Check the options and try again.",
+      "invalid_recharge_power_minimum": "Enter a whole number of watts, or leave the field blank.",
       "invalid_period": "Check the period and try again.",
       "invalid_period_selection": "Select one of the listed periods.",
       "schedule_read_failed": "Could not read the station's schedule. Check the Bluetooth connection and retry."

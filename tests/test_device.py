@@ -24,6 +24,11 @@ SYNTHETIC_ECO_MODE = b"\x01" + UNAVAILABLE_ECO_MODE[1:]
 ECO_RULES = b"\x06\x001e0060"  # Station rules 5 and 6.
 ECO_WRITE_COMMANDS = [0x60, 0x60, 0x63, 0x60]  # Eco, rules, SET, fresh Eco.
 
+
+def charge_watts(record: bytes, watts: int) -> bytes:
+    """Return an eco record with another manual recharge-power setting."""
+    return record[:26] + watts.to_bytes(4, "little") + record[30:]
+
 ROOT = Path(__file__).parents[1]
 COMPONENT = ROOT / "custom_components" / "dji_power_ble"
 # Connect-time GET: base info, network, limits, reserve, display, switches,
@@ -243,6 +248,8 @@ class DischargePowerClient(StationClient):
         self.apply_set = True
         self.ack_value = bytes(4)
         self.omit_after_set = False
+        # Station-side change to an applied record, such as a value it resets.
+        self.after_set = None
 
     async def write_gatt_char(self, uuid, value, *, response):  # noqa: ARG002
         request = duml.DumlPacket.decode(value)
@@ -270,6 +277,8 @@ class DischargePowerClient(StationClient):
                 and self.rules_ack_value == bytes(4)
             ):
                 self.value = requested[0x18]
+                if self.after_set is not None:
+                    self.value = self.after_set(self.value)
             if self.omit_after_set:
                 self.value = None
         else:
@@ -1290,6 +1299,87 @@ class EcoModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.device.data["charge_power_available"])
         self.assertIsNone(self.device.data["charge_power_w"])
         self.assertFalse(self.device.data["discharge_power_available"])
+
+    async def test_charge_below_station_minimum_needs_configured_minimum(self):
+        with self.assertRaisesRegex(
+            device_module.DjiPowerError, "between 100 and 1200"
+        ):
+            await self.device.set_charge_power(80)
+        self.assert_eco_reads_without_write()
+
+        self.client.requests.clear()
+        self.device.set_charge_power_minimum(50)
+        await self.device.set_charge_power(80)
+
+        self.assertEqual(
+            [command for command, _ in self.client.requests], ECO_WRITE_COMMANDS
+        )
+        sent = duml.parse_keyed_values(self.client.requests[2][1])[0x18]
+        self.assertEqual(sent, charge_watts(SYNTHETIC_ECO_MODE, 80))
+        self.assertTrue(self.device.data["charge_power_available"])
+        self.assertEqual(self.device.data["charge_power_min_w"], 50)
+        self.assertEqual(self.device.data["charge_power_w"], 80)
+        with self.assertRaisesRegex(
+            device_module.DjiPowerError, "between 50 and 1200"
+        ):
+            await self.device.set_charge_power(49)
+
+    async def test_charge_below_station_minimum_accepts_reported_midpoint(self):
+        self.device.set_charge_power_minimum(50)
+        # Like a Power 2000, report the midpoint of the 100-1200 W range instead.
+        self.client.after_set = lambda value: charge_watts(value, 650)
+
+        await self.device.set_charge_power(80)
+
+        sent = duml.parse_keyed_values(self.client.requests[2][1])[0x18]
+        self.assertEqual(sent[26:30], (80).to_bytes(4, "little"))
+        self.assertEqual(self.device.data["charge_power_w"], 650)
+        self.sleep_mock.assert_not_awaited()
+
+    async def test_midpoint_confirms_only_writes_below_station_minimum(self):
+        self.device.set_charge_power_minimum(50)
+        for watts, reported in ((80, 700), (700, 650)):
+            with self.subTest(watts=watts, reported=reported):
+                self.client.after_set = (
+                    lambda value, reported=reported: charge_watts(value, reported)
+                )
+                with self.assertRaisesRegex(
+                    device_module.DjiPowerError, "did not report"
+                ):
+                    await self.device.set_charge_power(watts)
+
+    async def test_changing_minimum_decodes_cached_and_pushed_records(self):
+        below = charge_watts(SYNTHETIC_ECO_MODE, 80)
+        self.client.value = below
+        await self.device._read_eco_mode()
+        self.assertFalse(self.device.data["charge_power_available"])
+        requests = list(self.client.requests)
+        updates = []
+        self.device.add_state_listener(updates.append)
+
+        self.device.set_charge_power_minimum(50)
+
+        self.assertTrue(self.device.data["charge_power_available"])
+        self.assertEqual(self.device.data["charge_power_min_w"], 50)
+        self.assertEqual(self.device.data["charge_power_w"], 80)
+        self.assertEqual(len(updates), 1)
+        self.device.set_charge_power_minimum(50)
+        self.assertEqual(len(updates), 1)
+
+        self.device.set_charge_power_minimum(None)
+
+        self.assertFalse(self.device.data["charge_power_available"])
+        self.assertIsNone(self.device.data["charge_power_w"])
+        self.assertEqual(len(updates), 2)
+        self.assertEqual(self.client.requests, requests)
+
+        self.device.set_charge_power_minimum(50)
+        self.client.send(
+            duml.TELEMETRY_COMMAND,
+            duml.build_keyed_set_payload([(0x18, charge_watts(below, 70))]),
+        )
+        self.assertEqual(self.device.data["charge_power_w"], 70)
+        self.assertEqual(self.device.data["charge_power_min_w"], 50)
 
     async def test_set_uses_fresh_config_preserves_other_fields_and_reads_back(self):
         await self.device._read_eco_mode()

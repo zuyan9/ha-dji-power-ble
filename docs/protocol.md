@@ -437,7 +437,10 @@ adjustment (byte 17) = 2. They accept integer watts within their own returned
 bounds. Recharge power is the manual Time of Use charging setpoint; it is distinct
 from the recharge limit (%) and does not configure a general AC charging-power cap.
 Invalid bounds or a current value outside the bounds disable only the affected
-number.
+number. An unsupported option can lower the Recharge power minimum; see
+[Energy Saver](energy-saver.md#recharge-power-below-the-station-minimum-unsupported).
+For a write below the station's own minimum, a readback of the station's midpoint,
+(minimum + maximum) / 2, also confirms the change.
 
 The **Power adjustment** selector changes only byte 17: **Automatic** = 1,
 **Manual** = 2. It requires an existing grid-tied Time of Use configuration and

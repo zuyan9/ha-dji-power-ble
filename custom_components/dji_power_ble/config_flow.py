@@ -56,6 +56,7 @@ from .const import (
     CONF_KEEP_CONNECTION,
     CONF_MODEL,
     CONF_PAIR_KEY,
+    CONF_RECHARGE_POWER_MINIMUM,
     CONF_SERIAL_NUMBER,
     CONF_UPDATE_INTERVAL,
     CONNECTION_SOURCE_AUTOMATIC,
@@ -66,6 +67,7 @@ from .const import (
     MIN_UPDATE_INTERVAL,
 )
 from .duml import (
+    GRID_TIED_RULE,
     MODEL_NAMES,
     POWER_MODEL_CODES,
     TIME_PERIOD_DAYS,
@@ -76,7 +78,12 @@ from .duml import (
     parse_manufacturer_data,
     resolve_model,
 )
-from .features import ModelFeature, feature_available, is_known_model
+from .features import (
+    ModelFeature,
+    feature_available,
+    is_known_model,
+    station_rule_enabled,
+)
 from .local_ble import async_local_adapters
 
 _LOGGER = logging.getLogger(__name__)
@@ -117,6 +124,21 @@ OPTIONS_SCHEMA = vol.Schema(
                 step=1,
                 mode=NumberSelectorMode.BOX,
                 unit_of_measurement="s",
+            )
+        )
+    }
+)
+# Blank keeps the station's minimum. The maximum only bounds typing; a value at or
+# above the station's minimum has no effect.
+ADVANCED_OPTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_RECHARGE_POWER_MINIMUM): NumberSelector(
+            NumberSelectorConfig(
+                min=0,
+                max=10000,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="W",
             )
         )
     }
@@ -568,15 +590,66 @@ class DjiPowerOptionsFlow(OptionsFlow):
             )
         )
 
+    def _offers_advanced(self) -> bool:
+        """Offer advanced options where manual recharge power can exist.
+
+        That needs DJI Home's Energy Saver page with grid-tied modes (rule 6).
+        """
+        coordinator = self._schedule_coordinator()
+        if coordinator is None or not is_known_model(coordinator.device.model):
+            return False
+        data = coordinator.data or {}
+        return (
+            feature_available(data, ModelFeature.ENERGY_SAVER)
+            and station_rule_enabled(data, GRID_TIED_RULE)
+        )
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage integration options."""
-        if user_input is None and self._supports_schedule():
-            return self.async_show_menu(
-                step_id="init", menu_options=["connection", "time_periods"]
-            )
+        if user_input is None:
+            menu = ["connection"]
+            if self._supports_schedule():
+                menu.append("time_periods")
+            if self._offers_advanced():
+                menu.append("advanced")
+            if len(menu) > 1:
+                return self.async_show_menu(step_id="init", menu_options=menu)
         return await self._async_connection_options(user_input, step_id="init")
+
+    async def async_step_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Change unsupported options that go beyond what DJI Home allows."""
+        errors: dict[str, str] = {}
+        current = self.config_entry.options.get(CONF_RECHARGE_POWER_MINIMUM)
+        suggested = {} if current is None else {CONF_RECHARGE_POWER_MINIMUM: current}
+        if user_input is not None:
+            try:
+                validated = ADVANCED_OPTIONS_SCHEMA(user_input)
+                minimum = validated.get(CONF_RECHARGE_POWER_MINIMUM)
+                if minimum is not None and not float(minimum).is_integer():
+                    raise vol.Invalid(
+                        "Expected whole watts", path=[CONF_RECHARGE_POWER_MINIMUM]
+                    )
+            except vol.Invalid:
+                errors[CONF_RECHARGE_POWER_MINIMUM] = "invalid_recharge_power_minimum"
+                suggested = dict(user_input)
+            else:
+                options = dict(self.config_entry.options)
+                if minimum is None:
+                    options.pop(CONF_RECHARGE_POWER_MINIMUM, None)
+                else:
+                    options[CONF_RECHARGE_POWER_MINIMUM] = int(minimum)
+                return self.async_create_entry(data=options)
+        return self.async_show_form(
+            step_id="advanced",
+            data_schema=self.add_suggested_values_to_schema(
+                ADVANCED_OPTIONS_SCHEMA, suggested
+            ),
+            errors=errors,
+        )
 
     async def async_step_connection(
         self, user_input: dict[str, Any] | None = None

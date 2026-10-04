@@ -69,6 +69,29 @@ confirm that warning before turning the setting on; Home Assistant cannot, so tu
 on only after reading it. As in DJI Home, the switch is available only while a
 grid-tied mode is selected.
 
+## Recharge power below the station minimum (unsupported)
+
+The station reports a minimum for Time of Use **Recharge power** (600 W on a Power
+2000), and DJI Home never goes below it. To go lower anyway, open the integration's
+**Configure** menu, choose **Advanced**, and set **Recharge power minimum**. Leave it
+blank to use the station's minimum again. The menu entry appears on stations that
+offer grid-tied modes. The setting only lowers the minimum; the station's maximum
+still applies.
+
+Use it at your own risk. On a Power 2000, below its minimum:
+
+- the station keeps charging at the value you set, but within seconds reports the
+  midpoint of its range instead (1450 W for 600–2300 W), and **Recharge power** then
+  shows that midpoint;
+- the charger stopped charging below about 230 W.
+
+The integration accepts either value as confirmation of the change. Because the
+station keeps the midpoint as its setting, any other Energy Saver change from Home
+Assistant or DJI Home sends the midpoint back, and the station may apply it again by
+itself, for example at a period change or after a restart. Automations that use a
+lower value should set it again after such changes. A firmware update could change
+this behavior.
+
 ## Writes
 
 Every change reads the station's current Energy Saver record and rules, changes only

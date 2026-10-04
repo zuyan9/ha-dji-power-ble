@@ -906,6 +906,103 @@ class ChargePowerTests(unittest.TestCase):
         self.assertTrue(current["charge_power_available"])
 
 
+def _charge_power(record: bytes, maximum: int, minimum: int, watts: int) -> bytes:
+    """Return an eco record with other manual recharge-power fields."""
+    fields = (maximum, minimum, watts)
+    return (
+        record[:18]
+        + b"".join(value.to_bytes(4, "little") for value in fields)
+        + record[30:]
+    )
+
+
+class ChargePowerMinimumTests(unittest.TestCase):
+    """A user-chosen minimum may lower, never raise, the station's own."""
+
+    def test_minimum_lowers_reported_minimum_and_accepts_lower_value(self) -> None:
+        below = _charge_power(SYNTHETIC_ECO_MODE, 1200, 100, 80)
+        payload = duml.build_keyed_set_payload([(0x18, below)])
+        self.assertFalse(duml.parse_telemetry(payload)["charge_power_available"])
+
+        for minimum, available in ((0, True), (50, True), (80, True), (81, False)):
+            with self.subTest(minimum=minimum):
+                parsed = duml.parse_telemetry(payload, charge_power_minimum=minimum)
+
+                self.assertIs(parsed["charge_power_available"], available)
+                self.assertEqual(
+                    parsed["charge_power_min_w"], minimum if available else None
+                )
+                self.assertEqual(parsed["charge_power_w"], 80 if available else None)
+                self.assertEqual(
+                    parsed["charge_power_max_w"], 1200 if available else None
+                )
+                self.assertTrue(parsed["discharge_power_available"])
+
+    def test_minimum_never_raises_station_limits_or_hides_invalid_ones(self) -> None:
+        for minimum in (100, 300, 5000):
+            with self.subTest(minimum=minimum):
+                payload = duml.build_keyed_set_payload([(0x18, SYNTHETIC_ECO_MODE)])
+                parsed = duml.parse_telemetry(payload, charge_power_minimum=minimum)
+                self.assertEqual(parsed["charge_power_min_w"], 100)
+                self.assertEqual(parsed["charge_power_w"], 500)
+                with self.assertRaisesRegex(duml.ProtocolError, "100 and 1200"):
+                    duml.build_charge_power_set_payload(
+                        SYNTHETIC_ECO_MODE, 99, minimum=minimum
+                    )
+
+        for maximum, station_minimum, watts in ((1200, 100, 1201), (99, 100, 80)):
+            with self.subTest(maximum=maximum, station_minimum=station_minimum):
+                value = _charge_power(
+                    SYNTHETIC_ECO_MODE, maximum, station_minimum, watts
+                )
+                payload = duml.build_keyed_set_payload([(0x18, value)])
+                parsed = duml.parse_telemetry(payload, charge_power_minimum=50)
+                self.assertFalse(parsed["charge_power_available"])
+                with self.assertRaises(duml.ProtocolError):
+                    duml.build_charge_power_set_payload(value, 90, minimum=50)
+
+    def test_set_below_station_minimum_needs_lower_minimum(self) -> None:
+        with self.assertRaisesRegex(duml.ProtocolError, "100 and 1200"):
+            duml.build_charge_power_set_payload(SYNTHETIC_ECO_MODE, 80)
+        for watts in (49, 1201):
+            with (
+                self.subTest(watts=watts),
+                self.assertRaisesRegex(duml.ProtocolError, "50 and 1200"),
+            ):
+                duml.build_charge_power_set_payload(
+                    SYNTHETIC_ECO_MODE, watts, minimum=50
+                )
+
+        below = _charge_power(SYNTHETIC_ECO_MODE, 1200, 100, 80)
+        for current in (SYNTHETIC_ECO_MODE, below):
+            for minimum, watts in ((50, 50), (50, 90), (0, 0)):
+                with self.subTest(current=current[26:30].hex(), watts=watts):
+                    payload = duml.build_charge_power_set_payload(
+                        current, watts, minimum=minimum
+                    )
+                    self.assertEqual(
+                        duml.parse_keyed_values(payload)[0x18],
+                        _charge_power(current, 1200, 100, watts),
+                    )
+        with self.assertRaises(duml.ProtocolError):
+            duml.build_charge_power_set_payload(below, 90)
+
+    def test_readbacks_add_station_midpoint_only_below_its_minimum(self) -> None:
+        for watts, readbacks in (
+            (500, {500}), (100, {100}), (1200, {1200}), (80, {80, 650})
+        ):
+            with self.subTest(watts=watts):
+                for current in (SYNTHETIC_ECO_MODE, SYNTHETIC_ECO_MODE.hex()):
+                    self.assertEqual(
+                        duml.charge_power_readbacks(current, watts), readbacks
+                    )
+        # The Power 2000 range from issue 62, and an odd sum.
+        power_2000 = _charge_power(SYNTHETIC_ECO_MODE, 2300, 600, 1000)
+        self.assertEqual(duml.charge_power_readbacks(power_2000, 400), {400, 1450})
+        odd = _charge_power(SYNTHETIC_ECO_MODE, 1200, 101, 500)
+        self.assertEqual(duml.charge_power_readbacks(odd, 80), {80, 650, 651})
+
+
 class PowerAdjustmentTests(unittest.TestCase):
     def test_automatic_readback_clears_previous_manual_watts(self) -> None:
         payload = duml.build_keyed_set_payload([(0x18, SYNTHETIC_ECO_MODE)])
