@@ -1,4 +1,4 @@
-"""Power-adjustment mode from keyed configuration."""
+"""Energy Saver and power-adjustment modes from keyed configuration."""
 
 from __future__ import annotations
 
@@ -16,14 +16,19 @@ from .accessory import (
     async_discover_feature,
 )
 from .const import DOMAIN
+from .duml import ENERGY_SAVER_MODES
 from .entity import DjiPowerEntity
-from .features import ModelFeature, feature_available
+from .features import ModelFeature, energy_saver_options, feature_available
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.ENERGY_SAVER,
+        lambda: [DjiPowerEnergySaverModeSelect(coordinator)],
+    )
     async_discover_feature(
         coordinator, entry, async_add_entities, ModelFeature.TOU_POWER_CONTROL,
         lambda: [DjiPowerAdjustmentSelect(coordinator)],
@@ -38,6 +43,45 @@ async def async_setup_entry(
             ]
         },
     )
+
+
+class DjiPowerEnergySaverModeSelect(DjiPowerEntity, SelectEntity):
+    """Select an Energy Saver mode among those set up in DJI Home."""
+
+    _attr_translation_key = "energy_saver_mode"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_energy_saver_mode"
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and feature_available(
+            self.coordinator.data or {}, ModelFeature.ENERGY_SAVER
+        )
+
+    @property
+    def options(self) -> list[str]:
+        # Grid-tied modes depend on station state; keep a valid list meanwhile.
+        return energy_saver_options(self.coordinator.data or {}) or list(
+            ENERGY_SAVER_MODES
+        )
+
+    @property
+    def current_option(self) -> str | None:
+        # Like DJI Home, other reported modes select nothing but can be changed.
+        mode = (self.coordinator.data or {}).get("energy_saver_mode")
+        return mode if mode in ENERGY_SAVER_MODES else None
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in energy_saver_options(self.coordinator.data or {}):
+            raise ServiceValidationError(
+                "the station does not offer this Energy Saver mode; grid-tied "
+                "modes appear after they are set up in DJI Home"
+            )
+        await self.coordinator.async_set_energy_saver_mode(option)
 
 
 class DjiPowerAdjustmentSelect(DjiPowerEntity, SelectEntity):

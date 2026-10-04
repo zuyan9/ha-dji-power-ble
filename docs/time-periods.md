@@ -32,6 +32,6 @@ data:
 Enclose start and end times in quotes using the 24-hour `HH:MM` format. The time picker's `HH:MM:00` format is also supported, provided seconds are set to zero. Times are evaluated in the **station's local time zone**, which may differ from Home Assistant's. This action will not modify the station's time zone or apply Home Assistant's daylight saving rules.
 - If the end time is earlier than the start time, the period spans midnight starting on each selected day. Schedules saved by the integration cannot contain identical start and end times or overlapping periods—including overlaps across midnight or the Sunday–Monday boundary. Adjacent periods are permitted.
 - Supports up to eight peak and eight off-peak periods.
-To clear the schedule, use **Configure** or explicitly set `periods: []` in the YAML. Simply deleting the last row in the automation form may remove the required field instead of sending an empty list. Before clearing, ensure that Scheduled Periods and all grid-tied modes are disabled; you can switch modes in the DJI Home app.
+To clear the schedule, use **Configure** or explicitly set `periods: []` in the YAML. Simply deleting the last row in the automation form may remove the required field instead of sending an empty list. Before clearing, ensure that Scheduled Periods and all grid-tied modes are disabled; switch modes with the [Energy saver mode](energy-saver.md) selector or in the DJI Home app.
 
 This schedule is shared between Scheduled Periods and TOU modes.

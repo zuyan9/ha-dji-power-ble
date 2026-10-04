@@ -183,14 +183,33 @@ class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state, original_state)
         self.assertEqual(entry.data, original_config)
 
-    async def test_redacts_meter_record_and_tail_but_preserves_power_settings(
+    async def test_exports_eco_settings_and_layout_but_not_meter_identity(
         self,
     ) -> None:
         eco_mode = bytearray(SYNTHETIC_ECO_MODE)
         eco_mode[42:79] = b"TEST-METER-IDENTIFIER".ljust(37, b"\x00")
-        for tail in (b"", b"TEST-EXTENDED-IDENTIFIER"):
-            with self.subTest(extended=bool(tail)):
-                raw = bytes(eco_mode) + tail
+        settings, tail = eco_mode[:42].hex(), eco_mode[79:].hex()
+        brand = b"TEST-METER-BRAND".ljust(17, b"\x00")
+        for raw, expected in (
+            (bytes(eco_mode), {"length": 86, "settings": settings, "tail": tail}),
+            (
+                bytes(eco_mode[:79]) + brand + bytes(eco_mode[79:]),
+                {"length": 103, "settings": settings, "tail": tail},
+            ),
+            # Bytes after the known 103-byte layout are not exported.
+            (
+                bytes(eco_mode[:79]) + brand + bytes(eco_mode[79:])
+                + b"TEST-EXTENDED-IDENTIFIER",
+                {"length": 127, "settings": settings, "tail": tail},
+            ),
+            # Unknown layouts keep only the settings before the meter ID.
+            (
+                bytes(eco_mode) + b"TEST-EXTENDED",
+                {"length": 99, "settings": settings},
+            ),
+            (bytes(eco_mode[:30]), {"length": 30, "settings": eco_mode[:30].hex()}),
+        ):
+            with self.subTest(length=len(raw)):
                 state = duml.parse_telemetry(
                     duml.build_keyed_set_payload(
                         [(duml.ECO_MODE_KEY, raw)], timestamp_ms=0
@@ -209,12 +228,39 @@ class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                     hass, entry
                 )
 
-                self.assertEqual(result["state"], state | {"key_18": REDACTED})
-                self.assertEqual(result["state"]["power_adjustment"], "Manual")
-                self.assertEqual(result["state"]["charge_power_w"], 500)
-                self.assertEqual(result["state"]["discharge_power_w"], 93)
+                self.assertEqual(result["state"], state | {"key_18": expected})
+                for private in (b"TEST-METER", b"TEST-EXTENDED", b"EXTENDED"):
+                    self.assertNotIn(private.hex(), repr(result))
                 self.assertEqual(state, original_state)
                 self.assertEqual(state["key_18"], raw.hex())
+                # A linked meter remains visible only as a flag.
+                self.assertIs(
+                    result["state"]["eco_meter_linked"],
+                    True if len(raw) >= 86 else None,
+                )
+
+        decoded = duml.parse_telemetry(
+            duml.build_keyed_set_payload([(duml.ECO_MODE_KEY, bytes(eco_mode))])
+        )
+        self.assertEqual(decoded["power_adjustment"], "Manual")
+        self.assertEqual(decoded["charge_power_w"], 500)
+        self.assertEqual(decoded["discharge_power_w"], 93)
+
+    async def test_invalidated_or_malformed_eco_record_exports_nothing(self) -> None:
+        for value in (None, "zz", 18):
+            with self.subTest(value=value):
+                entry = types.SimpleNamespace(entry_id="station", data={}, options={})
+                coordinator = types.SimpleNamespace(
+                    data={"key_18": value},
+                    device=types.SimpleNamespace(is_connected=True),
+                )
+                hass = types.SimpleNamespace(
+                    data={"dji_power_ble": {entry.entry_id: coordinator}}
+                )
+                result = await diagnostics.async_get_config_entry_diagnostics(
+                    hass, entry
+                )
+                self.assertEqual(result["state"], {"key_18": None})
 
     async def test_redacts_parallel_and_accessory_records_but_keeps_inputs(
         self,

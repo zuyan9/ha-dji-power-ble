@@ -768,8 +768,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=20, firmware="01.00.00.00")
         await self.setup([pack])
         unique_ids = {entity._attr_unique_id for entity in self.packs()}
-        # Primary status, expansion packs, tariff and SDC each keep a listener.
-        self.assertEqual(len(self.listeners), 4)
+        # Primary status, packs, tariff, meter phase and SDC keep a listener.
+        self.assertEqual(len(self.listeners), 5)
         for callback in self.unload_callbacks:
             callback()
         self.assertEqual(self.listeners, [])

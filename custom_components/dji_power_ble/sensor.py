@@ -37,6 +37,7 @@ from .accessory import (
 )
 from .const import DOMAIN
 from .coordinator import DjiPowerCoordinator
+from .duml import METER_PHASES
 from .entity import DjiPowerEntity
 from .features import ModelFeature, feature_available, is_known_model
 
@@ -250,6 +251,14 @@ PRIMARY_BATTERY_STATUS_DESCRIPTION = SensorEntityDescription(
     options=["recharging", "discharging"],
 )
 
+METER_PHASE_DESCRIPTION = SensorEntityDescription(
+    key="meter_phase",
+    translation_key="meter_phase",
+    device_class=SensorDeviceClass.ENUM,
+    options=list(METER_PHASES.values()),
+    entity_category=EntityCategory.DIAGNOSTIC,
+)
+
 EXPANSION_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
         key="battery_percent",
@@ -351,6 +360,10 @@ async def async_setup_entry(
     async_discover_feature(
         coordinator, entry, async_add_entities, ModelFeature.TARIFF_SCHEDULE,
         lambda: [DjiPowerTimePeriodsSensor(coordinator)],
+    )
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.METER_PHASE,
+        lambda: [DjiPowerMeterPhaseSensor(coordinator, METER_PHASE_DESCRIPTION)],
     )
     device_registry = dr.async_get(hass)
     # Packs link to the station by device id. Entity registration is deferred, so
@@ -479,6 +492,16 @@ class DjiPowerBatteryTimeSensor(DjiPowerSensor):
         if data.get("battery_time_type") not in time_types:
             return None
         return data.get("runtime_min")
+
+
+class DjiPowerMeterPhaseSensor(DjiPowerSensor):
+    """Grid phase of the station's linked smart meter, as DJI Home labels it."""
+
+    @property
+    def available(self) -> bool:
+        return super().available and feature_available(
+            self.coordinator.data or {}, ModelFeature.METER_PHASE
+        )
 
 
 class DjiPowerTimePeriodsSensor(DjiPowerEntity, SensorEntity):

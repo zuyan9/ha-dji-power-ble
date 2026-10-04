@@ -219,6 +219,22 @@
         "name": "Battery maintenance charging"
       }
     },
+    "number": {
+      "off_peak_charge_power": {
+        "name": "Off-peak charging power"
+      }
+    },
+    "select": {
+      "energy_saver_mode": {
+        "name": "Energy saver mode",
+        "state": {
+          "disabled": "Disabled",
+          "scheduled": "Scheduled periods",
+          "self_consumption": "Max self-consumption",
+          "time_of_use": "Time of use (TOU)"
+        }
+      }
+    },
     "sensor": {
       "battery_cycle_count": {
         "name": "Battery cycle count"
@@ -254,6 +270,27 @@
           "solar_car_charger_1_8kw": "1.8kW Solar/Car Charger",
           "poe_cable": "SDC to PoE Power Cable"
         }
+      },
+      "meter_phase": {
+        "name": "Meter phase",
+        "state": {
+          "a": "A",
+          "b": "B",
+          "ab": "A+B",
+          "c": "C",
+          "abc": "A+B+C"
+        }
+      }
+    },
+    "switch": {
+      "auto_resume": {
+        "name": "Energy saver auto resume"
+      },
+      "peak_discharge": {
+        "name": "Discharge during peak periods"
+      },
+      "off_peak_charge": {
+        "name": "Charge during off-peak periods"
       }
     }
   },

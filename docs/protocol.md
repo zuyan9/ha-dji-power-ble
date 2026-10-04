@@ -163,16 +163,19 @@ The integration decodes these fields:
 | `0x06` | Energy storage | Backup reserve availability, switch, and level |
 | `0x0C` | Display | Display (screen) timeout |
 | `0x0D` | Power switch | AC, SDC, USB and car-outlet states |
-| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0); SDC/USB switches (rule 11); port SET scope (rule 21) |
+| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0); Energy Saver page, grid-tied modes and Auto Resume (rules 5, 6, 17); SDC/USB switches (rule 11); port SET scope (rule 21) |
 | `0x15` | Timezone | UTC offset in minutes |
-| `0x18` | Eco mode | Power adjustment mode, manual recharge/discharge watts and watt limits |
+| `0x18` | Eco mode | Energy Saver mode, Scheduled Periods switches and off-peak charging power, power adjustment, manual recharge/discharge watts, meter phase, Auto Resume |
 
 Raw keyed values are retained internally as `key_XX` hexadecimal state. Downloaded
 diagnostics redact records containing known private identifiers, including expansion
 packs (`key_01`), parallel devices (`key_03`), and accessories (`key_04`). The raw
 rules record (`key_0e`) is also redacted; diagnostics keep its decoded rule numbers as
-`station_rules`. Unknown raw records, including `key_19` and `key_22`, are
-redacted as well. Discovery key IDs and understood numeric records remain visible.
+`station_rules`. The eco-mode record (`key_18`) is exported as its length, its
+numeric settings (bytes 0–41) and, in a known layout, its numeric tail; the meter
+identifier and brand are left out. Unknown raw records, including `key_19` and
+`key_22`, are redacted as well. Discovery key IDs and understood numeric records
+remain visible.
 
 ### Display
 
@@ -351,38 +354,104 @@ switch or level, and preserve any additional bytes. The station stores the level
 without checking it. Like DJI Home, the integration limits it to the discharge limit
 plus 5 % through the recharge limit, from a fresh `0x05` read.
 
-Manual **Recharge power** and **Discharge power** writes use keys `0x18`
-(`eco_mode`) and `0x0E`. The app-derived layout stores each setting as
-little-endian uint32 values:
+### Energy Saver
+
+Key `0x18` (`eco_mode`) holds DJI Home's Energy Optimization page. The layout is
+derived from DJI Home; integers are little-endian:
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| `0` | 1 | Available: `1` offered |
+| `1` | 1 | Mode: `1` Disable, `2` Scheduled Periods, `3` grid-tied |
+| `2` / `3` | 1 each | Discharge During Peak / Charge During Off-Peak: `1` on, other values off; written as `1` or `2` |
+| `4` / `8` / `12` | 4 each | Off-peak charging power maximum / minimum / setting (W) |
+| `16` | 1 | Grid-tied mode: `2` Max Self-Consumption, `3` Time of Use |
+| `17` | 1 | Power adjustment: `1` Automatic, `2` Manual |
+| `18` / `22` / `26` | 4 each | Manual recharge power maximum / minimum / setting (W) |
+| `30` / `34` / `38` | 4 each | Manual discharge power maximum / minimum / setting (W) |
+| `42` | 37 | Linked smart-meter identifier, NUL-padded |
+| `79` | 17 | Smart-meter brand, NUL-padded (1.6.9 layout only) |
+| tail | 2 | Meter phase bitmask: `1` A, `2` B, `3` A+B, `4` C, `7` A+B+C |
+| tail + 2 | 4 | Not used by DJI Home's controls; preserved |
+| tail + 6 | 1 | Auto Resume: `1` on, other values off; written as `1` or `2` |
+
+DJI Home 1.6.0 starts the tail at byte 79, giving an 86-byte record. DJI Home 1.6.9
+inserts the meter brand there and starts the tail at byte 96, giving 103 bytes. It
+reads longer records the same way and drops shorter ones, including 86-byte records.
+The integration reads the tail from a record of exactly 86 bytes or of at least 103
+bytes; with any other length, Meter phase and Auto Resume are unavailable. A record
+shorter than 86 bytes makes every Energy Saver control unavailable.
+
+DJI Home shows the page when byte 0 is `1` and the station sets rule 5. The
+integration applies the same gate to every control below. Each write reads a fresh
+record and fresh station rules inside the operation lock, changes only the named
+bytes, and preserves every other byte, including any extended tail. The SET contains
+keys `0x18` and `0x0E`, and confirmation requires a fresh `0x18` readback.
+
+**Energy saver mode** shows mode `1` as Disabled, `2` as Scheduled periods, and
+mode `3` with grid-tied mode `2` or `3` as Max self-consumption or Time of use.
+Other combinations select no option, as in DJI Home, and can be replaced. Selecting
+a mode writes only byte 1, plus byte 16 for the grid-tied modes, as DJI Home does;
+leaving a grid-tied mode keeps byte 16. Selecting the active mode sends nothing.
+
+- Disabled and Scheduled periods are always offered.
+- Scheduled periods and Time of use require at least one price period in a fresh
+  `0x16` read, as DJI Home does.
+- Grid-tied modes require rule 6 and a byte 16 of `2` or `3`. DJI Home writes byte
+  16 only when a grid-tied mode is selected or a meter is bound, so this marks an
+  earlier setup there; the integration never constructs one.
+- Max self-consumption also requires a linked meter: bytes 42–78, with every NUL
+  byte removed, must decode as non-empty UTF-8, as in DJI Home.
+- DJI Home additionally lists grid-tied modes only in countries on an online
+  allow-list, and writes them only while it reaches the station through DJI's
+  cloud, never over BLE. Neither check is available to the integration, so
+  grid-tied writes over BLE remain unverified on hardware.
+
+**Discharge during peak periods**, **Charge during off-peak periods** and
+**Off-peak charging power** write bytes 2, 3 and 12–15. They are available while
+Scheduled periods is the active mode, as DJI Home shows them. Turning a switch on
+requires at least one price period in a fresh `0x16` read; without one, DJI Home
+asks for periods and stores the switch off. The power must be whole watts within
+the reported bounds; DJI Home's slider moves in 10 W steps.
+
+DJI Home shows Auto Resume and the meter phase only in its grid-tied section, which
+requires rule 6 and an active grid-tied mode. **Energy saver auto resume** writes the
+Auto Resume byte; it also requires rule 17 and a record of known length. DJI Home
+asks for confirmation before turning it on. **Meter phase** is a read-only
+diagnostic; it also requires a linked meter, Max self-consumption or Time of use
+with Automatic power adjustment, and one of the labelled phase values. DJI Home
+also hides the phase for single-phase meters, using cloud meter data that is not
+available over BLE.
+
+Manual **Recharge power** and **Discharge power** are stored as little-endian uint32
+values:
 
 | Setting | Maximum offset | Minimum offset | Setpoint offset |
 | --- | --- | --- | --- |
 | Recharge power (W) | 18 | 22 | 26 |
 | Discharge power (W) | 30 | 34 | 38 |
 
-Both controls require Eco availability (byte 0 = 1), station rules 5 and 6,
-and grid-tied Time of Use with manual power adjustment:
-`mode` (byte 1) = 3, `grid_mode` (byte 16) = 3, and `chg_mode` (byte 17) = 2.
-They accept integer watts within their own returned bounds. Recharge power is the
-manual Time of Use charging setpoint; it is distinct from the recharge limit (%)
-and does not configure a general AC charging-power cap.
+Both controls require station rules 5 and 6 and grid-tied Time of Use with manual
+power adjustment: mode (byte 1) = 3, grid-tied mode (byte 16) = 3, and power
+adjustment (byte 17) = 2. They accept integer watts within their own returned
+bounds. Recharge power is the manual Time of Use charging setpoint; it is distinct
+from the recharge limit (%) and does not configure a general AC charging-power cap.
+Invalid bounds or a current value outside the bounds disable only the affected
+number.
 
-The client reads a fresh, complete record of at least 86 bytes and replaces only
-bytes 26–29 for recharge or 38–41 for discharge, preserving every other byte,
-including the opposite setpoint and any extended tail. Missing, incomplete, or
-incompatible records leave both numbers unavailable. Invalid bounds or a current
-value outside the bounds disable only the affected number.
+The **Power adjustment** selector changes only byte 17: **Automatic** = 1,
+**Manual** = 2. It requires an existing grid-tied Time of Use configuration and
+preserves both watt setpoints and all other settings. Automatic also requires a
+linked smart meter; link it in DJI Home first. Both watt numbers are available only
+in Manual with valid reported limits.
 
-The **Power adjustment** selector changes only `chg_mode` (byte 17):
-**Automatic** = 1, **Manual** = 2. It requires an existing grid-tied Time of Use
-configuration and preserves both watt setpoints and all other settings. Automatic
-also requires a linked smart meter (`src_dev_id`); link it in DJI Home first.
-Both watt numbers are available only in Manual with valid reported limits.
-Initial grid installation, Time of Use selection, and meter linking remain in DJI
-Home. These controls do not construct missing configuration or switch grid modes
-through BLE. DJI Home additionally checks a country allow-list from its online
-configuration. That online country check is not implemented here; the existing
-TOU controls use the station's reported availability, rules and active mode.
+The Energy Saver encoding and mode checks are derived from DJI Home. Manual
+discharge control has been reported working on Power 2000 hardware. The Energy
+Saver mode, Scheduled Periods controls, Auto Resume and meter phase have not yet
+been hardware-tested. The Power Auro 2000 Elite shares the Power 2000's app profile
+and has not been hardware-tested.
+
+### Electricity price periods
 
 The **Set electricity price time periods** action replaces the complete tariff
 schedule in key `0x16`. Scheduled Periods and Time of Use share this list.
@@ -405,6 +474,8 @@ last period is rejected while scheduled or grid operation is active. Schedule
 entities appear when those capabilities are discovered. The codec and offline
 confirmation tests do not establish physical schedule execution.
 
+### Acknowledgement and confirmation
+
 A `0x63` response contains a four-byte status for each requested key. Every key must be
 present with status zero. An acknowledgement means the command was accepted, not that
 the new state is already observable, so the client polls keyed configuration until the
@@ -414,16 +485,11 @@ The first confirmation read follows the acknowledgement immediately. If the repo
 values do not match, the client makes up to eight further attempts, waiting two
 seconds between attempts. Each read also has a transport timeout. AC output is
 confirmed with an explicit `0x0D` GET, percentage limits with `0x05` and any included
-reserve with `0x06`, eco-mode power controls with `0x18`, and tariff periods with
+reserve with `0x06`, Energy Saver controls with `0x18`, and tariff periods with
 `0x16`. Unrelated expansion-battery or configuration reads are excluded from write
 confirmation. Cached values cannot substitute for missing readback fields.
 Writes remain serialized until confirmation completes, and confirmed values are
 published immediately regardless of the Home Assistant update interval.
-
-The eco-mode controls' encoding and mode checks are verified against the app.
-Manual discharge control has been reported working on Power 2000 hardware; the
-Power Auro 2000 Elite shares the Power 2000's app profile and has not been
-hardware-tested.
 
 ## SDC and car-charger configuration
 
