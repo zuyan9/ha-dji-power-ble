@@ -1,0 +1,33 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  # Weekly run catches upstream hassfest/HACS rule changes between pushes.
+  schedule:
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: hacs/action@main
+        with:
+          category: integration
+          comment: "false"
