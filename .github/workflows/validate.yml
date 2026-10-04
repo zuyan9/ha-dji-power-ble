@@ -1,0 +1,34 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  # Monthly run catches upstream rule changes; the 1st follows each Home
+  # Assistant beta (last Wednesday), which publishes the new hassfest image.
+  schedule:
+    - cron: "30 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: hacs/action@main
+        with:
+          category: integration
+          comment: "false"

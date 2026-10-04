@@ -31,6 +31,10 @@ bluetooth = _module(
     BluetoothScanningMode=types.SimpleNamespace(PASSIVE="passive"),
     BluetoothServiceInfoBleak=object,
 )
+config_validation = _module(
+    "homeassistant.helpers.config_validation",
+    config_entry_only_config_schema=lambda domain: ("config_entry_only", domain),
+)
 stubs = {
     "homeassistant": _module("homeassistant"),
     "homeassistant.components": _module(
@@ -58,6 +62,10 @@ stubs = {
     "homeassistant.exceptions": _module(
         "homeassistant.exceptions", ConfigEntryNotReady=ConfigEntryNotReady
     ),
+    "homeassistant.helpers": _module(
+        "homeassistant.helpers", config_validation=config_validation
+    ),
+    "homeassistant.helpers.config_validation": config_validation,
     f"{PACKAGE}.coordinator": _module(
         f"{PACKAGE}.coordinator", DjiPowerCoordinator=object
     ),
@@ -156,6 +164,11 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await integration.async_setup(self.hass, {}))
         register.assert_called_once_with(self.hass)
         self.assertEqual(self.hass.data, {})
+
+    def test_config_schema_is_config_entry_only(self):
+        self.assertEqual(
+            integration.CONFIG_SCHEMA, ("config_entry_only", integration.DOMAIN)
+        )
 
     async def test_lowercase_config_address_uses_uppercase_bluetooth_address(self):
         expected = self.entry.data["address"].upper()
