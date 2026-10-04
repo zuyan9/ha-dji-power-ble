@@ -5,9 +5,10 @@ on:
     branches:
       - main
   pull_request:
-  # Weekly run catches upstream hassfest/HACS rule changes between pushes.
+  # Monthly run catches upstream rule changes; the 1st follows each Home
+  # Assistant beta (last Wednesday), which publishes the new hassfest image.
   schedule:
-    - cron: "30 6 * * 1"
+    - cron: "30 6 1 * *"
   workflow_dispatch:
 
 permissions:
