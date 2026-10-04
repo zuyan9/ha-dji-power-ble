@@ -71,6 +71,19 @@ APP_DISCOVERY_KEYS = (
 PORT_SWITCH_RULE = 11
 FULL_LIST_PORT_WRITE_RULE = 21
 
+# Station rules with which DJI Home offers its Energy Saver page, the grid-tied
+# modes on that page, and Auto Resume.
+ENERGY_SAVER_RULE = 5
+GRID_TIED_RULE = 6
+AUTO_RESUME_RULE = 17
+
+# Eco `mode` 1 and 2, then `mode` 3 with `grid_mode` 2 or 3.
+ENERGY_SAVER_MODES = ("disabled", "scheduled", "self_consumption", "time_of_use")
+GRID_TIED_MODES = ("self_consumption", "time_of_use")
+
+# DJI Home's labels for the meter-phase bitmask.
+METER_PHASES = {1: "a", 2: "b", 3: "ab", 4: "c", 7: "abc"}
+
 TIME_PERIOD_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 # DJI Home keeps the backup reserve this far above the discharge limit.
@@ -609,6 +622,54 @@ def _parse_manual_charge_power(value: bytes | bytearray) -> tuple[int, int, int]
     return minimum, maximum, watts
 
 
+def _energy_saver_mode(value: bytes | bytearray) -> str | None:
+    """Return the Energy Saver mode DJI Home shows, or None for other values."""
+    if len(value) < 86:
+        return None
+    if value[1] in (1, 2):
+        return ENERGY_SAVER_MODES[value[1] - 1]
+    if value[1] == 3 and value[16] in (2, 3):
+        return GRID_TIED_MODES[value[16] - 2]
+    return None
+
+
+def _eco_meter_linked(value: bytes | bytearray) -> bool:
+    """Return whether the 37-byte meter ID (bytes 42-78) is set.
+
+    Like DJI Home, drop every NUL byte and require non-empty UTF-8.
+    """
+    try:
+        return bool(value[42:79].replace(b"\x00", b"").decode("utf-8"))
+    except UnicodeDecodeError:
+        return False
+
+
+def eco_tail_offset(value: bytes | bytearray) -> int | None:
+    """Locate meter phase, a u32 the app only copies, and Auto Resume.
+
+    DJI Home 1.6.0 reads an 86-byte record with them after the meter ID.
+    1.6.9 inserts a 17-byte meter brand first and reads the first 103 bytes of
+    longer records the same way. Other lengths are not interpreted.
+    """
+    if len(value) == 86:
+        return 79
+    return 96 if len(value) >= 103 else None
+
+
+def _parse_off_peak_charge_power(value: bytes | bytearray) -> tuple[int, int, int]:
+    """Read Scheduled Periods off-peak charging watts and their bounds."""
+    if len(value) < 86:
+        raise ProtocolError("eco-mode state must contain at least 86 bytes")
+    maximum = int.from_bytes(value[4:8], "little")
+    minimum = int.from_bytes(value[8:12], "little")
+    watts = int.from_bytes(value[12:16], "little")
+    if not minimum <= watts <= maximum:
+        raise ProtocolError(
+            "station reported invalid off-peak charging bounds or value"
+        )
+    return minimum, maximum, watts
+
+
 def _time_period_minutes(value: object) -> int:
     """Validate a wall-clock time with minute precision."""
     if (
@@ -959,13 +1020,24 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
             data["time_periods"] = parse_time_periods(keyed[TIME_PERIODS_KEY])
 
     if ECO_MODE_KEY in keyed:
+        eco = keyed[ECO_MODE_KEY]
+        complete = len(eco) >= 86
         # An explicit invalid/disabled record must clear previously usable state.
         # Other module snapshots can omit this key and must not clear it.
         data.update(
-            eco_available=(
-                keyed[ECO_MODE_KEY][0] == 1
-                if len(keyed[ECO_MODE_KEY]) >= 86 else None
-            ),
+            eco_available=eco[0] == 1 if complete else None,
+            energy_saver_mode=_energy_saver_mode(eco),
+            eco_grid_mode=eco[16] if complete else None,
+            eco_meter_linked=_eco_meter_linked(eco) if complete else None,
+            # DJI Home shows these switches, and Auto Resume, on only for 1.
+            peak_discharge_enabled=eco[2] == 1 if complete else None,
+            off_peak_charge_enabled=eco[3] == 1 if complete else None,
+            off_peak_charge_power_available=False,
+            off_peak_charge_power_w=None,
+            off_peak_charge_power_min_w=None,
+            off_peak_charge_power_max_w=None,
+            meter_phase=None,
+            auto_resume_enabled=None,
             power_adjustment=None,
             charge_power_available=False,
             charge_power_min_w=None,
@@ -976,6 +1048,19 @@ def parse_telemetry(payload: bytes) -> dict[str, object]:
             discharge_power_max_w=None,
             discharge_power_w=None,
         )
+        with contextlib.suppress(ProtocolError):
+            minimum, maximum, watts = _parse_off_peak_charge_power(eco)
+            data.update(
+                off_peak_charge_power_available=True,
+                off_peak_charge_power_min_w=minimum,
+                off_peak_charge_power_max_w=maximum,
+                off_peak_charge_power_w=watts,
+            )
+        if (offset := eco_tail_offset(eco)) is not None:
+            data["meter_phase"] = METER_PHASES.get(
+                int.from_bytes(eco[offset : offset + 2], "little")
+            )
+            data["auto_resume_enabled"] = eco[offset + 6] == 1
         with contextlib.suppress(ProtocolError):
             data["power_adjustment"] = _parse_power_adjustment(keyed[ECO_MODE_KEY])
         try:
@@ -1515,16 +1600,112 @@ def build_power_adjustment_set_payload(
         raise ProtocolError("power adjustment must be Manual or Automatic")
     value = _eco_mode_bytes(current_value)
     _parse_power_adjustment(value)
-    if mode == "Automatic":
-        try:
-            meter_linked = bool(value[42:79].split(b"\x00", 1)[0].decode("utf-8"))
-        except UnicodeDecodeError:
-            meter_linked = False
-        if not meter_linked:
-            raise ProtocolError(
-                "link a smart meter in DJI Home before selecting Automatic"
-            )
+    if mode == "Automatic" and not _eco_meter_linked(value):
+        raise ProtocolError(
+            "link a smart meter in DJI Home before selecting Automatic"
+        )
     value[17] = 1 if mode == "Automatic" else 2
+    return build_keyed_set_payload(
+        [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+def build_energy_saver_mode_set_payload(
+    current_value: str | bytes,
+    mode: str,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Select an Energy Saver mode, changing only `mode` and `grid_mode`.
+
+    As in DJI Home, any current mode can be replaced and leaving a grid-tied
+    mode keeps `grid_mode`. A grid-tied mode needs a `grid_mode` that only DJI
+    Home's grid-tied setup writes (2 or 3); Max Self-Consumption also needs a
+    linked meter.
+    """
+    if mode not in ENERGY_SAVER_MODES:
+        raise ProtocolError(
+            "energy saver mode must be one of " + ", ".join(ENERGY_SAVER_MODES)
+        )
+    value = _eco_mode_bytes(current_value)
+    if len(value) < 86:
+        raise ProtocolError("eco-mode state must contain at least 86 bytes")
+    if mode in GRID_TIED_MODES:
+        if value[16] not in (2, 3):
+            raise ProtocolError(
+                "set up a grid-tied mode in DJI Home before selecting it here"
+            )
+        if mode == "self_consumption" and not _eco_meter_linked(value):
+            raise ProtocolError(
+                "link a smart meter in DJI Home before selecting "
+                "Max Self-Consumption"
+            )
+        value[1] = 3
+        value[16] = GRID_TIED_MODES.index(mode) + 2
+    else:
+        value[1] = ENERGY_SAVER_MODES.index(mode) + 1
+    return build_keyed_set_payload(
+        [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+def build_auto_resume_set_payload(
+    current_value: str | bytes,
+    enabled: bool,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Change only Auto Resume in a record whose layout is known."""
+    value = _eco_mode_bytes(current_value)
+    offset = eco_tail_offset(value)
+    if offset is None:
+        raise ProtocolError("station reported an eco-mode record of unknown length")
+    value[offset + 6] = 1 if enabled else 2
+    return build_keyed_set_payload(
+        [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+# Scheduled Periods switches: Discharge During Peak, Charge During Off-Peak.
+SCHEDULED_SWITCH_OFFSETS = {"peak_discharge": 2, "off_peak_charge": 3}
+
+
+def build_scheduled_switch_set_payload(
+    current_value: str | bytes,
+    switch: str,
+    enabled: bool,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Change only one Scheduled Periods switch, preserving the mode."""
+    offset = SCHEDULED_SWITCH_OFFSETS.get(switch)
+    if offset is None:
+        raise ProtocolError("unknown Scheduled Periods switch")
+    value = _eco_mode_bytes(current_value)
+    if len(value) < 86:
+        raise ProtocolError("eco-mode state must contain at least 86 bytes")
+    value[offset] = 1 if enabled else 2
+    return build_keyed_set_payload(
+        [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
+
+
+def build_off_peak_charge_power_set_payload(
+    current_value: str | bytes,
+    watts: int,
+    *,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Change only off-peak charging watts within the reported bounds."""
+    if type(watts) is not int:
+        raise ProtocolError("off-peak charging power must be a whole number of watts")
+    value = _eco_mode_bytes(current_value)
+    minimum, maximum, _ = _parse_off_peak_charge_power(value)
+    if not minimum <= watts <= maximum:
+        raise ProtocolError(
+            f"off-peak charging power must be between {minimum} and {maximum} watts"
+        )
+    value[12:16] = watts.to_bytes(4, "little")
     return build_keyed_set_payload(
         [(ECO_MODE_KEY, bytes(value)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )

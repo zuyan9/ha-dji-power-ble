@@ -27,6 +27,8 @@ from .duml import (
     EXPANSION_BATTERIES_KEY,
     GATT_LAYOUTS,
     GET_COMMAND,
+    GRID_TIED_MODES,
+    GRID_TIED_RULE,
     HMS_COMMAND,
     POWER_1000_ENCRYPTION_TYPE,
     POWER_COMMAND_SET,
@@ -41,14 +43,18 @@ from .duml import (
     DumlPacket,
     DumlStream,
     ProtocolError,
+    build_auto_resume_set_payload,
     build_car_charger_set_payload,
     build_charge_limits_set_payload,
     build_charge_power_set_payload,
     build_discharge_power_set_payload,
     build_energy_reserve_set_payload,
+    build_energy_saver_mode_set_payload,
     build_keyed_set_payload,
+    build_off_peak_charge_power_set_payload,
     build_port_switch_set_payload,
     build_power_adjustment_set_payload,
+    build_scheduled_switch_set_payload,
     build_time_periods_set_payload,
     decrypt_power_1000_payload,
     encrypt_power_1000_payload,
@@ -66,6 +72,7 @@ from .features import (
     eligible_port_switches,
     feature_available,
     is_known_model,
+    station_rule_enabled,
     supports_feature,
 )
 
@@ -110,6 +117,11 @@ _RULES_INVALIDATION = {
     "station_rules": None,
     "car_auto_threshold": None,
     "port_switches_offered": None,
+}
+# Everything decoded from key 0x18 is cleared as for an explicit empty record.
+_ECO_MODE_INVALIDATION = {
+    **parse_telemetry(build_keyed_set_payload([(ECO_MODE_KEY, b"")])),
+    "key_18": None,
 }
 
 
@@ -811,6 +823,14 @@ class DjiPowerDevice:
                 raise
             except DjiPowerError as error:
                 _LOGGER.debug("Backup reserve configuration unavailable: %s", error)
+        # Keep the Energy Saver mode current on stations that reported key 0x18.
+        if ECO_MODE_KEY in (self.data.get("discovery_keys") or ()):
+            try:
+                await self._read_eco_mode()
+            except DjiPowerDisconnectedError:
+                raise
+            except DjiPowerError as error:
+                _LOGGER.debug("Energy Saver configuration unavailable: %s", error)
 
     @staticmethod
     def _config_invalidation(keys: tuple[int, ...]) -> dict[str, object]:
@@ -972,21 +992,7 @@ class DjiPowerDevice:
         except (DjiPowerError, BleakError, EOFError, TimeoutError) as error:
             if not self.is_connected:
                 raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
-            self._merge_data(
-                {
-                    "key_18": None,
-                    "eco_available": None,
-                    "power_adjustment": None,
-                    "charge_power_available": False,
-                    "charge_power_w": None,
-                    "charge_power_min_w": None,
-                    "charge_power_max_w": None,
-                    "discharge_power_available": False,
-                    "discharge_power_w": None,
-                    "discharge_power_min_w": None,
-                    "discharge_power_max_w": None,
-                }
-            )
+            self._merge_data(_ECO_MODE_INVALIDATION)
             raise DjiPowerError(str(error)) from error
         return current
 
@@ -1444,3 +1450,91 @@ class DjiPowerDevice:
         await self._read_station_rules()
         if not feature_available(self.data, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError("the station does not offer Time of Use power control")
+
+    async def set_energy_saver_mode(self, mode: str) -> None:
+        """Select an offered Energy Saver mode and confirm its readback."""
+        if not supports_feature(self.model, ModelFeature.ENERGY_SAVER):
+            raise DjiPowerError("Energy Saver control is not supported on this model")
+        async with self._operation_lock:
+            current = await self._read_eco_mode()
+            await self._read_station_rules()
+            if not feature_available(self.data, ModelFeature.ENERGY_SAVER):
+                raise DjiPowerError("the station does not offer Energy Saver modes")
+            if self.data.get("energy_saver_mode") == mode:
+                return
+            if mode in GRID_TIED_MODES and not station_rule_enabled(
+                self.data, GRID_TIED_RULE
+            ):
+                raise DjiPowerError("the station does not offer grid-tied modes")
+            # DJI Home requires price periods for both scheduled modes.
+            if mode in ("scheduled", "time_of_use") and not (
+                await self._read_time_periods()
+            ):
+                raise DjiPowerError(
+                    "set electricity price time periods before selecting this mode"
+                )
+            try:
+                payload = build_energy_saver_mode_set_payload(current, mode)
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
+            await self._wait_for_eco_mode_values({"energy_saver_mode": mode})
+
+    async def _edit_eco_mode(
+        self,
+        feature: ModelFeature,
+        name: str,
+        build: Callable[[str], bytes],
+        expected: dict[str, object],
+        *,
+        require_periods: bool = False,
+    ) -> None:
+        """Change fields of a fresh eco record once fresh rules offer them."""
+        if not supports_feature(self.model, feature):
+            raise DjiPowerError(f"{name} control is not supported on this model")
+        async with self._operation_lock:
+            current = await self._read_eco_mode()
+            await self._read_station_rules()
+            if not feature_available(self.data, feature):
+                raise DjiPowerError(f"the station does not offer {name}")
+            if require_periods and not await self._read_time_periods():
+                raise DjiPowerError(
+                    "set electricity price time periods before enabling this"
+                )
+            try:
+                payload = build(current)
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
+            await self._wait_for_eco_mode_values(expected)
+
+    async def set_auto_resume(self, enabled: bool) -> None:
+        """Set Energy Saver Auto Resume and confirm its readback."""
+        await self._edit_eco_mode(
+            ModelFeature.AUTO_RESUME,
+            "Auto Resume",
+            lambda current: build_auto_resume_set_payload(current, enabled),
+            {"auto_resume_enabled": enabled},
+        )
+
+    async def set_scheduled_switch(self, switch: str, enabled: bool) -> None:
+        """Set one Scheduled Periods switch and confirm its readback."""
+        # DJI Home turns these on only while price periods exist.
+        await self._edit_eco_mode(
+            ModelFeature.SCHEDULED_CONTROLS,
+            "Scheduled Periods controls",
+            lambda current: build_scheduled_switch_set_payload(
+                current, switch, enabled
+            ),
+            {f"{switch}_enabled": enabled},
+            require_periods=enabled,
+        )
+
+    async def set_off_peak_charge_power(self, watts: int) -> None:
+        """Set Scheduled Periods off-peak charging watts and confirm them."""
+        await self._edit_eco_mode(
+            ModelFeature.SCHEDULED_CONTROLS,
+            "Scheduled Periods controls",
+            lambda current: build_off_peak_charge_power_set_payload(current, watts),
+            {"off_peak_charge_power_w": watts},
+        )

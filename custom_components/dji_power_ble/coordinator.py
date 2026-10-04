@@ -257,6 +257,38 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
+    async def async_set_energy_saver_mode(self, mode: str) -> None:
+        """Select an Energy Saver mode and publish its confirmed readback."""
+        try:
+            await self.device.set_energy_saver_mode(mode)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
+    async def async_set_auto_resume(self, enabled: bool) -> None:
+        """Set Energy Saver Auto Resume and publish its confirmed readback."""
+        try:
+            await self.device.set_auto_resume(enabled)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
+    async def async_set_scheduled_switch(self, switch: str, enabled: bool) -> None:
+        """Set a Scheduled Periods switch and publish its confirmed readback."""
+        try:
+            await self.device.set_scheduled_switch(switch, enabled)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
+    async def async_set_off_peak_charge_power(self, watts: int) -> None:
+        """Set off-peak charging watts and publish their confirmed readback."""
+        try:
+            await self.device.set_off_peak_charge_power(watts)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
     async def async_get_time_periods(self) -> list[dict[str, object]]:
         """Read tariff periods for editing and publish the fresh station state."""
         try:

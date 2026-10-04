@@ -59,9 +59,19 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
                 }
                 for listener in listeners:
                     listener()
-                entities = add_entities.call_args.args[0]
-                self.assertEqual(len(entities), 1)
-                self.assertIsInstance(entities[0], select.DjiPowerAdjustmentSelect)
+                # The Energy Saver page gate also adds its mode selector.
+                added = [
+                    entity for call_ in add_entities.call_args_list
+                    for entity in call_.args[0]
+                ]
+                self.assertEqual(
+                    [type(entity) for entity in added],
+                    [
+                        select.DjiPowerEnergySaverModeSelect,
+                        select.DjiPowerAdjustmentSelect,
+                    ],
+                )
+                entities = added[1:]
                 self.assertTrue(entities[0].available)
                 self.coordinator.data["station_rules"] = None
                 self.assertFalse(entities[0].available)
@@ -69,7 +79,7 @@ class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
                 for listener in listeners:
                     listener()
                 self.assertTrue(entities[0].available)
-                add_entities.assert_called_once()
+                self.assertEqual(add_entities.call_count, 2)
 
     def test_reported_mode_updates_without_watt_bounds(self) -> None:
         for mode in ("Manual", "Automatic", "Manual"):

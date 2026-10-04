@@ -191,7 +191,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.entities), 2)  # Only limits precede discovery.
         self.assertEqual(self._accessories(), [])
         # Port, accessory, reserve and Eco discovery unsubscribe on unload.
-        self.assertEqual(len(self.coordinator.listeners), 9)
+        self.assertEqual(len(self.coordinator.listeners), 13)
         self.coordinator.publish(
             {
                 "car_chargers": [None, {}, _car(type=99), _car(seq=True), _car(sw=0)],
@@ -377,7 +377,7 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             "station_rules": [11],
         }
         await self._setup()
-        self.assertEqual(len(self.coordinator.listeners), 9)
+        self.assertEqual(len(self.coordinator.listeners), 13)
         self.assertIn("SDC 1 power", [e._attr_name for e in self._accessories()])
         self.assertIn(
             "SDC 1 car recharging", [e._attr_name for e in self._accessories()]

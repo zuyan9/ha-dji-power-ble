@@ -44,6 +44,10 @@ async def async_setup_entry(
             DjiPowerChargePowerNumber(coordinator),
         ],
     )
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.SCHEDULED_CONTROLS,
+        lambda: [DjiPowerOffPeakChargePowerNumber(coordinator)],
+    )
     async_discover_backup_reserve(
         coordinator,
         entry,
@@ -183,6 +187,7 @@ class _DjiPowerWattNumber(DjiPowerEntity, NumberEntity):
     """A power setting with station-reported availability and limits."""
 
     _key: str
+    _feature = ModelFeature.TOU_POWER_CONTROL
     _attr_entity_category = EntityCategory.CONFIG
     _attr_device_class = NumberDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.WATT
@@ -203,7 +208,7 @@ class _DjiPowerWattNumber(DjiPowerEntity, NumberEntity):
         value = self.native_value
         return (
             super().available
-            and feature_available(data, ModelFeature.TOU_POWER_CONTROL)
+            and feature_available(data, self._feature)
             and data.get(f"{self._key}_available") is True
             and isinstance(minimum, int)
             and isinstance(maximum, int)
@@ -255,6 +260,24 @@ class DjiPowerChargePowerNumber(_DjiPowerWattNumber):
                 "recharge power must be a whole number of watts"
             )
         await self.coordinator.async_set_charge_power(watts)
+
+
+class DjiPowerOffPeakChargePowerNumber(_DjiPowerWattNumber):
+    """Scheduled Periods off-peak charging power within station limits."""
+
+    _attr_translation_key = "off_peak_charge_power"
+    # DJI Home's slider moves in 10 W steps.
+    _attr_native_step = 10
+    _feature = ModelFeature.SCHEDULED_CONTROLS
+    _key = "off_peak_charge_power"
+
+    async def async_set_native_value(self, value: float) -> None:
+        watts = int(value)
+        if watts != value:
+            raise ServiceValidationError(
+                "off-peak charging power must be a whole number of watts"
+            )
+        await self.coordinator.async_set_off_peak_charge_power(watts)
 
 
 class _DjiPowerCarNumber(DjiPowerCarChargerEntity, NumberEntity):

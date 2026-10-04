@@ -1,4 +1,4 @@
-"""AC output, backup reserve, and reported USB and SDC accessory switches."""
+"""AC output, backup reserve, Energy Saver, and reported port switches."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from .accessory import (
     DjiPowerCarChargerEntity,
     async_discover_accessories,
     async_discover_backup_reserve,
+    async_discover_feature,
 )
 from .const import DOMAIN
 from .entity import DjiPowerEntity
@@ -32,6 +33,17 @@ async def async_setup_entry(
         entry,
         async_add_entities,
         lambda: [DjiPowerBackupReserveSwitch(coordinator)],
+    )
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.AUTO_RESUME,
+        lambda: [DjiPowerAutoResumeSwitch(coordinator)],
+    )
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.SCHEDULED_CONTROLS,
+        lambda: [
+            DjiPowerScheduledSwitch(coordinator, "peak_discharge"),
+            DjiPowerScheduledSwitch(coordinator, "off_peak_charge"),
+        ],
     )
     async_discover_accessories(
         coordinator,
@@ -102,6 +114,67 @@ class DjiPowerBackupReserveSwitch(DjiPowerEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_energy_reserve(enabled=False)
+
+
+class DjiPowerAutoResumeSwitch(DjiPowerEntity, SwitchEntity):
+    """Resume Energy Saver when the AC input reconnects to the household grid."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "auto_resume"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_auto_resume"
+
+    @property
+    def available(self) -> bool:
+        return super().available and feature_available(
+            self.coordinator.data or {}, ModelFeature.AUTO_RESUME
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        value = (self.coordinator.data or {}).get("auto_resume_enabled")
+        return value if isinstance(value, bool) else None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_auto_resume(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_auto_resume(False)
+
+
+class DjiPowerScheduledSwitch(DjiPowerEntity, SwitchEntity):
+    """Discharge during peak or charge during off-peak in Scheduled Periods."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, switch: str) -> None:
+        super().__init__(coordinator)
+        self._switch = switch
+        self._attr_translation_key = switch
+        self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_{switch}"
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and feature_available(
+                self.coordinator.data or {}, ModelFeature.SCHEDULED_CONTROLS
+            )
+            and self.is_on is not None
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        value = (self.coordinator.data or {}).get(f"{self._switch}_enabled")
+        return value if isinstance(value, bool) else None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_scheduled_switch(self._switch, True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_scheduled_switch(self._switch, False)
 
 
 class DjiPowerCarRechargingSwitch(DjiPowerCarChargerEntity, SwitchEntity):

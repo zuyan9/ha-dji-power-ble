@@ -75,13 +75,18 @@ limit, with eight seconds per request, and optional failures leave normal teleme
 running. Diagnostics record the returned key IDs and whether discovery completed.
 
 Car-charger settings, switch rows, accessory information, reserve, and station rules
-refresh every 30 seconds on every known model, including the Mini. Station rules also
-arrive in settings reports, which are the only source on some stations, so a GET reply
-without them keeps the last reported rules. Pack polling
+refresh every 30 seconds on every known model, including the Mini. Stations that
+returned the Eco record during discovery also refresh it every 30 seconds. Station
+rules also arrive in settings reports, which are the only source on some stations,
+so a GET reply without them keeps the last reported rules. Pack polling
 remains limited to models with expansion batteries. Entity platforms add controls
 when their records and feature-specific gates become usable. Reserve uses its
-availability flag; schedules require a valid list, Eco availability and rule 5;
-existing TOU power controls additionally require rule 6 and an active TOU setup.
+availability flag; schedules require a valid list, Eco availability and rule 5.
+The Energy Saver mode needs Eco availability and rule 5; grid-tied modes
+additionally need rule 6 and an earlier DJI Home grid-tied setup. Scheduled Periods
+controls need that mode to be active. Auto Resume and the meter phase need rule 6
+and an active grid-tied mode, plus rule 17 or a linked meter respectively. Existing
+TOU power controls require rule 6 and an active TOU setup.
 AC and car outlets need valid switch rows; SDC and USB also require rule 11.
 
 Missing or invalid snapshots make affected controls unavailable without removing
@@ -100,6 +105,10 @@ require matching fresh readback of both records.
 
 Backup reserve writes use keys `0x06` and `0x0E` and change only the requested switch
 or level after a fresh `0x06` read.
+
+Energy Saver writes use keys `0x18` and `0x0E`. Each reads a fresh `0x18` record and
+fresh station rules, then changes only the requested field; Scheduled Periods and
+Time of Use selections also require fresh, non-empty price periods from `0x16`.
 
 Port switches read the switch list inside the operation lock and use the latest
 station rules.
@@ -137,6 +146,7 @@ or raw captures containing them. Downloaded diagnostics redact the name, address
 and serial number; account passwords and member tokens are transient and are not stored.
 Expansion-pack serial numbers and the raw keyed records that carry pack, parallel-device,
 or accessory serial numbers are also redacted. Accessory serial numbers in telemetry
-reports are discarded during decoding. Raw Eco records, unknown keyed records,
-and records with identifiers are redacted; understood numeric settings remain
-available for diagnosis.
+reports are discarded during decoding. Eco records keep only their length and
+numeric settings, without the linked meter's identifier and brand. Unknown keyed
+records and records with identifiers are redacted; understood numeric settings
+remain available for diagnosis.

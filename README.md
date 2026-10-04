@@ -30,11 +30,11 @@ used only during setup to retrieve the device's local credential.
   - Discharge and recharge limit
   - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
   - SDC accessory [info and controls](docs/accessory-controls.md)
-  - Individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs),
-    where the station offers them
-  - Car-outlet switches, where reported
-  - Discharge/recharge watts and [electricity price periods](docs/time-periods.md),
-    where station configuration and rules offer them
+  - Individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs), car-outlet switches, where reported
+  - [Energy Saver](docs/energy-saver.md) mode, Scheduled Periods controls and
+    auto resume, plus Time of Use discharge/recharge watts and
+    [electricity price periods](docs/time-periods.md), where station
+    configuration and rules offer them
 
 
 ## Requirements

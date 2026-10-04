@@ -2,7 +2,15 @@
 
 from enum import StrEnum
 
-from .duml import MODEL_NAMES, PORT_SWITCH_RULE
+from .duml import (
+    AUTO_RESUME_RULE,
+    ENERGY_SAVER_MODES,
+    ENERGY_SAVER_RULE,
+    GRID_TIED_MODES,
+    GRID_TIED_RULE,
+    MODEL_NAMES,
+    PORT_SWITCH_RULE,
+)
 
 
 class ModelFeature(StrEnum):
@@ -10,6 +18,10 @@ class ModelFeature(StrEnum):
 
     TARIFF_SCHEDULE = "tariff_schedule"
     TOU_POWER_CONTROL = "tou_power_control"
+    ENERGY_SAVER = "energy_saver"
+    SCHEDULED_CONTROLS = "scheduled_controls"
+    AUTO_RESUME = "auto_resume"
+    METER_PHASE = "meter_phase"
     SDC_CONTROLS = "sdc_controls"
     USB_CONTROLS = "usb_controls"
     RESERVE_CONTROL = "reserve_control"
@@ -45,21 +57,79 @@ def feature_available(data: dict, feature: ModelFeature) -> bool:
     if feature == ModelFeature.TARIFF_SCHEDULE:
         return (
             isinstance(data.get("time_periods"), list)
-            and data.get("eco_available") is True
-            and station_rule_enabled(data, 5)
+            and _energy_saver_offered(data)
         )
     if feature == ModelFeature.TOU_POWER_CONTROL:
         return (
-            data.get("eco_available") is True
-            and station_rule_enabled(data, 5)
-            and station_rule_enabled(data, 6)
+            _energy_saver_offered(data)
+            and station_rule_enabled(data, GRID_TIED_RULE)
             and data.get("power_adjustment") in ("Manual", "Automatic")
+        )
+    if feature == ModelFeature.ENERGY_SAVER:
+        return _energy_saver_offered(data)
+    if feature == ModelFeature.SCHEDULED_CONTROLS:
+        return (
+            _energy_saver_offered(data)
+            and data.get("energy_saver_mode") == "scheduled"
+        )
+    if feature == ModelFeature.AUTO_RESUME:
+        return (
+            _grid_tied_section(data)
+            and station_rule_enabled(data, AUTO_RESUME_RULE)
+            and isinstance(data.get("auto_resume_enabled"), bool)
+        )
+    if feature == ModelFeature.METER_PHASE:
+        # DJI Home shows the phase while the meter steers the station.
+        return (
+            _grid_tied_section(data)
+            and (
+                data.get("energy_saver_mode") == "self_consumption"
+                or data.get("power_adjustment") == "Automatic"
+            )
+            and data.get("eco_meter_linked") is True
+            and data.get("meter_phase") is not None
         )
     if feature == ModelFeature.USB_CONTROLS:
         return any(port[0] in (3, 4) for port in eligible_port_switches(data))
     if feature == ModelFeature.SDC_CONTROLS:
         return any(port[0] in (5, 6) for port in eligible_port_switches(data))
     return False
+
+
+def _energy_saver_offered(data: dict) -> bool:
+    """Apply DJI Home's Energy Saver page gate: eco `available` and rule 5."""
+    return data.get("eco_available") is True and station_rule_enabled(
+        data, ENERGY_SAVER_RULE
+    )
+
+
+def _grid_tied_section(data: dict) -> bool:
+    """Apply DJI Home's gate for its section shown in a grid-tied mode."""
+    return (
+        _energy_saver_offered(data)
+        and station_rule_enabled(data, GRID_TIED_RULE)
+        and data.get("energy_saver_mode") in GRID_TIED_MODES
+    )
+
+
+def energy_saver_options(data: dict) -> list[str]:
+    """Return the selectable Energy Saver modes, in DJI Home's order.
+
+    Disable and Scheduled Periods are always offered with the page. Grid-tied
+    modes need rule 6 and a `grid_mode` that only DJI Home's grid-tied setup
+    writes (2 or 3); Max Self-Consumption also needs a linked meter. The active
+    mode is always included.
+    """
+    if not feature_available(data, ModelFeature.ENERGY_SAVER):
+        return []
+    offered = {"disabled", "scheduled", data.get("energy_saver_mode")}
+    if station_rule_enabled(data, GRID_TIED_RULE) and data.get(
+        "eco_grid_mode"
+    ) in (2, 3):
+        offered.add("time_of_use")
+        if data.get("eco_meter_linked") is True:
+            offered.add("self_consumption")
+    return [mode for mode in ENERGY_SAVER_MODES if mode in offered]
 
 
 def eligible_port_switches(data: dict) -> dict[tuple[int, int], dict]:
