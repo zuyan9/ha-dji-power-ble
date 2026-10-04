@@ -51,8 +51,9 @@ DJI Home itself switches to a grid-tied mode only while it reaches the station
 through DJI's cloud, which it uses for status notifications; over Bluetooth it
 refuses. The integration writes over Bluetooth, which DJI Home never does for these
 modes, so a station could refuse; the integration then reports that the station did
-not apply the change. Smart-meter readings likely reach the station through the
-cloud as well, so keep the station online while a grid-tied mode is selected.
+not apply the change. DJI Home links a smart meter through the cloud, but the
+readings likely reach the station over the local network.Whether a grid-tied
+mode keeps working without internet access is not known.
 
 The station's active mode is always listed. If the station reports a mode that DJI
 Home does not label, the selector shows no option, and choosing one replaces it, as
