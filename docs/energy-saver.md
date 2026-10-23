@@ -82,22 +82,33 @@ still applies.
 Use it at your own risk. On a Power 2000, below its minimum:
 
 - the station keeps charging at the value you set, but within seconds reports the
-  midpoint of its range instead (1450 W for 600–2300 W), and **Recharge power** then
-  shows that midpoint;
-- the charger stopped charging below about 230 W.
+  midpoint of its range instead (1450 W for 600–2300 W);
+- the charger stopped charging below about 230 W, or when the value was less than
+  about 200 W above the station's output.
 
-The integration accepts either value as confirmation of the change. Because the
-station keeps the midpoint as its setting, any other Energy Saver change from Home
-Assistant or DJI Home sends the midpoint back, and the station may apply it again by
-itself, for example at a period change or after a restart. Automations that use a
-lower value should set it again after such changes. A firmware update could change
-this behavior.
+While the station reports either value, **Recharge power** shows the value you set,
+and other Energy Saver changes from Home Assistant keep it rather than sending the
+midpoint back. The station still keeps the midpoint as its setting, though: a change
+in DJI Home sends the midpoint back, and the station may apply it by itself, for
+example at a period change or after a restart, which Home Assistant cannot detect.
+Setting the same value again therefore still reaches the station, at most once a
+minute, so automations can repeat it, for example at the start of each charge
+period. Home Assistant shows the station's value again once the station reports
+another value, the minimum is cleared or raised above the value, or Home Assistant
+restarts or reconnects. A firmware update could change this behavior.
 
 ## Writes
 
 Every change reads the station's current Energy Saver record and rules, changes only
 the requested field, and preserves every other setting. Selecting a mode changes only
 the mode and, for grid-tied modes, the grid-tied selection, as DJI Home does. The
-integration reports success only after the station reads back the new value.
+integration reports success only after the station reads back the new value. A value
+the station already reports is not written again.
+
+**Recharge power** and **Discharge power** are stored settings rather than live
+setpoints: each change rewrites the station's whole Energy Saver record. Automations
+that follow solar or grid power should change them only by meaningful steps (for
+example 25–50 W), at most every 30–60 seconds, and set **Recharge power** only in
+charge periods and **Discharge power** only in discharge periods.
 
 These controls follow DJI Home 1.6.9 and have not yet been tested on a station.

@@ -1624,6 +1624,13 @@ def charge_power_readbacks(current_value: str | bytes, watts: int) -> frozenset[
     return frozenset({watts, total // 2, (total + 1) // 2})
 
 
+def with_charge_power(current_value: str | bytes, watts: int) -> str:
+    """Return the eco-mode record with another manual recharge-power setting."""
+    value = _eco_mode_bytes(current_value)
+    value[26:30] = watts.to_bytes(4, "little")
+    return value.hex()
+
+
 def build_power_adjustment_set_payload(
     current_value: str | bytes,
     mode: str,
