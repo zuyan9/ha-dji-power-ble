@@ -40,6 +40,7 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
         )
         for name in (
             "DjiCloudError", "DjiAuthError", "DjiTwoFactorRequired", "DjiRateLimited",
+            "CODE_IMAGE_CAPTCHA_ERROR",
         ):
             self.enterContext(patch.object(flow_module, name, getattr(cloud, name)))
 
@@ -466,6 +467,43 @@ class ConfigFlowTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["pair_key"], "cd" * 16)
         self.assertNotIn("password", result["data"])
         self.assertNotIn("member_token", result["data"])
+
+    async def test_failed_sign_in_returns_to_account_form(self):
+        submitted = self.input_for("account")
+        offered = {key: value for key, value in submitted.items() if key != "password"}
+        for error in (
+            cloud.DjiAuthError(1, "wrong password"), cloud.DjiCloudError("offline"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                flow = self.flow()
+                await flow.async_step_account(submitted)
+                self.client.login.side_effect = [error, "US_synthetic"]
+                result = await flow.async_step_captcha({"captcha_code": "code"})
+                self.assertEqual(result["step_id"], "account")
+                self.assertEqual(result["errors"], {"base": "login_failed"})
+                self.assertEqual(flow.suggested, offered)
+
+                corrected = {**submitted, "password": "corrected"}
+                result = await flow.async_step_account(corrected)
+                self.assertEqual(result["step_id"], "captcha")
+                result = await flow.async_step_captcha({"captcha_code": "code"})
+                self.assertEqual(result["type"], "create_entry")
+                self.client.login.assert_awaited_with(
+                    "test@example.invalid", "corrected", "ticket"
+                )
+
+    async def test_wrong_captcha_code_shows_a_new_captcha(self):
+        flow = self.flow()
+        await flow.async_step_account(self.input_for("account"))
+        self.client.exchange_image_captcha.side_effect = [
+            cloud.DjiAuthError(cloud.CODE_IMAGE_CAPTCHA_ERROR, "wrong"), "ticket",
+        ]
+        result = await flow.async_step_captcha({"captcha_code": "wrong"})
+        self.assertEqual(result["step_id"], "captcha")
+        self.assertEqual(result["errors"], {"base": "invalid_code"})
+        self.assertEqual(self.client.get_image_captcha.await_count, 2)
+        result = await flow.async_step_captcha({"captcha_code": "code"})
+        self.assertEqual(result["type"], "create_entry")
 
     async def test_twofa_success_preserves_password_exactly(self):
         flow = self.flow()
