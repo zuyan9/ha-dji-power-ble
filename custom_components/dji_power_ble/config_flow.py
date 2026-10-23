@@ -167,6 +167,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         self._name: str | None = None
         self._email: str | None = None
         self._password: str | None = None
+        self._account_input: dict[str, Any] | None = None
         self._client: DjiCloudClient | None = None
         self._captcha_ticket: str | None = None
         self._token: str | None = None
@@ -394,8 +395,18 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             if not self._password.strip():
                 errors[CONF_PASSWORD] = "password_required"
             if not errors:
+                # Offered again, without the password, if sign-in fails.
+                self._account_input = {
+                    key: value
+                    for key, value in user_input.items()
+                    if key != CONF_PASSWORD
+                }
                 return await self.async_step_captcha()
+        return self._show_account_form(user_input, errors)
 
+    def _show_account_form(
+        self, suggested: dict[str, Any] | None, errors: dict[str, str]
+    ) -> FlowResult:
         schema = vol.Schema(
             {
                 **self._address_schema_part(),
@@ -408,7 +419,7 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(
             step_id="account",
-            data_schema=self.add_suggested_values_to_schema(schema, user_input),
+            data_schema=self.add_suggested_values_to_schema(schema, suggested),
             errors=errors,
         )
 
@@ -418,7 +429,8 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
         """Show DJI's image captcha inline; the user types the characters.
 
         DJI serves a plain image captcha (no Google, no domain lock), so it can be
-        rendered directly in the config flow. A wrong code just reloads a new image.
+        rendered directly in the config flow. A wrong code just reloads a new image;
+        a failed sign-in returns to the account form to correct the credentials.
         """
         if (
             _normalize_address(self._address) is None
@@ -452,10 +464,14 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "invalid_code"
                 else:
                     _LOGGER.warning("DJI login failed: %s", err)
-                    errors["base"] = "login_failed"
+                    return self._show_account_form(
+                        self._account_input, {"base": "login_failed"}
+                    )
             except DjiCloudError as err:
                 _LOGGER.warning("DJI login failed: %s", err)
-                errors["base"] = "login_failed"
+                return self._show_account_form(
+                    self._account_input, {"base": "login_failed"}
+                )
             if not errors:
                 return await self.async_step_finish()
 
