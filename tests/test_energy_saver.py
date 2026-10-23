@@ -599,6 +599,15 @@ class EnergySaverDeviceTests(unittest.IsolatedAsyncioTestCase):
         await self.device.set_energy_saver_mode("self_consumption")
         self.assertEqual(self.client.requests, [GET_ECO, GET_RULES])
 
+    async def test_unchanged_settings_are_not_rewritten(self) -> None:
+        await self.device.set_auto_resume(True)
+        self.client.values[0x18] = eco_record(mode=2, peak=1, valley=2)
+        await self.device.set_scheduled_switch("peak_discharge", True)
+        await self.device.set_scheduled_switch("off_peak_charge", False)
+        await self.device.set_off_peak_charge_power(800)
+        self.assert_not_written()
+        self.sleep.assert_not_awaited()
+
     async def test_fresh_station_state_decides_each_mode(self) -> None:
         for record, rules, mode, message in (
             (eco_record(), rules_record(6, 17), "disabled", "Energy Saver modes"),

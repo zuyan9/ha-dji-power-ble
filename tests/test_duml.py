@@ -1002,6 +1002,15 @@ class ChargePowerMinimumTests(unittest.TestCase):
         odd = _charge_power(SYNTHETIC_ECO_MODE, 1200, 101, 500)
         self.assertEqual(duml.charge_power_readbacks(odd, 80), {80, 650, 651})
 
+    def test_with_charge_power_replaces_only_the_setting(self) -> None:
+        reported = _charge_power(SYNTHETIC_ECO_MODE, 1200, 100, 650)
+        for current in (reported, reported.hex()):
+            with self.subTest(current=type(current).__name__):
+                self.assertEqual(
+                    duml.with_charge_power(current, 80),
+                    _charge_power(SYNTHETIC_ECO_MODE, 1200, 100, 80).hex(),
+                )
+
 
 class PowerAdjustmentTests(unittest.TestCase):
     def test_automatic_readback_clears_previous_manual_watts(self) -> None:

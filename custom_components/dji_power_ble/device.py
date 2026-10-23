@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, TypeAlias
 
@@ -67,6 +68,7 @@ from .duml import (
     parse_set_ack,
     parse_telemetry,
     validate_time_periods_mode,
+    with_charge_power,
 )
 from .features import (
     ModelFeature,
@@ -90,6 +92,9 @@ RESUME_PROBE_TIMEOUT = 3.0
 AUTHENTICATION_ATTEMPTS = 2
 READBACK_RETRIES = 8
 READBACK_RETRY_INTERVAL = 2.0
+# Minimum time before resending an unchanged recharge power below the station's
+# minimum; the station may have reverted to its midpoint without reporting it.
+BELOW_MINIMUM_RESEND_INTERVAL = 60.0
 EXPANSION_REFRESH_INTERVAL = 30.0
 CAPABILITY_DISCOVERY_TIMEOUT = 45.0
 EXPANSION_MODELS = {
@@ -194,6 +199,10 @@ class DjiPowerDevice:
         self._expansion_refresh_task: asyncio.Task[None] | None = None
         self._disconnecting = False
         self._charge_power_minimum: int | None = None
+        # A recharge power written below the station's minimum, which the station
+        # reports as its midpoint, and when a recharge power was last sent.
+        self._below_minimum_charge_power: int | None = None
+        self._charge_power_sent_at: float | None = None
         self.data: dict[str, object] = {}
 
     @property
@@ -260,6 +269,10 @@ class DjiPowerDevice:
         if watts == self._charge_power_minimum:
             return
         self._charge_power_minimum = watts
+        written = self._below_minimum_charge_power
+        if written is not None and (watts is None or written < watts):
+            # No longer allowed: show what the station reports again.
+            self._below_minimum_charge_power = None
         if isinstance(eco := self.data.get("key_18"), str):
             self._merge_data(
                 self._parse_config(
@@ -268,10 +281,22 @@ class DjiPowerDevice:
             )
 
     def _parse_config(self, payload: bytes) -> dict[str, object]:
-        """Decode a keyed record with the configured recharge-power minimum."""
-        return parse_telemetry(
+        """Decode a keyed record with the configured recharge-power minimum.
+
+        A recharge power written below the station's minimum is shown instead of
+        the midpoint the station reports, until it reports another value.
+        """
+        update = parse_telemetry(
             payload, charge_power_minimum=self._charge_power_minimum
         )
+        written = self._below_minimum_charge_power
+        if written is not None and isinstance(eco := update.get("key_18"), str):
+            if update.get("charge_power_w") in charge_power_readbacks(eco, written):
+                update["charge_power_w"] = written
+            else:
+                # Replaced, for example from DJI Home or by a mode change.
+                self._below_minimum_charge_power = None
+        return update
 
     def _merge_data(self, update: dict[str, object]) -> None:
         if "battery_time_type" in update or "input_w" in update:
@@ -1001,7 +1026,11 @@ class DjiPowerDevice:
         return update
 
     async def _read_eco_mode(self) -> str:
-        """Require a fresh eco-mode record rather than reusing cached settings."""
+        """Require a fresh eco-mode record rather than reusing cached settings.
+
+        A recharge power written below the station's minimum replaces the midpoint
+        the station reports, so that editing other fields does not send it back.
+        """
         try:
             async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
                 update = await self._read_config(ECO_MODE_KEY, require_complete=True)
@@ -1017,6 +1046,8 @@ class DjiPowerDevice:
                 raise DjiPowerDisconnectedError("Bluetooth connection lost") from error
             self._merge_data(_ECO_MODE_INVALIDATION)
             raise DjiPowerError(str(error)) from error
+        if self._below_minimum_charge_power is not None:
+            current = with_charge_power(current, self._below_minimum_charge_power)
         return current
 
     async def _read_charge_limits(
@@ -1129,6 +1160,20 @@ class DjiPowerDevice:
             ):
                 return
         raise DjiPowerError("station did not report the requested eco-mode values")
+
+    @staticmethod
+    def _unchanged_eco_mode(current: str, payload: bytes) -> bool:
+        """Return whether an eco-mode SET would write the fresh record unchanged."""
+        return parse_keyed_values(payload)[ECO_MODE_KEY] == bytes.fromhex(current)
+
+    async def _write_eco_mode(
+        self, current: str, payload: bytes, *expected: dict[str, object]
+    ) -> None:
+        """Write a changed eco-mode record and confirm it; skip unchanged ones."""
+        if self._unchanged_eco_mode(current, payload):
+            return
+        await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
+        await self._wait_for_eco_mode_values(*expected)
 
     async def _read_time_periods(self) -> list[dict[str, object]]:
         """Require a valid fresh schedule, including an explicit empty list."""
@@ -1425,7 +1470,10 @@ class DjiPowerDevice:
     async def set_charge_power(self, watts: int) -> None:
         """Set manual Time of Use recharge watts and require matching readback.
 
-        Below the station's minimum, the midpoint it reports instead also counts.
+        An unchanged value is not sent again, except below the station's own
+        minimum, where the station reports its midpoint instead (see
+        ``_parse_config``); there it is resent at most every
+        ``BELOW_MINIMUM_RESEND_INTERVAL``.
         """
         if not supports_feature(self.model, ModelFeature.TOU_POWER_CONTROL):
             raise DjiPowerError("charge-power control is not supported on this model")
@@ -1438,13 +1486,26 @@ class DjiPowerDevice:
                 )
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
-            await self._wait_for_eco_mode_values(
-                *(
-                    {"charge_power_available": True, "charge_power_w": readback}
-                    for readback in sorted(charge_power_readbacks(current, watts))
+            below_minimum = len(charge_power_readbacks(current, watts)) > 1
+            sent_at = self._charge_power_sent_at
+            if self._unchanged_eco_mode(current, payload) and not (
+                below_minimum
+                and (
+                    sent_at is None
+                    or time.monotonic() - sent_at >= BELOW_MINIMUM_RESEND_INTERVAL
                 )
-            )
+            ):
+                return
+            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
+            self._charge_power_sent_at = time.monotonic()
+            self._below_minimum_charge_power = watts if below_minimum else None
+            try:
+                await self._wait_for_eco_mode_values(
+                    {"charge_power_available": True, "charge_power_w": watts}
+                )
+            except DjiPowerError:
+                self._below_minimum_charge_power = None
+                raise
 
     async def set_discharge_power(self, watts: int) -> None:
         """Set manual Time of Use discharge watts and require matching readback."""
@@ -1459,9 +1520,10 @@ class DjiPowerDevice:
                 payload = build_discharge_power_set_payload(current, watts)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
-            await self._wait_for_eco_mode_values(
-                {"discharge_power_available": True, "discharge_power_w": watts}
+            await self._write_eco_mode(
+                current,
+                payload,
+                {"discharge_power_available": True, "discharge_power_w": watts},
             )
 
     async def set_power_adjustment(self, mode: str) -> None:
@@ -1477,8 +1539,7 @@ class DjiPowerDevice:
                 payload = build_power_adjustment_set_payload(current, mode)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
-            await self._wait_for_eco_mode_values({"power_adjustment": mode})
+            await self._write_eco_mode(current, payload, {"power_adjustment": mode})
 
     async def _require_tou_capability(self) -> None:
         """Check fresh station rules before editing an existing TOU setup."""
@@ -1512,8 +1573,7 @@ class DjiPowerDevice:
                 payload = build_energy_saver_mode_set_payload(current, mode)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
-            await self._wait_for_eco_mode_values({"energy_saver_mode": mode})
+            await self._write_eco_mode(current, payload, {"energy_saver_mode": mode})
 
     async def _edit_eco_mode(
         self,
@@ -1540,8 +1600,7 @@ class DjiPowerDevice:
                 payload = build(current)
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
-            await self._set(payload, (ECO_MODE_KEY, RULES_KEY))
-            await self._wait_for_eco_mode_values(expected)
+            await self._write_eco_mode(current, payload, expected)
 
     async def set_auto_resume(self, enabled: bool) -> None:
         """Set Energy Saver Auto Resume and confirm its readback."""

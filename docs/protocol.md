@@ -440,7 +440,8 @@ Invalid bounds or a current value outside the bounds disable only the affected
 number. An unsupported option can lower the Recharge power minimum; see
 [Energy Saver](energy-saver.md#recharge-power-below-the-station-minimum-unsupported).
 For a write below the station's own minimum, a readback of the station's midpoint,
-(minimum + maximum) / 2, also confirms the change.
+(minimum + maximum) / 2, also confirms the change; the integration then shows the
+written value and keeps it in later eco-mode writes instead of the midpoint.
 
 The **Power adjustment** selector changes only byte 17: **Automatic** = 1,
 **Manual** = 2. It requires an existing grid-tied Time of Use configuration and
