@@ -1,12 +1,14 @@
 """Offline Energy Saver codec, capability and device checks.
 
-Records are synthetic app-schema values, not Power 2000 captures.
+Records are synthetic app-schema values, apart from the Power 2000 captures from
+issue #61.
 """
 
 from __future__ import annotations
 
 import types
 import unittest
+from itertools import pairwise
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from tests.test_accessory_entities import (
@@ -30,6 +32,37 @@ from tests.test_schedule_device import PEAK_VALUE
 from tests.test_sensor import sensor
 
 BRAND = b"brand".ljust(17, b"\x00")
+
+# Power 2000 key 0x18 in Time of Use on firmware 01.00.1500 (issue #61). The
+# reporter masked the meter ID, so a placeholder replaces it.
+POWER_2000_TOU = (
+    bytes.fromhex(
+        "01030101"  # available, mode, peak and off-peak switches
+        "fc08000058020000fc080000"  # off-peak charging max/min/setting (W)
+        "0302"  # grid-tied mode, power adjustment
+        "fc08000058020000dc050000"  # recharge max/min/setting (W)
+        "200300000a00000058020000"  # discharge max/min/setting (W)
+    )
+    + b"masked-meter-id".ljust(37, b"\x00")
+    + bytes.fromhex("0700b004000001")  # meter phase, unused, Auto Resume
+)
+
+
+def power_2000(mode: int, grid_mode: int) -> bytes:
+    value = bytearray(POWER_2000_TOU)
+    value[1], value[16] = mode, grid_mode
+    return bytes(value)
+
+
+# Each mode change in issue #61 changed only bytes 1 and 16. In order: four
+# modes selected in DJI Home, then Scheduled periods selected over BLE.
+POWER_2000_CAPTURES = (
+    ("scheduled", power_2000(2, 2)),
+    ("self_consumption", power_2000(3, 2)),
+    ("time_of_use", power_2000(3, 3)),
+    ("disabled", power_2000(1, 3)),
+    ("scheduled", power_2000(2, 3)),
+)
 
 
 def eco_record(
@@ -361,6 +394,36 @@ class EnergySaverBuildTests(unittest.TestCase):
             duml.build_off_peak_charge_power_set_payload(
                 eco_record(off_peak=(100, 200, 150)), 150
             )
+
+
+class Power2000CaptureTests(unittest.TestCase):
+    """Records a Power 2000 reported after each mode change (issue #61)."""
+
+    def test_captures_decode(self) -> None:
+        for mode, record in POWER_2000_CAPTURES:
+            with self.subTest(mode=mode, grid_mode=record[16]):
+                parsed = decode(record)
+                self.assertEqual(parsed["energy_saver_mode"], mode)
+                self.assertEqual(parsed["meter_phase"], "abc")
+                self.assertIs(parsed["auto_resume_enabled"], True)
+                # Manual watts are offered only in Time of Use.
+                self.assertIs(
+                    parsed["charge_power_available"], mode == "time_of_use"
+                )
+        parsed = decode(POWER_2000_TOU)
+        for name, expected in (
+            ("off_peak_charge", (600, 2300, 2300)),
+            ("charge", (600, 2300, 1500)),
+            ("discharge", (10, 800, 600)),
+        ):
+            keys = (f"{name}_power_min_w", f"{name}_power_max_w", f"{name}_power_w")
+            self.assertEqual(tuple(parsed[key] for key in keys), expected, name)
+
+    def test_mode_writes_match_the_next_capture(self) -> None:
+        for (_, current), (mode, reported) in pairwise(POWER_2000_CAPTURES):
+            with self.subTest(mode=mode, grid_mode=reported[16]):
+                payload = duml.build_energy_saver_mode_set_payload(current, mode)
+                self.assertEqual(sent_record(payload), reported)
 
 
 def offered(**changes) -> dict[str, object]:
