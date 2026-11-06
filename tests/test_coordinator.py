@@ -634,3 +634,112 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             coordinator_module.UpdateFailed, "invalid auth challenge"
         ):
             await self.coordinator._async_update_data()
+
+
+class BluetoothSourceTests(unittest.IsolatedAsyncioTestCase):
+    """The connection's adapter or proxy comes from HA's slot allocations."""
+
+    def setUp(self) -> None:
+        self.allocations: list[types.SimpleNamespace] = []
+        self.callbacks: list = []
+        self.unsubscribe = Mock()
+        manager = types.SimpleNamespace(
+            async_current_allocations=lambda: list(self.allocations),
+            async_register_allocation_callback=self.register,
+        )
+        proxy = types.SimpleNamespace(source="PROXY", name="bt-proxy (PROXY)")
+        adapter = types.SimpleNamespace(source="HCI", name="hci0 (HCI)")
+        # The last advertisement each scanner received before the connection.
+        seen = [
+            types.SimpleNamespace(
+                scanner=adapter, advertisement=types.SimpleNamespace(rssi=-50)
+            ),
+            types.SimpleNamespace(
+                scanner=proxy, advertisement=types.SimpleNamespace(rssi=-63)
+            ),
+        ]
+        self.bluetooth = _module(
+            "homeassistant.components.bluetooth",
+            async_scanner_by_source=lambda hass, source: {
+                "PROXY": proxy, "HCI": adapter
+            }.get(source),
+            async_scanner_devices_by_address=Mock(return_value=seen),
+        )
+        self.enterContext(patch.dict(sys.modules, {
+            "habluetooth": _module("habluetooth", get_manager=lambda: manager),
+            "homeassistant.components": _module(
+                "homeassistant.components", bluetooth=self.bluetooth
+            ),
+            "homeassistant.components.bluetooth": self.bluetooth,
+        }))
+        self.hass = types.SimpleNamespace(loop=Mock())
+        self.device = types.SimpleNamespace(
+            address="aa:bb:cc:dd:ee:ff",
+            data={},
+            add_state_listener=Mock(),
+            add_disconnect_listener=Mock(),
+            connect=AsyncMock(),
+            set_charge_power_minimum=Mock(),
+        )
+        self.coordinator = coordinator_module.DjiPowerCoordinator(
+            self.hass,
+            types.SimpleNamespace(entry_id="station", options={}, state=LOADED),
+            self.device,
+        )
+        self.coordinator.async_update_listeners = Mock()
+
+    def register(self, callback):
+        self.callbacks.append(callback)
+        return self.unsubscribe
+
+    def allocate(self, **allocated: list[str]) -> None:
+        """Replace HA's allocations and report the change, as a proxy does."""
+        self.allocations[:] = [
+            types.SimpleNamespace(source=source, allocated=addresses)
+            for source, addresses in allocated.items()
+        ]
+        for callback in self.callbacks:
+            callback(self.allocations[-1] if self.allocations else None)
+
+    async def test_source_and_signal_are_those_of_the_connection(self) -> None:
+        self.allocate(HCI=["11:22:33:44:55:66"], PROXY=["AA:BB:CC:DD:EE:FF"])
+        await self.coordinator._async_update_data()
+
+        self.assertEqual(self.coordinator.bluetooth_source, "bt-proxy (PROXY)")
+        # The proxy's own signal, though the adapter heard the station better.
+        self.assertEqual(self.coordinator.bluetooth_rssi, -63)
+        self.bluetooth.async_scanner_devices_by_address.assert_called_with(
+            self.hass, "AA:BB:CC:DD:EE:FF", connectable=True
+        )
+        # The first refresh publishes the result itself.
+        self.coordinator.async_update_listeners.assert_not_called()
+
+    async def test_reported_allocation_changes_update_the_source(self) -> None:
+        await self.coordinator._async_update_data()
+        self.assertIsNone(self.coordinator.bluetooth_source)
+
+        for allocated, source, rssi in (
+            ({"PROXY": ["AA:BB:CC:DD:EE:FF"]}, "bt-proxy (PROXY)", -63),
+            ({"PROXY": ["AA:BB:CC:DD:EE:FF"]}, "bt-proxy (PROXY)", -63),
+            ({"HCI": ["AA:BB:CC:DD:EE:FF"]}, "hci0 (HCI)", -50),
+            # A source without a scanner or an advertisement of the station.
+            ({"OTHER": ["AA:BB:CC:DD:EE:FF"]}, "OTHER", None),
+            ({"OTHER": []}, None, None),
+        ):
+            with self.subTest(allocated=allocated):
+                self.allocate(**allocated)
+                self.assertEqual(self.coordinator.bluetooth_source, source)
+                self.assertEqual(self.coordinator.bluetooth_rssi, rssi)
+        # Unchanged allocations do not rewrite entity state.
+        self.assertEqual(self.coordinator.async_update_listeners.call_count, 4)
+
+    async def test_release_stops_following_allocations(self) -> None:
+        await self.coordinator._async_update_data()
+        await self.coordinator._async_update_data()
+        self.assertEqual(len(self.callbacks), 1)
+
+        self.coordinator.async_release_device()
+        self.unsubscribe.assert_called_once()
+        self.allocate(PROXY=["AA:BB:CC:DD:EE:FF"])
+        self.assertIsNone(self.coordinator.bluetooth_source)
+        self.coordinator.async_update_listeners.assert_not_called()

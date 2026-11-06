@@ -338,6 +338,7 @@ async def async_setup_entry(
         DjiPowerBatteryTimeSensor(coordinator, description)
         for description in BATTERY_TIME_DESCRIPTIONS
     )
+    async_add_entities([DjiPowerBluetoothSourceSensor(coordinator)])
     primary_status_added = False
 
     @callback
@@ -538,6 +539,29 @@ class DjiPowerTimePeriodsSensor(DjiPowerEntity, SensorEntity):
         if (offset := data.get("timezone_offset_min")) is not None:
             attributes["timezone_offset_min"] = offset
         return attributes
+
+
+class DjiPowerBluetoothSourceSensor(DjiPowerEntity, SensorEntity):
+    """The adapter or proxy holding the connection, and its signal at connection."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:bluetooth-connect"
+    _attr_name = "Bluetooth source"
+
+    def __init__(self, coordinator: DjiPowerCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_bluetooth_source"
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.bluetooth_source
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        # dBm from the last advertisement before connecting; not updated live.
+        return {"rssi_at_connection": self.coordinator.bluetooth_rssi}
 
 
 class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEntity):
