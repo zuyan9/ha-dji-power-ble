@@ -97,7 +97,7 @@
         "data": {
           "update_interval": "Home Assistant update interval",
           "connection_source": "Bluetooth connection source",
-          "keep_connection": "Keep connection during HA restarts and reloads"
+          "keep_connection": "Keep connection during HA restarts and reloads (local adapters only)"
         },
         "data_description": {
           "update_interval": "Set to 0 for immediate updates.",
@@ -116,7 +116,7 @@
         "data": {
           "update_interval": "Home Assistant update interval",
           "connection_source": "Bluetooth connection source",
-          "keep_connection": "Keep connection during HA restarts and reloads"
+          "keep_connection": "Keep connection during HA restarts and reloads (local adapters only)"
         },
         "data_description": {
           "update_interval": "Set to 0 for immediate updates.",

@@ -9,6 +9,17 @@ and control problems. Start with HA logs; collect BLE traffic when logs are insu
 | Direct Bluetooth discovery or communication | `scan`, then `capture` |
 | DJI Home, or comparing app behavior | Android HCI capture, then `decode` |
 
+## Station stops advertising or rejects authentication
+
+If a station that worked before is no longer found over Bluetooth ("no recent
+advertisement") or starts rejecting its pair key ("station rejected authentication
+(status=03)"), power-cycle it. This has been reported after long uptime, and
+restarting Home Assistant does not reset the station.
+
+1. Unplug the AC input and any other input.
+2. Hold the power button until the screen is completely dark; its outputs turn off.
+3. Turn the station on again. The integration reconnects when it advertises again.
+
 ## Home Assistant logs
 
 Close DJI Home app. In HA **Settings → Devices & services → DJI Power**, enable debug logging,
@@ -49,10 +60,9 @@ Changing the update interval or retention option applies immediately without
 reconnecting. Turning retention off keeps the current connection open, but later
 restarts and reloads disconnect normally.
 
-Retention may help avoid fresh authentication after long station uptime; it cannot
-repair a station that already rejects new authentication. If the connection is lost
-and authentication fails, a full restart that resets power the station's controller
-may be needed. Restarting HA alone does not reset that controller.
+Retention may help avoid fresh authentication after long station uptime, but it
+cannot fix a station that already rejects it; see
+[Station stops advertising or rejects authentication](#station-stops-advertising-or-rejects-authentication).
 
 ## Local BLE tools
 

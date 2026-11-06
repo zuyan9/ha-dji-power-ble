@@ -794,7 +794,8 @@ class DjiPowerDevice:
                 continue
             status = result_payload[:1].hex() or "missing"
             raise DjiPowerAuthenticationError(
-                f"station rejected authentication (status={status})"
+                f"station rejected authentication (status={status}); if the pair "
+                "key is right, power-cycle the station"
             )
 
     async def refresh_config(self) -> None:

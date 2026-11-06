@@ -76,6 +76,9 @@ A DJI Power station accepts only one BLE central at a time. Temporarily disable
 or unload the HA config entry when you need to use the DJI Home app via BLE in
 offline mode. The app still works via WiFi for cloud access.
 
+If a station that worked before is no longer found or rejects its pair key,
+[power-cycle it](docs/troubleshooting.md#station-stops-advertising-or-rejects-authentication).
+
 ## Technical documentation
 
 - [Architecture](docs/architecture.md)
