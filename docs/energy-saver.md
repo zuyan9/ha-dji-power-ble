@@ -52,7 +52,7 @@ through DJI's cloud, which it uses for status notifications; over Bluetooth it
 refuses. The integration writes over Bluetooth, which DJI Home never does for these
 modes, so a station could refuse; the integration then reports that the station did
 not apply the change. DJI Home links a smart meter through the cloud, but the
-readings likely reach the station over the local network.Whether a grid-tied
+readings likely reach the station over the local network. Whether a grid-tied
 mode keeps working without internet access is not known.
 
 The station's active mode is always listed. If the station reports a mode that DJI
@@ -111,4 +111,9 @@ that follow solar or grid power should change them only by meaningful steps (for
 example 25–50 W), at most every 30–60 seconds, and set **Recharge power** only in
 charge periods and **Discharge power** only in discharge periods.
 
-These controls follow DJI Home 1.6.9 and have not yet been tested on a station.
+These controls follow DJI Home 1.6.9. Tested on a Power 2000: reading every mode,
+selecting Disabled and Scheduled periods
+([#61](https://github.com/zuyan9/ha-dji-power-ble/issues/61)), and Recharge power
+and Discharge power ([#62](https://github.com/zuyan9/ha-dji-power-ble/issues/62)).
+Not yet tested: selecting a grid-tied mode, the Scheduled periods controls and Auto
+resume.

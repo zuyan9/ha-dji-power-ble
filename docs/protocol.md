@@ -378,6 +378,7 @@ derived from DJI Home; integers are little-endian:
 DJI Home 1.6.0 starts the tail at byte 79, giving an 86-byte record. DJI Home 1.6.9
 inserts the meter brand there and starts the tail at byte 96, giving 103 bytes. It
 reads longer records the same way and drops shorter ones, including 86-byte records.
+A Power 2000 on firmware 01.00.1500 reports 86 bytes.
 The integration reads the tail from a record of exactly 86 bytes or of at least 103
 bytes; with any other length, Meter phase and Auto Resume are unavailable. A record
 shorter than 86 bytes makes every Energy Saver control unavailable.
@@ -449,11 +450,14 @@ preserves both watt setpoints and all other settings. Automatic also requires a
 linked smart meter; link it in DJI Home first. Both watt numbers are available only
 in Manual with valid reported limits.
 
-The Energy Saver encoding and mode checks are derived from DJI Home. Manual
-discharge control has been reported working on Power 2000 hardware. The Energy
-Saver mode, Scheduled Periods controls, Auto Resume and meter phase have not yet
-been hardware-tested. The Power Auro 2000 Elite shares the Power 2000's app profile
-and has not been hardware-tested.
+The Energy Saver encoding and mode checks are derived from DJI Home. On a Power 2000
+on firmware 01.00.1500, each mode change in DJI Home changed only bytes 1 and 16, as
+the integration writes them, and Disabled and Scheduled periods selected over BLE
+were confirmed by readback
+([issue 61](https://github.com/zuyan9/ha-dji-power-ble/issues/61)). Manual recharge
+and discharge power have been reported working. Grid-tied selection over BLE, the
+Scheduled Periods controls, Auto Resume and meter phase are not yet hardware-tested,
+nor is the Power Auro 2000 Elite, which shares the Power 2000's app profile.
 
 ### Electricity price periods
 
