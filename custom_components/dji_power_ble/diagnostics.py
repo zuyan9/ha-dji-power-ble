@@ -52,8 +52,10 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, object]:
     """Return protocol state without exposing the local credential."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-    state = dict(coordinator.data or {})
+    # There is no coordinator while the entry reloads after a lost connection or
+    # waits to retry setup, so only the entry data and options are exported.
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    state = dict(coordinator.data or {}) if coordinator is not None else {}
     if "key_18" in state:
         state["key_18"] = _eco_mode_diagnostics(state["key_18"])
     private_keys = STATE_TO_REDACT | {
@@ -64,6 +66,6 @@ async def async_get_config_entry_diagnostics(
     return {
         "config_entry": async_redact_data(dict(entry.data), CONFIG_TO_REDACT),
         "options": async_redact_data(dict(entry.options), {CONF_CONNECTION_SOURCE}),
-        "connected": coordinator.device.is_connected,
+        "connected": coordinator is not None and coordinator.device.is_connected,
         "state": async_redact_data(state, private_keys),
     }
