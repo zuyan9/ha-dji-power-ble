@@ -59,6 +59,7 @@ POWER_SWITCH_KEY = 0x0D
 RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
+RECHARGE_MODE_KEY = 0x1E
 
 # DJI Home requests these optional configuration keys on every station model.
 APP_DISCOVERY_KEYS = (
@@ -1124,6 +1125,48 @@ def build_keyed_set_payload(
             raise ProtocolError("keyed value is too long")
         payload += bytes((key, 0x10)) + len(value).to_bytes(2, "little") + value
     return payload
+
+
+def parse_recharge_modes(value: str | bytes | None) -> dict[int, int] | None:
+    """Return {watts: rank} from the 0x1E AC recharge-speed record.
+
+    Each entry is a nested ``0x1F 0x10 len=6`` TLV holding index, watts (u32 LE)
+    and a rank; rank 1 is the selected speed. Observed on the
+    Power 1000 Mini as 500 W and 1000 W.
+    """
+    try:
+        raw = bytes.fromhex(value) if isinstance(value, str) else value
+    except ValueError:
+        return None
+    if not raw or len(raw) % 10:
+        return None
+    modes: dict[int, int] = {}
+    for offset in range(0, len(raw), 10):
+        entry = raw[offset : offset + 10]
+        if entry[:4] != b"\x1f\x10\x06\x00":
+            return None
+        watts = int.from_bytes(entry[5:9], "little")
+        if watts == 0 or watts in modes:
+            return None
+        modes[watts] = entry[9]
+    ranks = sorted(modes.values())
+    return modes if len(modes) >= 2 and ranks == list(range(1, len(modes) + 1)) else None
+
+
+def build_recharge_mode_set_payload(
+    current: str | bytes, watts: int, *, timestamp_ms: int | None = None
+) -> bytes:
+    """Rank ``watts`` first and keep the other speeds in their existing order."""
+    modes = parse_recharge_modes(current)
+    if modes is None or watts not in modes:
+        raise ProtocolError("recharge speed is not offered by the station")
+    raw = bytearray(bytes.fromhex(current) if isinstance(current, str) else current)
+    order = [watts, *sorted((w for w in modes if w != watts), key=modes.get)]
+    for offset in range(0, len(raw), 10):
+        raw[offset + 9] = order.index(int.from_bytes(raw[offset + 5 : offset + 9], "little")) + 1
+    return build_keyed_set_payload(
+        [(RECHARGE_MODE_KEY, bytes(raw)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
 
 
 def build_time_periods_set_payload(

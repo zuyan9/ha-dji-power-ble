@@ -270,6 +270,14 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
+    async def async_set_recharge_mode(self, watts: int) -> None:
+        """Select the AC recharge speed and publish its confirmed readback."""
+        try:
+            await self.device.set_recharge_mode(watts)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
     async def async_set_auto_resume(self, enabled: bool) -> None:
         """Set Energy Saver Auto Resume and publish its confirmed readback."""
         try:
