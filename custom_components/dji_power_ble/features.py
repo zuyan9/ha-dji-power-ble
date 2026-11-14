@@ -10,6 +10,7 @@ from .duml import (
     GRID_TIED_RULE,
     MODEL_NAMES,
     PORT_SWITCH_RULE,
+    parse_light,
 )
 
 
@@ -25,6 +26,7 @@ class ModelFeature(StrEnum):
     SDC_CONTROLS = "sdc_controls"
     USB_CONTROLS = "usb_controls"
     RESERVE_CONTROL = "reserve_control"
+    LIGHT_CONTROLS = "light_controls"
 
 
 _KNOWN_MODELS = frozenset(MODEL_NAMES.values())
@@ -52,6 +54,8 @@ def station_rule_enabled(data: dict, rule: int) -> bool:
 
 def feature_available(data: dict, feature: ModelFeature) -> bool:
     """Apply the known record and station-rule gates for an optional feature."""
+    if feature == ModelFeature.LIGHT_CONTROLS:
+        return parse_light(data.get("key_1b")) is not None
     if feature == ModelFeature.RESERVE_CONTROL:
         return data.get("energy_reserve_available") is True
     if feature == ModelFeature.TARIFF_SCHEDULE:

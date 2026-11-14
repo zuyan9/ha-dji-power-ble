@@ -59,6 +59,7 @@ POWER_SWITCH_KEY = 0x0D
 RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
+LIGHT_KEY = 0x1B
 
 # DJI Home requests these optional configuration keys on every station model.
 APP_DISCOVERY_KEYS = (
@@ -1811,4 +1812,61 @@ def parse_manufacturer_data(value: bytes) -> AdvertisementInfo:
         model=MODEL_NAMES.get(model_code, f"DJI Power (0x{model_code:02X})"),
         bound=bool(value[1] & 0x10),
         mac=mac,
+    )
+
+
+LIGHT_MODES = {1: "Off", 2: "On", 3: "SOS"}
+
+
+def _record_bytes(value: str | bytes | None) -> bytes | None:
+    try:
+        return bytes.fromhex(value) if isinstance(value, str) else value
+    except ValueError:
+        return None
+
+
+def parse_light(value: str | bytes | None) -> dict[str, int] | None:
+    """Decode the 0x1B light record: mode, brightness maximum, minimum, brightness.
+
+    Observed on the Power 1000 Mini: mode 1 off, 2 on, 3 SOS; bounds 100 and 10.
+    """
+    raw = _record_bytes(value)
+    if raw is None or len(raw) != 4:
+        return None
+    mode, maximum, minimum, brightness = raw
+    if (
+        mode not in LIGHT_MODES
+        or not 0 <= minimum < maximum <= 100
+        or not minimum <= brightness <= maximum
+    ):
+        return None
+    return {
+        "mode": mode, "maximum": maximum, "minimum": minimum, "brightness": brightness,
+    }
+
+
+def build_light_set_payload(
+    current: str | bytes | None,
+    *,
+    mode: int | None = None,
+    brightness: int | None = None,
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """Change the light mode and/or brightness, keeping the other bytes."""
+    light = parse_light(current)
+    if light is None:
+        raise ProtocolError("the station did not report a light setting")
+    if mode is not None and mode not in LIGHT_MODES:
+        raise ProtocolError("light mode must be off, on or SOS")
+    if brightness is not None and not light["minimum"] <= brightness <= light["maximum"]:
+        raise ProtocolError(
+            f"light brightness must be {light['minimum']}-{light['maximum']}"
+        )
+    raw = bytearray(_record_bytes(current))
+    if mode is not None:
+        raw[0] = mode
+    if brightness is not None:
+        raw[3] = brightness
+    return build_keyed_set_payload(
+        [(LIGHT_KEY, bytes(raw)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
     )

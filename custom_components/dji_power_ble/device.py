@@ -24,6 +24,7 @@ from .duml import (
     CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
     ECO_MODE_KEY,
+    LIGHT_KEY,
     ENERGY_STORAGE_KEY,
     EXPANSION_BATTERIES_KEY,
     GATT_LAYOUTS,
@@ -45,6 +46,7 @@ from .duml import (
     DumlStream,
     ProtocolError,
     build_auto_resume_set_payload,
+    build_light_set_payload,
     build_car_charger_set_payload,
     build_charge_limits_set_payload,
     build_charge_power_set_payload,
@@ -64,6 +66,7 @@ from .duml import (
     normalize_pair_key,
     normalize_time_periods,
     parse_keyed_values,
+    parse_light,
     parse_report,
     parse_set_ack,
     parse_telemetry,
@@ -1435,6 +1438,46 @@ class DjiPowerDevice:
             if ENERGY_STORAGE_KEY in written:
                 expected["key_06"] = written[ENERGY_STORAGE_KEY].hex()
             await self._wait_for_charge_limits(expected)
+
+    async def _write_setting(self, key: int, build, matches) -> None:
+        """Rewrite one settings record from a fresh read and confirm it by re-reading."""
+        name = f"key_{key:02x}"
+        async with self._operation_lock:
+            try:
+                async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                    update = await self._read_config(key, require_complete=True)
+                payload = build(update.get(name))
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            if parse_keyed_values(payload)[key].hex() == update.get(name):
+                return
+            await self._set(payload, (key, RULES_KEY))
+            for attempt in range(READBACK_RETRIES + 1):
+                if attempt:
+                    await asyncio.sleep(READBACK_RETRY_INTERVAL)
+                if matches((await self._read_config(key)).get(name)):
+                    return
+            raise DjiPowerError("station did not report the requested setting")
+
+    async def set_light(
+        self, *, mode: int | None = None, brightness: int | None = None
+    ) -> None:
+        """Set the light mode (1 off, 2 on, 3 SOS) and/or brightness."""
+
+        def matches(value: object) -> bool:
+            light = parse_light(value)
+            return light is not None and all(
+                wanted is None or light[field] == wanted
+                for field, wanted in (("mode", mode), ("brightness", brightness))
+            )
+
+        await self._write_setting(
+            LIGHT_KEY,
+            lambda current: build_light_set_payload(
+                current, mode=mode, brightness=brightness
+            ),
+            matches,
+        )
 
     async def set_energy_reserve(
         self, *, enabled: bool | None = None, percent: int | None = None
