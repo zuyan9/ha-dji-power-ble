@@ -1,5 +1,5 @@
 {
-  "name": "DJI Power (local BLE)",
+  "name": "DJI Power",
   "render_readme": true,
   "homeassistant": "2026.8.0"
 }
