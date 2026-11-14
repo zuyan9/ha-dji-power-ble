@@ -5,7 +5,7 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, EntityCategory
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -33,19 +33,10 @@ async def async_setup_entry(
         coordinator, entry, async_add_entities, ModelFeature.TOU_POWER_CONTROL,
         lambda: [DjiPowerAdjustmentSelect(coordinator)],
     )
-    added = False
-
-    @callback
-    def discover_recharge_mode() -> None:
-        # The record arrives after setup; its layout, not the model, gates it.
-        nonlocal added
-        if added or not parse_recharge_modes((coordinator.data or {}).get("key_1e")):
-            return
-        added = True
-        async_add_entities([DjiPowerRechargeModeSelect(coordinator)])
-
-    entry.async_on_unload(coordinator.async_add_listener(discover_recharge_mode))
-    discover_recharge_mode()
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.RECHARGE_MODE,
+        lambda: [DjiPowerRechargeModeSelect(coordinator)],
+    )
     async_discover_accessories(
         coordinator,
         entry,
