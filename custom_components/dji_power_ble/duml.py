@@ -1779,6 +1779,19 @@ POWER_MODEL_CODES = frozenset(MODEL_NAMES)
 _UNMODELED_NAME = re.compile(r"DJI Power \(0x([0-9A-F]{2})\)")
 
 
+# Advertised BLE name prefixes, for scanners (e.g. ESPHome proxies) that drop the
+# manufacturer data. Only names seen on hardware are listed.
+_NAME_PREFIXES = {"Power1000Mini-": "DJI Power 1000 Mini"}
+
+
+def model_from_name(name: str | None) -> str | None:
+    """Return the model for a known advertised BLE name, else None."""
+    for prefix, model in _NAME_PREFIXES.items():
+        if name and name.startswith(prefix):
+            return model
+    return None
+
+
 def resolve_model(model: str) -> str:
     """Rename a stored placeholder whose model code has since been named."""
     if match := _UNMODELED_NAME.fullmatch(model):

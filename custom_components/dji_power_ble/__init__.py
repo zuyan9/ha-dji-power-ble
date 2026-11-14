@@ -32,7 +32,13 @@ from .const import (
 )
 from .coordinator import DjiPowerCoordinator
 from .device import DjiPowerDevice
-from .duml import MODEL_NAMES, ProtocolError, parse_manufacturer_data, resolve_model
+from .duml import (
+    MODEL_NAMES,
+    ProtocolError,
+    model_from_name,
+    parse_manufacturer_data,
+    resolve_model,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -256,6 +262,8 @@ def _model_from_discovery(
     if discovery_info is not None and (
         model := _model_from_manufacturer_data(discovery_info.manufacturer_data)
     ):
+        return model
+    if discovery_info is not None and (model := model_from_name(discovery_info.name)):
         return model
     return configured if isinstance(configured, str) and configured else "DJI Power"
 
