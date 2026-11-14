@@ -24,6 +24,7 @@ from .duml import (
     CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
     ECO_MODE_KEY,
+    LOW_BATTERY_ALARM_KEY,
     ENERGY_STORAGE_KEY,
     EXPANSION_BATTERIES_KEY,
     GATT_LAYOUTS,
@@ -45,6 +46,7 @@ from .duml import (
     DumlStream,
     ProtocolError,
     build_auto_resume_set_payload,
+    build_low_battery_alarm_set_payload,
     build_car_charger_set_payload,
     build_charge_limits_set_payload,
     build_charge_power_set_payload,
@@ -64,6 +66,7 @@ from .duml import (
     normalize_pair_key,
     normalize_time_periods,
     parse_keyed_values,
+    parse_low_battery_alarm,
     parse_report,
     parse_set_ack,
     parse_telemetry,
@@ -1435,6 +1438,34 @@ class DjiPowerDevice:
             if ENERGY_STORAGE_KEY in written:
                 expected["key_06"] = written[ENERGY_STORAGE_KEY].hex()
             await self._wait_for_charge_limits(expected)
+
+    async def _write_setting(self, key: int, build, matches) -> None:
+        """Rewrite one settings record from a fresh read and confirm it by re-reading."""
+        name = f"key_{key:02x}"
+        async with self._operation_lock:
+            try:
+                async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
+                    update = await self._read_config(key, require_complete=True)
+                payload = build(update.get(name))
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            if parse_keyed_values(payload)[key].hex() == update.get(name):
+                return
+            await self._set(payload, (key, RULES_KEY))
+            for attempt in range(READBACK_RETRIES + 1):
+                if attempt:
+                    await asyncio.sleep(READBACK_RETRY_INTERVAL)
+                if matches((await self._read_config(key)).get(name)):
+                    return
+            raise DjiPowerError("station did not report the requested setting")
+
+    async def set_low_battery_alarm(self, enabled: bool) -> None:
+        """Switch the low-battery alarm."""
+        await self._write_setting(
+            LOW_BATTERY_ALARM_KEY,
+            lambda current: build_low_battery_alarm_set_payload(current, enabled),
+            lambda value: parse_low_battery_alarm(value) is enabled,
+        )
 
     async def set_energy_reserve(
         self, *, enabled: bool | None = None, percent: int | None = None

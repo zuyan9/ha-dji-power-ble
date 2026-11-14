@@ -20,6 +20,7 @@ from .accessory import (
     async_discover_feature,
 )
 from .const import DOMAIN
+from .duml import parse_low_battery_alarm
 from .entity import DjiPowerEntity
 from .features import ModelFeature, eligible_port_switches, feature_available
 
@@ -28,6 +29,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.LOW_BATTERY_ALARM,
+        lambda: [DjiPowerLowBatteryAlarmSwitch(coordinator)],
+    )
     async_discover_backup_reserve(
         coordinator,
         entry,
@@ -304,3 +309,30 @@ class DjiPowerUsbSwitch(_DjiPowerPortSwitch):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_usb(*self._identity[:2], False)
+
+
+class DjiPowerLowBatteryAlarmSwitch(DjiPowerEntity, SwitchEntity):
+    """Sound the station's alarm shortly above the discharge limit."""
+
+    _attr_name = "Low battery alarm"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_low_battery_alarm"
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.is_on is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        return parse_low_battery_alarm((self.coordinator.data or {}).get("key_21"))
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_low_battery_alarm(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_low_battery_alarm(False)

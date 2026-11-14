@@ -228,6 +228,14 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
+    async def async_set_low_battery_alarm(self, enabled: bool) -> None:
+        """Switch the low-battery alarm and publish its confirmed readback."""
+        try:
+            await self.device.set_low_battery_alarm(enabled)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
     async def async_set_energy_reserve(
         self, *, enabled: bool | None = None, percent: int | None = None
     ) -> None:
