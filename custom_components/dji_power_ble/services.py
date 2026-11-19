@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import voluptuous as vol
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
@@ -45,6 +46,14 @@ SET_TIME_PERIODS_SCHEMA = vol.Schema(
 )
 
 
+def _is_station(device: dr.DeviceEntry, address: str) -> bool:
+    """Match the station's own device, not one of its expansion batteries."""
+    return any(
+        domain == DOMAIN and identifier.upper() == address.upper()
+        for domain, identifier in device.identifiers
+    )
+
+
 @callback
 def async_setup_services(hass: HomeAssistant) -> None:
     """Register actions independently of individual station connections."""
@@ -56,9 +65,20 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
         for entry_id in device.config_entries:
             coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
-            if coordinator is None or (
-                DOMAIN, coordinator.device.address
-            ) not in device.identifiers:
+            if coordinator is None:
+                # There is no coordinator while the entry reloads after a lost
+                # connection or waits to retry setup.
+                entry = hass.config_entries.async_get_entry(entry_id)
+                if (
+                    entry is not None
+                    and entry.domain == DOMAIN
+                    and _is_station(device, entry.data[CONF_ADDRESS])
+                ):
+                    raise ServiceValidationError(
+                        "The selected power station is unavailable"
+                    )
+                continue
+            if not _is_station(device, coordinator.device.address):
                 continue
             if not is_known_model(coordinator.device.model):
                 raise ServiceValidationError(

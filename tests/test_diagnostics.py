@@ -314,3 +314,28 @@ class ProtocolDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["state"], {})
         self.assertFalse(result["connected"])
+
+    async def test_unloaded_entry_remains_exportable_while_reconnecting(self) -> None:
+        # Each lost connection reloads the entry, and setup retries keep it unloaded.
+        entry = types.SimpleNamespace(
+            entry_id="station",
+            data={"address": "AA:BB:CC:DD:EE:FF", "model": "DJI Power 2000"},
+            options={"update_interval": 5, "connection_source": "AA:BB:CC:DD:EE:01"},
+        )
+        other_station = types.SimpleNamespace(
+            data={"battery_percent": 80},
+            device=types.SimpleNamespace(is_connected=True),
+        )
+        for data in (
+            {}, {"dji_power_ble": {}}, {"dji_power_ble": {"other": other_station}},
+        ):
+            with self.subTest(data=data):
+                result = await diagnostics.async_get_config_entry_diagnostics(
+                    types.SimpleNamespace(data=data), entry
+                )
+                self.assertEqual(result, {
+                    "config_entry": {"address": REDACTED, "model": "DJI Power 2000"},
+                    "options": {"update_interval": 5, "connection_source": REDACTED},
+                    "connected": False,
+                    "state": {},
+                })
