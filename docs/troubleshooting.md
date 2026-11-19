@@ -20,6 +20,15 @@ restarting Home Assistant does not reset the station.
 2. Hold the power button until the screen is completely dark; its outputs turn off.
 3. Turn the station on again. The integration reconnects when it advertises again.
 
+## Station keeps disconnecting
+
+The **Bluetooth source** diagnostic sensor shows the adapter or proxy holding the
+connection. Its `rssi_at_connection` attribute is the station's signal strength there
+just before connecting; the station stops advertising while connected, so it is not
+updated live. A weak signal or a busy adapter can cause repeated disconnects: move the
+station or adapter closer, or set **Bluetooth connection source** to **Automatic** so
+Home Assistant can choose among all adapters and proxies.
+
 ## Home Assistant logs
 
 Close DJI Home app. In HA **Settings → Devices & services → DJI Power**, enable debug logging,

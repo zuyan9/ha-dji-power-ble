@@ -25,6 +25,8 @@ used only during setup to retrieve the device's local credential.
   - Expansion battery devices with battery level and pack diagnostics
   - Firmware, battery cycle, timezone, display, reserve, and cloud-status
     diagnostics
+  - [Bluetooth source](docs/troubleshooting.md#station-keeps-disconnecting): the
+    adapter or proxy holding the connection, with its signal strength at connection
 - Control:
   - AC output
   - Discharge and recharge limit

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from bleak.exc import BleakError
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -42,6 +43,13 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         self._last_push = 0.0
         self._pending_data: dict[str, object] | None = None
         self._push_timer: asyncio.TimerHandle | None = None
+        # The adapter or proxy HA lists as holding the connection, and the signal
+        # strength of the station's last advertisement there: once connected, the
+        # station stops advertising.
+        self.bluetooth_source: str | None = None
+        self.bluetooth_rssi: int | None = None
+        self._bluetooth_source_id: str | None = None
+        self._unsub_allocations: Callable[[], None] | None = None
         device.set_charge_power_minimum(entry.options.get(CONF_RECHARGE_POWER_MINIMUM))
         self._unsub_state = device.add_state_listener(self._handle_state)
         self._unsub_disconnect = device.add_disconnect_listener(self._handle_disconnect)
@@ -129,7 +137,59 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             await self.device.connect()
         except (BleakError, DjiPowerError, TimeoutError) as error:
             raise UpdateFailed(str(error)) from error
+        self._async_track_bluetooth_source()
         return dict(self.device.data)
+
+    @callback
+    def _async_track_bluetooth_source(self) -> None:
+        """Follow HA's connection allocations, which proxies can report late."""
+        from habluetooth import get_manager
+
+        if self._unsub_allocations is None:
+            manager = get_manager()
+            self._unsub_allocations = manager.async_register_allocation_callback(
+                self._handle_allocations
+            )
+        self._async_update_bluetooth_source()
+
+    @callback
+    def _handle_allocations(self, _allocations: object) -> None:
+        if not self._closed and self._async_update_bluetooth_source():
+            self.async_update_listeners()
+
+    @callback
+    def _async_update_bluetooth_source(self) -> bool:
+        """Find the source holding the connection; return whether it changed."""
+        from habluetooth import get_manager
+        from homeassistant.components import bluetooth
+
+        address = self.device.address.upper()
+        source = next(
+            (
+                allocation.source
+                for allocation in get_manager().async_current_allocations() or ()
+                if address in (item.upper() for item in allocation.allocated)
+            ),
+            None,
+        )
+        if source == self._bluetooth_source_id:
+            return False
+        self._bluetooth_source_id = source
+        self.bluetooth_source = self.bluetooth_rssi = None
+        if source is not None:
+            scanner = bluetooth.async_scanner_by_source(self.hass, source)
+            self.bluetooth_source = scanner.name if scanner is not None else source
+            self.bluetooth_rssi = next(
+                (
+                    found.advertisement.rssi
+                    for found in bluetooth.async_scanner_devices_by_address(
+                        self.hass, address, connectable=True
+                    )
+                    if found.scanner.source == source
+                ),
+                None,
+            )
+        return True
 
     async def async_shutdown(self) -> None:
         """Release the client before HA cancels background Bluetooth tasks."""
@@ -143,6 +203,9 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
         self._closed = True
         self._unsub_state()
         self._unsub_disconnect()
+        if self._unsub_allocations is not None:
+            self._unsub_allocations()
+            self._unsub_allocations = None
         self._pending_data = None
         if self._push_timer is not None:
             self._push_timer.cancel()

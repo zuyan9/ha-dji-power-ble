@@ -404,6 +404,19 @@ class BatteryTimeSensorTests(unittest.IsolatedAsyncioTestCase):
             self.coordinator.data = {"battery_cycle_count": count}
             self.assertEqual(entity.native_value, count)
 
+    def test_bluetooth_source_is_a_diagnostic_with_its_signal(self) -> None:
+        self.coordinator.bluetooth_source = self.coordinator.bluetooth_rssi = None
+        entity = sensor.DjiPowerBluetoothSourceSensor(self.coordinator)
+
+        self.assertEqual(entity._attr_unique_id, f"{ADDRESS}_bluetooth_source")
+        self.assertEqual(entity._attr_entity_category, "diagnostic")
+        self.assertIsNone(entity.native_value)
+        self.assertEqual(entity.extra_state_attributes, {"rssi_at_connection": None})
+        self.coordinator.bluetooth_source = "bt-proxy-01 (AA:BB:CC:DD:EE:01)"
+        self.coordinator.bluetooth_rssi = -63
+        self.assertEqual(entity.native_value, "bt-proxy-01 (AA:BB:CC:DD:EE:01)")
+        self.assertEqual(entity.extra_state_attributes, {"rssi_at_connection": -63})
+
     def test_primary_runtime_remains_an_independent_disabled_sensor(self) -> None:
         description = next(
             item for item in sensor.DESCRIPTIONS if item.key == "primary_runtime_min"
@@ -627,7 +640,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         await self.setup([pack])
         self.assertEqual(
             len(self.entities) - len(self.packs()),
-            len(sensor.DESCRIPTIONS) + len(sensor.BATTERY_TIME_DESCRIPTIONS),
+            # Plus the Bluetooth source sensor.
+            len(sensor.DESCRIPTIONS) + len(sensor.BATTERY_TIME_DESCRIPTIONS) + 1,
         )
         self.assertEqual(len(self.packs()), 4)
         self.assertEqual(len(self.hass.device_registry.devices), 2)
