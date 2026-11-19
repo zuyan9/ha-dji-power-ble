@@ -1,6 +1,6 @@
 {
   "domain": "dji_power_ble",
-  "name": "DJI Power (local BLE)",
+  "name": "DJI Power",
   "after_dependencies": [
     "bluetooth"
   ],
