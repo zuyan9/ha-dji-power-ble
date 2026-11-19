@@ -31,7 +31,7 @@ Home Assistant can choose among all adapters and proxies.
 
 ## Home Assistant logs
 
-Close DJI Home app. In HA **Settings → Devices & services → DJI Power**, enable debug logging,
+Close DJI Home app. In HA **Settings → Devices & services → DJI Power BLE**, enable debug logging,
 reproduce once, then disable logging and download the log. Temporarily disable the
 entry if it keeps reloading. See [HA's logging instructions](https://www.home-assistant.io/docs/configuration/troubleshooting/#debug-logs-and-diagnostics).
 
