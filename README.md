@@ -1,4 +1,4 @@
-# DJI Power for Home Assistant
+# DJI Power BLE for Home Assistant
 
 Local Bluetooth monitoring and control for DJI Power stations. Runtime traffic goes
 directly between Home Assistant and the device; DJI cloud access is optional and is
@@ -55,7 +55,7 @@ Click the badge above, or add the repository manually:
 
 1. Open HACS → Custom repositories.
 2. Add `https://github.com/zuyan9/ha-dji-power-ble` as an Integration.
-3. Install **DJI Power** and restart Home Assistant.
+3. Install **DJI Power BLE** and restart Home Assistant.
 
 ### Manual
 
@@ -64,7 +64,7 @@ restart Home Assistant.
 
 ## Setup
 
-Add **DJI Power** from Settings → Devices & services. A nearby station should also be
+Add **DJI Power BLE** from Settings → Devices & services. A nearby station should also be
 discovered automatically. The setup flow offers three credential paths:
 
 1. **DJI account** — sign in and solve DJI's image captcha. The integration reads the
