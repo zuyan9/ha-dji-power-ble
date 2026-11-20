@@ -259,6 +259,15 @@ METER_PHASE_DESCRIPTION = SensorEntityDescription(
     entity_category=EntityCategory.DIAGNOSTIC,
 )
 
+# DJI Home's Grid-Tied AC Port output; its input is the Charging input sensor.
+GRID_OUTPUT_DESCRIPTION = SensorEntityDescription(
+    key="grid_output_w",
+    translation_key="grid_output",
+    device_class=SensorDeviceClass.POWER,
+    native_unit_of_measurement=UnitOfPower.WATT,
+    state_class=SensorStateClass.MEASUREMENT,
+)
+
 EXPANSION_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
         key="battery_percent",
@@ -365,6 +374,10 @@ async def async_setup_entry(
     async_discover_feature(
         coordinator, entry, async_add_entities, ModelFeature.METER_PHASE,
         lambda: [DjiPowerMeterPhaseSensor(coordinator, METER_PHASE_DESCRIPTION)],
+    )
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.GRID_TIED_OUTPUT,
+        lambda: [DjiPowerSensor(coordinator, GRID_OUTPUT_DESCRIPTION)],
     )
     device_registry = dr.async_get(hass)
     # Packs link to the station by device id. Entity registration is deferred, so

@@ -489,6 +489,9 @@ def parse_report(payload: bytes) -> dict[str, object]:
     data["ac_output_w"] = group_output.get(2, 0)
     data["dc_output_w"] = group_output.get(3, 0)
     data["charge_input_w"] = group_input.get(1, 0)
+    # A grid-tied station feeds the grid through its AC input port. Reports omit
+    # an idle port, so read the group total rather than the per-port value.
+    data["grid_output_w"] = group_output.get(1, 0)
     for name in ("usb_a", "usb_c", "sdc", "sdc_lite", "cigarette", "xt60"):
         data[f"{name}_output_w"] = interface_output.get(name, 0)
         data[f"{name}_input_w"] = interface_input.get(name, 0)

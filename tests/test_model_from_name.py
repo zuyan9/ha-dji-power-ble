@@ -1,4 +1,4 @@
-"""Model detection from the advertised BLE name (scanners that drop manufacturer data)."""
+"""Model detection from the BLE name (scanners that drop manufacturer data)."""
 
 from __future__ import annotations
 
