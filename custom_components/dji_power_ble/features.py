@@ -10,6 +10,7 @@ from .duml import (
     GRID_TIED_RULE,
     MODEL_NAMES,
     PORT_SWITCH_RULE,
+    parse_low_battery_alarm,
 )
 
 
@@ -26,6 +27,7 @@ class ModelFeature(StrEnum):
     SDC_CONTROLS = "sdc_controls"
     USB_CONTROLS = "usb_controls"
     RESERVE_CONTROL = "reserve_control"
+    LOW_BATTERY_ALARM = "low_battery_alarm"
 
 
 _KNOWN_MODELS = frozenset(MODEL_NAMES.values())
@@ -53,6 +55,8 @@ def station_rule_enabled(data: dict, rule: int) -> bool:
 
 def feature_available(data: dict, feature: ModelFeature) -> bool:
     """Apply the known record and station-rule gates for an optional feature."""
+    if feature == ModelFeature.LOW_BATTERY_ALARM:
+        return parse_low_battery_alarm(data.get("key_21")) is not None
     if feature == ModelFeature.RESERVE_CONTROL:
         return data.get("energy_reserve_available") is True
     if feature == ModelFeature.TARIFF_SCHEDULE:
