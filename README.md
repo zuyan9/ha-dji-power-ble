@@ -32,6 +32,7 @@ used only during setup to retrieve the device's local credential.
 - Control:
   - AC output
   - Discharge and recharge limit
+  - AC recharge speed (e.g. 500 W / 1000 W) on stations that report it, such as the Power 1000 Mini
   - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
   - SDC accessory [info and controls](docs/accessory-controls.md)
   - Individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs), car-outlet switches, where reported

@@ -16,7 +16,7 @@ from .accessory import (
     async_discover_feature,
 )
 from .const import DOMAIN
-from .duml import ENERGY_SAVER_MODES
+from .duml import ENERGY_SAVER_MODES, parse_recharge_modes
 from .entity import DjiPowerEntity
 from .features import ModelFeature, energy_saver_options, feature_available
 
@@ -32,6 +32,10 @@ async def async_setup_entry(
     async_discover_feature(
         coordinator, entry, async_add_entities, ModelFeature.TOU_POWER_CONTROL,
         lambda: [DjiPowerAdjustmentSelect(coordinator)],
+    )
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.RECHARGE_MODE,
+        lambda: [DjiPowerRechargeModeSelect(coordinator)],
     )
     async_discover_accessories(
         coordinator,
@@ -82,6 +86,42 @@ class DjiPowerEnergySaverModeSelect(DjiPowerEntity, SelectEntity):
                 "modes appear after they are set up in DJI Home"
             )
         await self.coordinator.async_set_energy_saver_mode(option)
+
+
+class DjiPowerRechargeModeSelect(DjiPowerEntity, SelectEntity):
+    """Choose the AC recharge speed (500 W / 1000 W on the Power 1000 Mini)."""
+
+    _attr_name = "Recharge speed"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_recharge_mode"
+
+    def _modes(self) -> dict[int, int]:
+        return parse_recharge_modes((self.coordinator.data or {}).get("key_1e")) or {}
+
+    def _labels(self) -> dict[str, int]:
+        """Label each speed with the watts the station reports."""
+        return {f"{w} W": w for w in sorted(self._modes())}
+
+    @property
+    def available(self) -> bool:
+        return super().available and bool(self._modes())
+
+    @property
+    def options(self) -> list[str]:
+        return list(self._labels())
+
+    @property
+    def current_option(self) -> str | None:
+        modes = self._modes()
+        return next((k for k, w in self._labels().items() if modes[w] == 1), None)
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in (labels := self._labels()):
+            raise ServiceValidationError("the station does not offer this recharge speed")
+        await self.coordinator.async_set_recharge_mode(labels[option])
 
 
 class DjiPowerAdjustmentSelect(DjiPowerEntity, SelectEntity):
