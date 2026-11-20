@@ -49,6 +49,7 @@ stubs = {
         CONF_ADDRESS="address",
         Platform=types.SimpleNamespace(
             BINARY_SENSOR="binary_sensor",
+            LIGHT="light",
             NUMBER="number",
             SELECT="select",
             SENSOR="sensor",
