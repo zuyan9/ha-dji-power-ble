@@ -22,6 +22,7 @@ class ModelFeature(StrEnum):
     SCHEDULED_CONTROLS = "scheduled_controls"
     AUTO_RESUME = "auto_resume"
     METER_PHASE = "meter_phase"
+    GRID_TIED_OUTPUT = "grid_tied_output"
     SDC_CONTROLS = "sdc_controls"
     USB_CONTROLS = "usb_controls"
     RESERVE_CONTROL = "reserve_control"
@@ -88,6 +89,11 @@ def feature_available(data: dict, feature: ModelFeature) -> bool:
             )
             and data.get("eco_meter_linked") is True
             and data.get("meter_phase") is not None
+        )
+    if feature == ModelFeature.GRID_TIED_OUTPUT:
+        # Only a station that offers grid-tied modes feeds the grid.
+        return _energy_saver_offered(data) and station_rule_enabled(
+            data, GRID_TIED_RULE
         )
     if feature == ModelFeature.USB_CONTROLS:
         return any(port[0] in (3, 4) for port in eligible_port_switches(data))

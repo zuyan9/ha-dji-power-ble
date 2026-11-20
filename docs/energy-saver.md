@@ -13,11 +13,18 @@ sets station rule 5), the integration exposes these entities:
 | Energy saver auto resume | While a grid-tied mode is selected, with station rule 17 | Resumes Energy Saver when the AC port reconnects to the grid. |
 | Meter phase | While the linked smart meter steers the station (diagnostic) | The phase DJI Home set for the meter: A, B, C, A+B or A+B+C. |
 | Power adjustment, Recharge power, Discharge power | While Time of use is selected | See [Time of Use power](protocol.md#energy-saver). |
+| Grid-tied AC port output | On stations that offer grid-tied modes (station rule 6) | Watts the station feeds into the grid through its AC input port: the output DJI Home shows for its Grid-Tied AC Port. |
 
 Entities are created the first time the station reports what they need, then remain
 and are unavailable while it is not reported. Discovery runs after connection setup,
 and the integration re-reads the page every 30 seconds, so changes made in DJI Home
 appear within that time.
+
+**Grid-tied AC port output** comes from the station's power report rather than the
+page, so it stays available and reads 0 W whenever the port feeds nothing, for
+example while the station charges. The same port's input is the **Charging input**
+sensor. **AC output** covers only the AC sockets, so **Output power** is roughly the
+grid-tied port's output plus the AC, USB and SDC outputs.
 
 ## Selecting a mode
 
@@ -113,7 +120,9 @@ charge periods and **Discharge power** only in discharge periods.
 
 These controls follow DJI Home 1.6.9. Tested on a Power 2000: reading every mode,
 selecting Disabled and Scheduled periods
-([#61](https://github.com/zuyan9/ha-dji-power-ble/issues/61)), and Recharge power
-and Discharge power ([#62](https://github.com/zuyan9/ha-dji-power-ble/issues/62)).
+([#61](https://github.com/zuyan9/ha-dji-power-ble/issues/61)), Recharge power
+and Discharge power ([#62](https://github.com/zuyan9/ha-dji-power-ble/issues/62)),
+and the grid-tied AC port's output reading in Time of use
+([#81](https://github.com/zuyan9/ha-dji-power-ble/issues/81)).
 Not yet tested: selecting a grid-tied mode, the Scheduled periods controls and Auto
 resume.

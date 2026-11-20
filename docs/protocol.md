@@ -263,6 +263,12 @@ An interface record identifies its group, one-based port sequence, type, switch 
 output watts, and input watts. The known types are power, AC, USB-A, USB-C, SDC, SDC
 Lite, 12 V, and XT60. The codec exposes both aggregate and per-port values.
 
+The power group is the AC input port. Its input watts are **Charging input**. Its
+output watts are what a grid-tied station feeds into the grid through that port,
+exposed as **Grid-tied AC port output** on stations that offer grid-tied modes (an
+available eco record with rules 5 and 6). A report can omit a port that carries no
+power, so the aggregates read 0 for an absent port.
+
 An SDC interface can also carry an accessory record. Its 17-byte head holds the
 accessory serial number, which the codec discards, followed by the accessory type:
 `1` car power outlet cable, `2` solar panel adapter, `3` 1 kW car charger, `4` 1.8 kW

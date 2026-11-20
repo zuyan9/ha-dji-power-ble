@@ -782,8 +782,9 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=20, firmware="01.00.00.00")
         await self.setup([pack])
         unique_ids = {entity._attr_unique_id for entity in self.packs()}
-        # Primary status, packs, tariff, meter phase and SDC keep a listener.
-        self.assertEqual(len(self.listeners), 5)
+        # Primary status, packs, tariff, meter phase, grid-tied output and SDC
+        # keep a listener.
+        self.assertEqual(len(self.listeners), 6)
         for callback in self.unload_callbacks:
             callback()
         self.assertEqual(self.listeners, [])
@@ -875,6 +876,55 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
                         isinstance(item, sensor.DjiPowerTimePeriodsSensor)
                         for item in self.entities
                     ), 1)
+
+    async def test_grid_output_sensor_waits_for_grid_tied_modes(self) -> None:
+        def grid_outputs() -> list:
+            return [
+                item for item in self.entities
+                if item._attr_unique_id == f"{ADDRESS}_grid_output_w"
+            ]
+
+        for model in ("DJI Power 2000", "DJI Power Auro 2000 Elite", "DJI Power"):
+            with self.subTest(model=model):
+                self.entities.clear()
+                self.listeners.clear()
+                self.coordinator.device.model = model
+                # Rule 5 alone offers the page without its grid-tied modes.
+                await self.setup(
+                    [], eco_available=True, station_rules=[5], grid_output_w=0
+                )
+                self.assertEqual(grid_outputs(), [])
+                self.coordinator.data.update(station_rules=[5, 6], grid_output_w=137)
+                for _ in range(2):
+                    for listener in self.listeners.copy():
+                        listener()
+                self.assertEqual(len(grid_outputs()), int(model != "DJI Power"))
+
+        self.coordinator.device.model = "DJI Power 2000"
+        self.entities.clear()
+        await self.setup(
+            [], eco_available=True, station_rules=[5, 6], grid_output_w=137
+        )
+        (entity,) = grid_outputs()
+        description = entity.entity_description
+        self.assertEqual(description.translation_key, "grid_output")
+        self.assertEqual(description.device_class, "power")
+        self.assertEqual(description.native_unit_of_measurement, "W")
+        self.assertEqual(description.state_class, "measurement")
+        self.assertIsNone(description.entity_category)
+        self.assertTrue(description.entity_registry_enabled_default)
+        self.assertEqual(entity.native_value, 137)
+        # The reading is telemetry: it stays available without the mode records.
+        self.coordinator.data = {"grid_output_w": 0}
+        self.assertTrue(entity.available)
+        self.assertEqual(entity.native_value, 0)
+        self.coordinator.last_update_success = False
+        self.assertFalse(entity.available)
+        strings = json.loads((COMPONENT / "strings.json").read_text())
+        self.assertEqual(
+            strings["entity"]["sensor"]["grid_output"]["name"],
+            "Grid-tied AC port output",
+        )
 
     async def test_schedule_count_attributes_and_availability(self) -> None:
         await self.setup([], time_periods=[], eco_available=True, station_rules=[5])

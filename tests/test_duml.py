@@ -1215,6 +1215,44 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("input_voltage_v", sdc)
         self.assertNotIn("consumer_info", parsed["interfaces"][0])
 
+    def test_power_group_output_is_the_grid_tied_feed(self) -> None:
+        # Watts from two Power 2000 diagnostics taken while discharging to the
+        # grid in Time of Use, with and without a phone on USB-C (issue #81).
+        for total, grid, usb in ((165, 136, 8), (156, 137, 0)):
+            with self.subTest(total=total):
+                groups = group(1, interface(1, 1, grid, 0))
+                groups += group(2, interface(1, 2, 19, 0))
+                if usb:
+                    groups += group(3, interface(1, 4, usb, 0))
+                power = total.to_bytes(2, "little") + bytes(2)
+
+                parsed = duml.parse_report(
+                    record(0x3030, power + record(0x3031, groups))
+                )
+
+                self.assertEqual(parsed["output_w"], total)
+                self.assertEqual(parsed["grid_output_w"], grid)
+                self.assertEqual(parsed["power_1_output_w"], grid)
+                self.assertEqual(parsed["charge_input_w"], 0)
+                self.assertEqual(parsed["ac_output_w"], 19)
+                self.assertEqual(parsed["dc_output_w"], usb)
+
+    def test_grid_output_is_zero_while_charging_or_when_the_port_is_idle(self) -> None:
+        charging = duml.parse_report(
+            record(
+                0x3030,
+                bytes.fromhex("00005f01")
+                + record(0x3031, group(1, interface(1, 1, 0, 351))),
+            )
+        )
+        self.assertEqual(charging["grid_output_w"], 0)
+        self.assertEqual(charging["charge_input_w"], 351)
+
+        # Reports omit an idle port, so no per-port value replaces the last one.
+        idle = duml.parse_report(CAPTURED_REPORT)
+        self.assertNotIn("power_1_output_w", idle)
+        self.assertEqual(idle["grid_output_w"], 0)
+
     def test_accessory_helper_matches_station_framing(self) -> None:
         accessory = accessory_report(
             4,

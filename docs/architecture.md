@@ -86,7 +86,9 @@ The Energy Saver mode needs Eco availability and rule 5; grid-tied modes
 additionally need rule 6 and an earlier DJI Home grid-tied setup. Scheduled Periods
 controls need that mode to be active. Auto Resume and the meter phase need rule 6
 and an active grid-tied mode, plus rule 17 or a linked meter respectively. Existing
-TOU power controls require rule 6 and an active TOU setup.
+TOU power controls require rule 6 and an active TOU setup. The grid-tied AC port
+output sensor needs Eco availability and rules 5 and 6 only to be created; its
+reading comes from the power report.
 AC and car outlets need valid switch rows; SDC and USB also require rule 11.
 
 Missing or invalid snapshots make affected controls unavailable without removing

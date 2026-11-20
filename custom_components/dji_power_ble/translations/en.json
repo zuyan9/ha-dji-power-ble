@@ -292,6 +292,9 @@
           "c": "C",
           "abc": "A+B+C"
         }
+      },
+      "grid_output": {
+        "name": "Grid-tied AC port output"
       }
     },
     "switch": {
