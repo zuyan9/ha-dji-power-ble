@@ -82,7 +82,9 @@ with patch.dict(sys.modules, {**stubs, PACKAGE: integration}):
 
 class SetupTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.service_info = types.SimpleNamespace(time=99.0, manufacturer_data={}, name=None)
+        self.service_info = types.SimpleNamespace(
+            time=99.0, manufacturer_data={}, name=None
+        )
         self.ble_device = object()
         self.device = types.SimpleNamespace(
             is_connected=True,
