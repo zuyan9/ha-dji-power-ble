@@ -29,6 +29,13 @@ class RechargeModeTests(unittest.TestCase):
             written = duml.parse_keyed_values(payload)[duml.RECHARGE_MODE_KEY]
             self.assertEqual(written.hex(), expected)
 
+    def test_three_profiles(self) -> None:
+        three = "1f10060001f4010000011f10060002e8030000021f10060003d0070000" + "02"
+        self.assertEqual(duml.parse_recharge_modes(three), {500: 1, 1000: 2, 2000: 2})
+        payload = duml.build_recharge_mode_set_payload(three, 2000)
+        written = duml.parse_keyed_values(payload)[duml.RECHARGE_MODE_KEY]
+        self.assertEqual(duml.parse_recharge_modes(written), {500: 2, 1000: 2, 2000: 1})
+
     def test_rejects_unknown_layout(self) -> None:
         for bad in ("", "zz", SLOW[:20], None):
             self.assertIsNone(duml.parse_recharge_modes(bad))

@@ -10,6 +10,7 @@ from .duml import (
     GRID_TIED_RULE,
     MODEL_NAMES,
     PORT_SWITCH_RULE,
+    RECHARGE_MODE_RULE,
     parse_recharge_modes,
 )
 
@@ -55,7 +56,10 @@ def station_rule_enabled(data: dict, rule: int) -> bool:
 def feature_available(data: dict, feature: ModelFeature) -> bool:
     """Apply the known record and station-rule gates for an optional feature."""
     if feature == ModelFeature.RECHARGE_MODE:
-        return parse_recharge_modes(data.get("key_1e")) is not None
+        return (
+            station_rule_enabled(data, RECHARGE_MODE_RULE)
+            and parse_recharge_modes(data.get("key_1e")) is not None
+        )
     if feature == ModelFeature.RESERVE_CONTROL:
         return data.get("energy_reserve_available") is True
     if feature == ModelFeature.TARIFF_SCHEDULE:

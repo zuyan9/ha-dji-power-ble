@@ -107,7 +107,9 @@ class DjiPowerRechargeModeSelect(DjiPowerEntity, SelectEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and bool(self._modes())
+        return super().available and feature_available(
+            self.coordinator.data or {}, ModelFeature.RECHARGE_MODE
+        )
 
     @property
     def options(self) -> list[str]:

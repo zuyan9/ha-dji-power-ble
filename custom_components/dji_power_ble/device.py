@@ -1610,10 +1610,9 @@ class DjiPowerDevice:
         """Select the AC recharge speed and confirm it from a fresh read."""
         async with self._operation_lock:
             try:
-                async with asyncio.timeout(DEFAULT_REQUEST_TIMEOUT):
-                    update = await self._read_config(
-                        RECHARGE_MODE_KEY, require_complete=True
-                    )
+                update = await self._read_config(
+                    RECHARGE_MODE_KEY, require_complete=True
+                )
                 payload = build_recharge_mode_set_payload(
                     update.get("key_1e"), watts
                 )
