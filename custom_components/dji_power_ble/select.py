@@ -42,12 +42,8 @@ async def async_setup_entry(
         async_discover_feature(
             coordinator, entry, async_add_entities, ModelFeature.DISPLAY_SETTINGS,
             lambda: [
-                DjiPowerDisplaySettingSelect(coordinator, field, name)
-                for field, name in (
-                    ("device_timeout", "Device timeout"),
-                    ("screen_timeout", "Device screen timeout"),
-                    ("ac_timeout", "AC timeout"),
-                )
+                DjiPowerDisplaySettingSelect(coordinator, field)
+                for field in DISPLAY_SETTING_OPTIONS
             ],
         )
     async_discover_accessories(
@@ -69,10 +65,10 @@ class DjiPowerDisplaySettingSelect(DjiPowerEntity, SelectEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
 
-    def __init__(self, coordinator, field: str, name: str) -> None:
+    def __init__(self, coordinator, field: str) -> None:
         super().__init__(coordinator)
         self._field = field
-        self._attr_name = name
+        self._attr_translation_key = field
         self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_setting_{field}"
         self._attr_options = list(DISPLAY_SETTING_OPTIONS[field])
 

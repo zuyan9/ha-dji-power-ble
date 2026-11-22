@@ -99,7 +99,7 @@ _SET_STATE_RULES = (RULES_KEY, bytes.fromhex("0c00") + b"1e00efffff3f")
 _SET_STATE_RULES_1_7_1 = (RULES_KEY, bytes.fromhex("0c00") + b"1f00efffff7f")
 
 
-# Options observed on the Power 1000 V2, in field order.
+# Options observed on the Power 1000 V2.
 _POWER_TIMEOUT_OPTIONS = {
     "30 min": 1800, "1 h": 3600, "3 h": 10800, "5 h": 18000,
     "12 h": 43200, "Never": 0,
@@ -112,6 +112,7 @@ DISPLAY_SETTING_OPTIONS = {
     },
     "ac_timeout": _POWER_TIMEOUT_OPTIONS,
 }
+_DISPLAY_TIMEOUT_FIELDS = ("device_timeout", "screen_timeout", "ac_timeout")
 _DISPLAY_TIMEOUTS = struct.Struct("<III")
 _DISPLAY_SETTINGS_SIZE = _DISPLAY_TIMEOUTS.size + 1
 
@@ -1217,7 +1218,7 @@ def build_ac_set_payload(
 
 def _parse_display_settings(value: bytes) -> dict[str, int]:
     values = _DISPLAY_TIMEOUTS.unpack_from(value)
-    return dict(zip(DISPLAY_SETTING_OPTIONS, values, strict=True))
+    return dict(zip(_DISPLAY_TIMEOUT_FIELDS, values, strict=True))
 
 
 def build_display_setting_payload(
@@ -1235,7 +1236,8 @@ def build_display_setting_payload(
         raise ProtocolError("station omitted complete display settings")
     values = _parse_display_settings(current)
     values[field] = options[option]
-    record = _DISPLAY_TIMEOUTS.pack(*values.values()) + current[_DISPLAY_TIMEOUTS.size:]
+    record = _DISPLAY_TIMEOUTS.pack(*(values[name] for name in _DISPLAY_TIMEOUT_FIELDS))
+    record += current[_DISPLAY_TIMEOUTS.size:]
     return build_keyed_set_payload(
         [
             (DISPLAY_SETTINGS_KEY, record),
