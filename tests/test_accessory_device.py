@@ -128,13 +128,16 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
     def car_row(self):
         return self.device.data["car_chargers"][0]
 
-    async def test_cable_write_rechecks_attachment_after_reading_settings(self):
+    def attach_car_power_outlet_cable(self) -> None:
         self.reset_device("DJI Power 1000 V2")
         row = struct.pack("<5B3I", 5, 2, 1, 1, 2, 100, 0, 100) + bytes(48)
         self.client.values[0x0A] = struct.pack("<HH", 0x1012, len(row)) + row
         self.device._merge_data({
             "interfaces": [{"type": 5, "seq": 2, "accessory_type": 1}],
         })
+
+    async def test_cable_write_rechecks_attachment_after_reading_settings(self):
+        self.attach_car_power_outlet_cable()
         await self.device.set_car_charger(5, 2, 1, recharge_power_w=49)
         self.assertEqual(self.car_row()["p_from_car_v"], 49)
 
@@ -156,6 +159,33 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
             await self.device.set_car_charger(5, 2, 1, recharge_power_w=50)
         self.assertFalse(self.client.did_set)
         self.assertEqual(self.car_row()["p_from_car_v"], 49)
+
+    async def test_cable_write_rechecks_attachment_after_waiting_for_gatt(self):
+        self.attach_car_power_outlet_cable()
+        write_packet = self.device._write_packet
+
+        async def delay_set(client, characteristic, packet, **kwargs):
+            if packet.command_id != duml.SET_COMMAND:
+                await write_packet(client, characteristic, packet, **kwargs)
+                return
+            # A settings-report ACK can hold the lock while the SET is queued.
+            async with self.device._write_lock:
+                queued = asyncio.create_task(
+                    write_packet(client, characteristic, packet, **kwargs)
+                )
+                await asyncio.sleep(0)
+                self.assertFalse(queued.done())
+                self.device._merge_data({"interfaces": []})
+            await queued
+
+        with (
+            patch.object(self.device, "_write_packet", side_effect=delay_set),
+            self.assertRaisesRegex(device_module.DjiPowerError, "no longer attached"),
+        ):
+            await self.device.set_car_charger(5, 2, 1, recharge_power_w=49)
+        self.assertFalse(self.client.did_set)
+        self.assertEqual(self.car_row()["p_from_car_v"], 100)
+        self.assertEqual(self.device._pending, {})
 
     async def test_display_settings_preserve_other_fields_and_confirm_writes(self):
         self.reset_device("DJI Power 1000 V2")

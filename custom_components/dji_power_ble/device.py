@@ -438,8 +438,10 @@ class DjiPowerDevice:
         client: BleakClient | LocalBleakClient,
         characteristic: BleakGATTCharacteristic,
         packet: DumlPacket,
+        *,
+        check_before_write: Callable[[], None] | None = None,
     ) -> None:
-        """Serialize GATT writes and reject queued writes from an old session."""
+        """Serialize writes and verify the session and preconditions under the lock."""
         async with self._write_lock:
             if (
                 client is not self._client
@@ -448,6 +450,8 @@ class DjiPowerDevice:
                 or self._disconnecting
             ):
                 raise DjiPowerDisconnectedError("Bluetooth connection changed")
+            if check_before_write is not None:
+                check_before_write()
             await client.write_gatt_char(characteristic, packet.encode(), response=True)
 
     def _decode_payload(self, packet: DumlPacket) -> bytes:
@@ -697,6 +701,7 @@ class DjiPowerDevice:
         payload: bytes,
         *,
         timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        check_before_write: Callable[[], None] | None = None,
     ) -> DumlPacket:
         client = self._client
         if client is None or not client.is_connected:
@@ -723,7 +728,10 @@ class DjiPowerDevice:
         self._pending[sequence] = (POWER_COMMAND_SET, command_id, future)
         try:
             async with asyncio.timeout(timeout):
-                await self._write_packet(client, write_characteristic, packet)
+                await self._write_packet(
+                    client, write_characteristic, packet,
+                    check_before_write=check_before_write,
+                )
                 return await future
         except TimeoutError as error:
             raise DjiPowerError(
@@ -1255,8 +1263,16 @@ class DjiPowerDevice:
                     return
             raise DjiPowerError("station did not report the requested time periods")
 
-    async def _set(self, payload: bytes, expected_keys: tuple[int, ...]) -> None:
-        response = await self._request(SET_COMMAND, payload)
+    async def _set(
+        self,
+        payload: bytes,
+        expected_keys: tuple[int, ...],
+        *,
+        check_before_write: Callable[[], None] | None = None,
+    ) -> None:
+        response = await self._request(
+            SET_COMMAND, payload, check_before_write=check_before_write
+        )
         try:
             parse_set_ack(self._decode_payload(response), expected_keys)
         except ProtocolError as error:
@@ -1401,16 +1417,16 @@ class DjiPowerDevice:
         identity = {
             "interface_type": interface_type, "seq": seq, "type": accessory_type
         }
+
+        def check_cable_attachment() -> None:
+            # Key 0x0A can retain a settings row after the cable is unplugged.
+            port = reported_sdc_accessories(self.data).get((interface_type, seq))
+            if port is None or port["accessory_type"] != CAR_POWER_OUTLET_CABLE:
+                raise DjiPowerError("the car power outlet cable is no longer attached")
+
         async with self._operation_lock:
             update = await self._read_accessory_config(CAR_CHARGERS_KEY, "car_chargers")
             await self._read_station_rules()
-            if accessory_type == CAR_POWER_OUTLET_CABLE:
-                # Key 0x0A can retain a settings row after the cable is unplugged.
-                port = reported_sdc_accessories(self.data).get((interface_type, seq))
-                if port is None or port["accessory_type"] != CAR_POWER_OUTLET_CABLE:
-                    raise DjiPowerError(
-                        "the car power outlet cable is no longer attached"
-                    )
             try:
                 payload = build_car_charger_set_payload(
                     update["key_0a"], interface_type, seq, accessory_type,
@@ -1430,7 +1446,14 @@ class DjiPowerDevice:
             else:
                 fields = ["sw"] if enabled is not None else ["mode"]
             expected = {field: requested[field] for field in fields}
-            await self._set(payload, tuple(parse_keyed_values(payload)))
+            await self._set(
+                payload,
+                (CAR_CHARGERS_KEY, RULES_KEY),
+                check_before_write=(
+                    check_cable_attachment
+                    if accessory_type == CAR_POWER_OUTLET_CABLE else None
+                ),
+            )
             await self._wait_for_accessory_values(
                 CAR_CHARGERS_KEY, "car_chargers", identity, expected
             )
