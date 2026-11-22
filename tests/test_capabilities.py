@@ -75,10 +75,14 @@ class PortCapabilityTests(unittest.TestCase):
 
 
 class FeatureCapabilityTests(unittest.TestCase):
-    def test_known_models_can_discover_all_features_but_generic_model_cannot(self):
+    def test_feature_support_by_model(self):
         for feature in features.ModelFeature:
             for model in duml.MODEL_NAMES.values():
-                self.assertTrue(features.supports_feature(model, feature))
+                expected = (
+                    feature != features.ModelFeature.DISPLAY_SETTINGS
+                    or model == "DJI Power 1000 V2"
+                )
+                self.assertEqual(features.supports_feature(model, feature), expected)
             self.assertFalse(features.supports_feature("DJI Power", feature))
 
     def test_schedule_requires_reported_list_available_eco_and_rule_5(self):

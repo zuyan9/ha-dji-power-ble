@@ -10,6 +10,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .duml import CAR_CHARGER_TYPES, CAR_POWER_OUTLET_CABLE
 from .entity import DjiPowerEntity
 from .features import (
     ModelFeature,
@@ -20,7 +21,7 @@ from .features import (
 
 AccessoryIdentity = tuple[int, int, int]
 PortIdentity = tuple[int, int]
-CAR_CHARGER_TYPES = {3, 4}
+CAR_POWER_ACCESSORY_TYPES = CAR_CHARGER_TYPES | {CAR_POWER_OUTLET_CABLE}
 SDC_INTERFACE_TYPES = {5, 6}
 USB_INTERFACE_TYPES = {3, 4}
 # DJI Home's names for the accessory types an SDC port reports.
@@ -112,6 +113,7 @@ def reported_rows(
         return {}
     result = {}
     duplicates = set()
+    ports = reported_sdc_accessories(data) if key == "car_chargers" else {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -124,9 +126,16 @@ def reported_rows(
             or type(seq) is not int
             or not 0 <= seq <= 255
             or type(accessory_type) is not int
-            or (key == "car_chargers" and accessory_type not in CAR_CHARGER_TYPES)
+            or (
+                key == "car_chargers"
+                and accessory_type not in CAR_POWER_ACCESSORY_TYPES
+            )
         ):
             continue
+        if accessory_type == CAR_POWER_OUTLET_CABLE:
+            port = ports.get((interface_type, seq), {})
+            if port.get("accessory_type") != CAR_POWER_OUTLET_CABLE:
+                continue
         identity = interface_type, seq, accessory_type
         if identity in result:
             duplicates.add(identity)

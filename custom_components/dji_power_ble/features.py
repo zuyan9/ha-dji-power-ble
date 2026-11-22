@@ -26,6 +26,7 @@ class ModelFeature(StrEnum):
     SDC_CONTROLS = "sdc_controls"
     USB_CONTROLS = "usb_controls"
     RESERVE_CONTROL = "reserve_control"
+    DISPLAY_SETTINGS = "display_settings"
 
 
 _KNOWN_MODELS = frozenset(MODEL_NAMES.values())
@@ -38,6 +39,8 @@ def is_known_model(model: str) -> bool:
 
 def supports_feature(model: str, feature: ModelFeature) -> bool:
     """Allow known models to discover a feature, subject to station capability."""
+    if feature == ModelFeature.DISPLAY_SETTINGS:
+        return model == MODEL_NAMES[0x97]
     return is_known_model(model) and feature in ModelFeature
 
 
@@ -53,6 +56,8 @@ def station_rule_enabled(data: dict, rule: int) -> bool:
 
 def feature_available(data: dict, feature: ModelFeature) -> bool:
     """Apply the known record and station-rule gates for an optional feature."""
+    if feature == ModelFeature.DISPLAY_SETTINGS:
+        return isinstance(data.get("display_settings"), dict)
     if feature == ModelFeature.RESERVE_CONTROL:
         return data.get("energy_reserve_available") is True
     if feature == ModelFeature.TARIFF_SCHEDULE:

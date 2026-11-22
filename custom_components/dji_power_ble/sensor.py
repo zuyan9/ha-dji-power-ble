@@ -27,6 +27,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .accessory import (
+    CAR_POWER_ACCESSORY_TYPES,
     SDC_ACCESSORY_NAMES,
     PortIdentity,
     accessory_firmware,
@@ -719,6 +720,17 @@ class DjiPowerSdcInputSensor(_DjiPowerSdcSensor):
         else:
             self._attr_device_class = SensorDeviceClass.VOLTAGE
             self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+
+    @property
+    def port(self) -> dict | None:
+        port = super().port
+        if (
+            port is not None
+            and self._slot[0] == "car"
+            and port["accessory_type"] not in CAR_POWER_ACCESSORY_TYPES
+        ):
+            return None
+        return port
 
     @property
     def native_value(self) -> float | int | None:

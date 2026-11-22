@@ -181,7 +181,12 @@ remain visible.
 
 Key `0x0C` holds three u32 timeouts in seconds, for the whole device, its screen, and
 AC output, followed by a u8 temperature unit. A timeout of `0` means never.
-**Display timeout** reports the screen timeout.
+**Display timeout** reports the screen timeout. The Power 1000 V2 also has
+selectors for all three timeouts.
+
+Writes use `0x63` with the full 13-byte `0x0C` record and the client rules record.
+The integration changes the selected timeout in a fresh record, preserves the
+temperature-unit byte, and verifies the new timeout with a read.
 
 ### Base information
 

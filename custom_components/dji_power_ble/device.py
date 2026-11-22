@@ -23,6 +23,8 @@ from .duml import (
     CAR_CHARGERS_KEY,
     CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
+    DISPLAY_SETTING_OPTIONS,
+    DISPLAY_SETTINGS_KEY,
     ECO_MODE_KEY,
     ENERGY_STORAGE_KEY,
     EXPANSION_BATTERIES_KEY,
@@ -49,6 +51,7 @@ from .duml import (
     build_charge_limits_set_payload,
     build_charge_power_set_payload,
     build_discharge_power_set_payload,
+    build_display_setting_payload,
     build_energy_reserve_set_payload,
     build_energy_saver_mode_set_payload,
     build_keyed_set_payload,
@@ -106,7 +109,7 @@ _INITIAL_CONFIG_KEYS = (
     0x02,  # Network state.
     CHARGE_LIMIT_KEY,
     ENERGY_STORAGE_KEY,
-    0x0C,  # Display settings.
+    DISPLAY_SETTINGS_KEY,
     POWER_SWITCH_KEY,
     RULES_KEY,  # Station rules; some stations report them only in pushes.
     0x15,  # Timezone.
@@ -1347,6 +1350,34 @@ class DjiPowerDevice:
                 {"type": interface_type, "seq": seq},
                 {"sw": 1 if enabled else 2},
             )
+
+    async def set_display_setting(self, field: str, option: str) -> None:
+        """Preserve the other fields and confirm the selected value by reading it."""
+        if not supports_feature(self.model, ModelFeature.DISPLAY_SETTINGS):
+            raise DjiPowerError("display settings are not supported on this model")
+        async with self._operation_lock:
+            update = await self._read_config(
+                DISPLAY_SETTINGS_KEY, require_complete=True
+            )
+            snapshot = update.get("key_0c")
+            if not isinstance(snapshot, str):
+                raise DjiPowerError("station omitted display settings")
+            try:
+                payload = build_display_setting_payload(snapshot, field, option)
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            await self._set(payload, (DISPLAY_SETTINGS_KEY, RULES_KEY))
+            expected = DISPLAY_SETTING_OPTIONS[field][option]
+            for attempt in range(READBACK_RETRIES + 1):
+                if attempt:
+                    await asyncio.sleep(READBACK_RETRY_INTERVAL)
+                update = await self._read_config(
+                    DISPLAY_SETTINGS_KEY, require_complete=True
+                )
+                settings = update.get("display_settings")
+                if isinstance(settings, dict) and settings.get(field) == expected:
+                    return
+            raise DjiPowerError("station did not report the selected display setting")
 
     async def set_car_charger(
         self,

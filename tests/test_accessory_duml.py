@@ -238,6 +238,28 @@ class StationRulesTests(unittest.TestCase):
 
 
 class CarChargerBuilderTests(unittest.TestCase):
+    def test_car_power_outlet_cable_set_matches_dji_home(self) -> None:
+        # SDC 1 type-1 record with a 0–100 W range, using a zeroed timestamp.
+        row = bytes.fromhex("0501010102640000000000000064000000") + bytes(48)
+        snapshot = record(0x1012, row)
+        for watts in (0, 49, 99, 100):
+            with self.subTest(watts=watts):
+                body = row[:13] + watts.to_bytes(4, "little") + row[17:]
+                expected = (
+                    bytes.fromhex("00001000") + bytes(12)
+                    + bytes.fromhex("0a1045000a004100") + body
+                    + bytes.fromhex("0e100e000c00") + b"1f00efffff7f"
+                )
+                self.assertEqual(
+                    duml.build_car_charger_set_payload(
+                        snapshot, 5, 1, 1, recharge_power_w=watts, timestamp_ms=0
+                    ),
+                    expected,
+                )
+        for setting in ({"enabled": False}, {"mode": 1}, {"minimum_voltage_v": 12}):
+            with self.subTest(setting=setting), self.assertRaises(duml.ProtocolError):
+                duml.build_car_charger_set_payload(snapshot, 5, 1, 1, **setting)
+
     def test_reported_zero_sequence_is_preserved(self) -> None:
         payload = duml.build_car_charger_set_payload(
             car_value(seq=0), 5, 0, 4, enabled=False, timestamp_ms=0

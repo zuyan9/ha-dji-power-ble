@@ -325,6 +325,14 @@ class DjiPowerCoordinator(DataUpdateCoordinator[dict[str, object]]):
             raise HomeAssistantError(str(error)) from error
         self._publish(dict(self.device.data))
 
+    async def async_set_display_setting(self, field: str, option: str) -> None:
+        """Set a display or timeout option and publish the confirmed readback."""
+        try:
+            await self.device.set_display_setting(field, option)
+        except DjiPowerError as error:
+            raise HomeAssistantError(str(error)) from error
+        self._publish(dict(self.device.data))
+
     async def async_set_energy_saver_mode(self, mode: str) -> None:
         """Select an Energy Saver mode and publish its confirmed readback."""
         try:

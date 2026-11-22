@@ -20,6 +20,7 @@ from .accessory import (
     async_discover_feature,
 )
 from .const import DOMAIN
+from .duml import CAR_CHARGER_TYPES
 from .entity import DjiPowerEntity
 from .features import ModelFeature, eligible_port_switches, feature_available
 
@@ -50,9 +51,11 @@ async def async_setup_entry(
         entry,
         async_add_entities,
         {
-            "car_chargers": lambda identity: [
-                DjiPowerCarRechargingSwitch(coordinator, identity)
-            ],
+            "car_chargers": lambda identity: (
+                [DjiPowerCarRechargingSwitch(coordinator, identity)]
+                if identity[2] in CAR_CHARGER_TYPES
+                else []
+            ),
             "power_switches": lambda identity: [
                 DjiPowerSdcSwitch(coordinator, identity)
             ],

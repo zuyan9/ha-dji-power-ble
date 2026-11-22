@@ -128,6 +128,37 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
     def car_row(self):
         return self.device.data["car_chargers"][0]
 
+    async def test_display_settings_preserve_other_fields_and_confirm_writes(self):
+        self.reset_device("DJI Power 1000 V2")
+        self.client.values[0x0C] = struct.pack("<IIIB", 3600, 0, 1800, 2)
+        for field, option, expected in (
+            ("screen_timeout", "10 s", (3600, 10, 1800, 2)),
+            ("device_timeout", "3 h", (10800, 10, 1800, 2)),
+            ("ac_timeout", "Never", (10800, 10, 0, 2)),
+        ):
+            with self.subTest(field=field):
+                self.client.requests.clear()
+                await self.device.set_display_setting(field, option)
+                read, write, verify = self.client.requests
+                self.assertEqual(read, (duml.GET_COMMAND, bytes.fromhex("000c10")))
+                self.assertEqual(verify, read)
+                self.assertEqual(write[0], duml.SET_COMMAND)
+                self.assertEqual(
+                    duml.parse_keyed_values(write[1]),
+                    {
+                        0x0C: struct.pack("<IIIB", *expected),
+                        0x0E: bytes.fromhex("0c00") + b"1f00efffff7f",
+                    },
+                )
+                self.assertEqual(self.device.data["display_timeout_s"], expected[1])
+
+    async def test_display_settings_refuse_short_snapshot(self):
+        self.reset_device("DJI Power 1000 V2")
+        self.client.values[0x0C] = struct.pack("<II", 3600, 0)
+        with self.assertRaisesRegex(device_module.DjiPowerError, "complete display"):
+            await self.device.set_display_setting("screen_timeout", "10 s")
+        self.assertFalse(self.client.did_set)
+
     async def test_controls_use_fresh_get_set_ack_and_immediate_targeted_readback(self):
         for mode, rule, kwargs, field, expected in (
             (2, None, {"enabled": False}, "sw", 2),
