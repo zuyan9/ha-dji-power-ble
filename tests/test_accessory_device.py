@@ -128,6 +128,35 @@ class AccessoryDeviceTests(unittest.IsolatedAsyncioTestCase):
     def car_row(self):
         return self.device.data["car_chargers"][0]
 
+    async def test_cable_write_rechecks_attachment_after_reading_settings(self):
+        self.reset_device("DJI Power 1000 V2")
+        row = struct.pack("<5B3I", 5, 2, 1, 1, 2, 100, 0, 100) + bytes(48)
+        self.client.values[0x0A] = struct.pack("<HH", 0x1012, len(row)) + row
+        self.device._merge_data({
+            "interfaces": [{"type": 5, "seq": 2, "accessory_type": 1}],
+        })
+        await self.device.set_car_charger(5, 2, 1, recharge_power_w=49)
+        self.assertEqual(self.car_row()["p_from_car_v"], 49)
+
+        read_station_rules = self.device._read_station_rules
+
+        async def unplug_while_reading_rules():
+            await read_station_rules()
+            self.device._merge_data({"interfaces": []})
+
+        self.client.did_set = False
+        with (
+            patch.object(
+                self.device,
+                "_read_station_rules",
+                side_effect=unplug_while_reading_rules,
+            ),
+            self.assertRaisesRegex(device_module.DjiPowerError, "no longer attached"),
+        ):
+            await self.device.set_car_charger(5, 2, 1, recharge_power_w=50)
+        self.assertFalse(self.client.did_set)
+        self.assertEqual(self.car_row()["p_from_car_v"], 49)
+
     async def test_display_settings_preserve_other_fields_and_confirm_writes(self):
         self.reset_device("DJI Power 1000 V2")
         self.client.values[0x0C] = struct.pack("<IIIB", 3600, 0, 1800, 2)

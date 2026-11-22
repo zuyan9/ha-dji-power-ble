@@ -12,6 +12,17 @@ from .duml import (
     PORT_SWITCH_RULE,
 )
 
+PortIdentity = tuple[int, int]
+SDC_INTERFACE_TYPES = {5, 6}
+# DJI Home's names for the accessory types an SDC port reports.
+SDC_ACCESSORY_NAMES = {
+    1: "car_power_outlet_cable",
+    2: "solar_panel_adapter",
+    3: "car_charger_1kw",
+    4: "solar_car_charger_1_8kw",
+    5: "poe_cable",
+}
+
 
 class ModelFeature(StrEnum):
     """Optional features whose availability comes from station records."""
@@ -141,6 +152,31 @@ def energy_saver_options(data: dict) -> list[str]:
         if data.get("eco_meter_linked") is True:
             offered.add("self_consumption")
     return [mode for mode in ENERGY_SAVER_MODES if mode in offered]
+
+
+def reported_sdc_accessories(data: dict) -> dict[PortIdentity, dict]:
+    """Return unambiguous SDC-family ports that report a recognized accessory."""
+    result: dict[PortIdentity, dict] = {}
+    duplicates = set()
+    interfaces = data.get("interfaces")
+    for item in interfaces if isinstance(interfaces, list) else ():
+        if not isinstance(item, dict):
+            continue
+        interface_type, seq = item.get("type"), item.get("seq")
+        accessory_type = item.get("accessory_type")
+        if (
+            type(interface_type) is not int
+            or interface_type not in SDC_INTERFACE_TYPES
+            or type(seq) is not int
+            or type(accessory_type) is not int
+            or accessory_type not in SDC_ACCESSORY_NAMES
+        ):
+            continue
+        identity = interface_type, seq
+        if identity in result:
+            duplicates.add(identity)
+        result[identity] = item
+    return {key: value for key, value in result.items() if key not in duplicates}
 
 
 def eligible_port_switches(data: dict) -> dict[tuple[int, int], dict]:

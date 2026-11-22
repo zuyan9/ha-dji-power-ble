@@ -28,19 +28,23 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .accessory import (
     CAR_POWER_ACCESSORY_TYPES,
-    SDC_ACCESSORY_NAMES,
-    PortIdentity,
     accessory_firmware,
     accessory_inputs,
     async_discover_feature,
     port_name,
-    reported_sdc_accessories,
 )
 from .const import DOMAIN
 from .coordinator import DjiPowerCoordinator
 from .duml import METER_PHASES
 from .entity import DjiPowerEntity
-from .features import ModelFeature, feature_available, is_known_model
+from .features import (
+    SDC_ACCESSORY_NAMES,
+    ModelFeature,
+    PortIdentity,
+    feature_available,
+    is_known_model,
+    reported_sdc_accessories,
+)
 
 DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(

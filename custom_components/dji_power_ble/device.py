@@ -21,6 +21,7 @@ from .duml import (
     AUTH_COMMAND,
     CAR_CHARGER_NUMBERS,
     CAR_CHARGERS_KEY,
+    CAR_POWER_OUTLET_CABLE,
     CHARGE_LIMIT_KEY,
     CHECK_SECRET_KEY,
     DISPLAY_SETTING_OPTIONS,
@@ -78,6 +79,7 @@ from .features import (
     eligible_port_switches,
     feature_available,
     is_known_model,
+    reported_sdc_accessories,
     station_rule_enabled,
     supports_feature,
 )
@@ -1402,6 +1404,13 @@ class DjiPowerDevice:
         async with self._operation_lock:
             update = await self._read_accessory_config(CAR_CHARGERS_KEY, "car_chargers")
             await self._read_station_rules()
+            if accessory_type == CAR_POWER_OUTLET_CABLE:
+                # Key 0x0A can retain a settings row after the cable is unplugged.
+                port = reported_sdc_accessories(self.data).get((interface_type, seq))
+                if port is None or port["accessory_type"] != CAR_POWER_OUTLET_CABLE:
+                    raise DjiPowerError(
+                        "the car power outlet cable is no longer attached"
+                    )
             try:
                 payload = build_car_charger_set_payload(
                     update["key_0a"], interface_type, seq, accessory_type,
