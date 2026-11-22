@@ -42,7 +42,7 @@ become unavailable when the accessory is removed.
 When the station reports this cable attached, **SDC … car recharge limit**
 sets the maximum power drawn from the vehicle in whole watts. The slider
 uses the range reported for that SDC port. The cable's input readings and
-limit become unavailable on unplug.
+limit become unavailable when the station reports that the cable is unplugged.
 
 ## Car chargers
 

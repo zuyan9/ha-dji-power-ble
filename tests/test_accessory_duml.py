@@ -1,4 +1,4 @@
-"""Synthetic accessory codec checks; these do not validate physical hardware."""
+"""Accessory codec checks and scoped DJI Home settings captures."""
 
 from __future__ import annotations
 
@@ -237,8 +237,59 @@ class StationRulesTests(unittest.TestCase):
                 self.assertEqual(duml.car_charger_numbers(mode, rule), expected)
 
 
+class DjiHomeSettingsCaptureTests(unittest.TestCase):
+    """Power 1000 V2 SET records and ACKs captured from DJI Home 1.7.1."""
+
+    # The prior values come from the preceding app writes. Only the selected
+    # settings TLVs and ACK statuses are included here. Packet metadata and
+    # the configuration header (including the timestamp) were removed.
+
+    def test_cable_set_and_ack_match_capture(self) -> None:
+        previous = bytes.fromhex(
+            "0a00410005010101026400000000000000640000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000"
+        )
+        captured = bytes.fromhex(
+            "0a1045000a004100050101010264000000000000003100000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000e100e000c00316630306566666666663766"
+        )
+        payload = duml.build_car_charger_set_payload(
+            previous, 5, 1, 1, recharge_power_w=49, timestamp_ms=0
+        )
+        self.assertEqual(payload[16:], captured)
+        duml.parse_set_ack(
+            bytes.fromhex("0e100400000000000a10040000000000"), (0x0A, 0x0E)
+        )
+
+    def test_timeout_sets_and_acks_match_captures(self) -> None:
+        for field, option, previous, captured in (
+            (
+                "screen_timeout", "5 min", "100e0000080700000807000000",
+                "0c100d00100e00002c01000008070000000e100e000c00316630306566666666663766",
+            ),
+            (
+                "device_timeout", "3 h", "100e0000000000000807000000",
+                "0c100d00302a00000000000008070000000e100e000c00316630306566666666663766",
+            ),
+            (
+                "ac_timeout", "1 h", "302a0000000000000807000000",
+                "0c100d00302a000000000000100e0000000e100e000c00316630306566666666663766",
+            ),
+        ):
+            with self.subTest(field=field):
+                payload = duml.build_display_setting_payload(
+                    previous, field, option, timestamp_ms=0
+                )
+                self.assertEqual(payload[16:], bytes.fromhex(captured))
+                duml.parse_set_ack(
+                    bytes.fromhex("0e100400000000000c10040000000000"), (0x0C, 0x0E)
+                )
+
+
 class CarChargerBuilderTests(unittest.TestCase):
-    def test_car_power_outlet_cable_set_matches_dji_home(self) -> None:
+    def test_car_power_outlet_cable_setting_is_bounded(self) -> None:
         # SDC 1 type-1 record with a 0–100 W range, using a zeroed timestamp.
         row = bytes.fromhex("0501010102640000000000000064000000") + bytes(48)
         snapshot = record(0x1012, row)
@@ -255,6 +306,11 @@ class CarChargerBuilderTests(unittest.TestCase):
                         snapshot, 5, 1, 1, recharge_power_w=watts, timestamp_ms=0
                     ),
                     expected,
+                )
+        for watts in (-1, 101):
+            with self.subTest(watts=watts), self.assertRaises(duml.ProtocolError):
+                duml.build_car_charger_set_payload(
+                    snapshot, 5, 1, 1, recharge_power_w=watts
                 )
         for setting in ({"enabled": False}, {"mode": 1}, {"minimum_voltage_v": 12}):
             with self.subTest(setting=setting), self.assertRaises(duml.ProtocolError):
