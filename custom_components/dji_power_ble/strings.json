@@ -245,6 +245,15 @@
           "self_consumption": "Max self-consumption",
           "time_of_use": "Time of use (TOU)"
         }
+      },
+      "device_timeout": {
+        "name": "Device timeout"
+      },
+      "screen_timeout": {
+        "name": "Device screen timeout"
+      },
+      "ac_timeout": {
+        "name": "AC timeout"
       }
     },
     "sensor": {

@@ -16,9 +16,14 @@ from .accessory import (
     async_discover_feature,
 )
 from .const import DOMAIN
-from .duml import ENERGY_SAVER_MODES
+from .duml import CAR_CHARGER_TYPES, DISPLAY_SETTING_OPTIONS, ENERGY_SAVER_MODES
 from .entity import DjiPowerEntity
-from .features import ModelFeature, energy_saver_options, feature_available
+from .features import (
+    ModelFeature,
+    energy_saver_options,
+    feature_available,
+    supports_feature,
+)
 
 
 async def async_setup_entry(
@@ -33,16 +38,62 @@ async def async_setup_entry(
         coordinator, entry, async_add_entities, ModelFeature.TOU_POWER_CONTROL,
         lambda: [DjiPowerAdjustmentSelect(coordinator)],
     )
+    if supports_feature(coordinator.device.model, ModelFeature.DISPLAY_SETTINGS):
+        async_discover_feature(
+            coordinator, entry, async_add_entities, ModelFeature.DISPLAY_SETTINGS,
+            lambda: [
+                DjiPowerDisplaySettingSelect(coordinator, field)
+                for field in DISPLAY_SETTING_OPTIONS
+            ],
+        )
     async_discover_accessories(
         coordinator,
         entry,
         async_add_entities,
         {
-            "car_chargers": lambda identity: [
-                DjiPowerCarModeSelect(coordinator, identity)
-            ]
+            "car_chargers": lambda identity: (
+                [DjiPowerCarModeSelect(coordinator, identity)]
+                if identity[2] in CAR_CHARGER_TYPES
+                else []
+            )
         },
     )
+
+
+class DjiPowerDisplaySettingSelect(DjiPowerEntity, SelectEntity):
+    """Select an option from the station's display and timeout record."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, field: str) -> None:
+        super().__init__(coordinator)
+        self._field = field
+        self._attr_translation_key = field
+        self._attr_unique_id = f"{coordinator.entry.data[CONF_ADDRESS]}_setting_{field}"
+        self._attr_options = list(DISPLAY_SETTING_OPTIONS[field])
+
+    @property
+    def available(self) -> bool:
+        return super().available and feature_available(
+            self.coordinator.data or {}, ModelFeature.DISPLAY_SETTINGS
+        )
+
+    @property
+    def current_option(self) -> str | None:
+        settings = (self.coordinator.data or {}).get("display_settings")
+        if not isinstance(settings, dict):
+            return None
+        value = settings.get(self._field)
+        return next(
+            (option for option, raw in DISPLAY_SETTING_OPTIONS[self._field].items()
+             if raw == value),
+            None,
+        )
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in self._attr_options:
+            raise ServiceValidationError("unsupported display or timeout setting")
+        await self.coordinator.async_set_display_setting(self._field, option)
 
 
 class DjiPowerEnergySaverModeSelect(DjiPowerEntity, SelectEntity):

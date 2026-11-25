@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import re
+import struct
 import time
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
@@ -55,6 +56,9 @@ ACCESSORIES_KEY = 0x04
 CHARGE_LIMIT_KEY = 0x05
 ENERGY_STORAGE_KEY = 0x06
 CAR_CHARGERS_KEY = 0x0A
+CAR_POWER_OUTLET_CABLE = 1
+CAR_CHARGER_TYPES = frozenset({3, 4})
+DISPLAY_SETTINGS_KEY = 0x0C
 POWER_SWITCH_KEY = 0x0D
 RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
@@ -91,6 +95,26 @@ ENERGY_RESERVE_MARGIN = 5
 
 # The client rules record DJI Home 1.6.9 sends with each SET.
 _SET_STATE_RULES = (RULES_KEY, bytes.fromhex("0c00") + b"1e00efffff3f")
+# The client rules record captured with DJI Home 1.7.1.
+_SET_STATE_RULES_1_7_1 = (RULES_KEY, bytes.fromhex("0c00") + b"1f00efffff7f")
+
+
+# Options observed on the Power 1000 V2.
+_POWER_TIMEOUT_OPTIONS = {
+    "30 min": 1800, "1 h": 3600, "3 h": 10800, "5 h": 18000,
+    "12 h": 43200, "Never": 0,
+}
+DISPLAY_SETTING_OPTIONS = {
+    "device_timeout": _POWER_TIMEOUT_OPTIONS,
+    "screen_timeout": {
+        "10 s": 10, "30 s": 30, "1 min": 60, "5 min": 300, "30 min": 1800,
+        "Never": 0,
+    },
+    "ac_timeout": _POWER_TIMEOUT_OPTIONS,
+}
+_DISPLAY_TIMEOUT_FIELDS = ("device_timeout", "screen_timeout", "ac_timeout")
+_DISPLAY_TIMEOUTS = struct.Struct("<III")
+_DISPLAY_SETTINGS_SIZE = _DISPLAY_TIMEOUTS.size + 1
 
 
 class ProtocolError(ValueError):
@@ -990,7 +1014,13 @@ def parse_telemetry(
         with contextlib.suppress(ProtocolError):
             data["accessories"] = parse_accessories(keyed[ACCESSORIES_KEY])
 
-    if len(display := keyed.get(0x0C, b"")) >= 8:
+    if DISPLAY_SETTINGS_KEY in keyed:
+        display = keyed[DISPLAY_SETTINGS_KEY]
+        data["display_settings"] = (
+            _parse_display_settings(display)
+            if len(display) == _DISPLAY_SETTINGS_SIZE else None
+        )
+    if len(display := keyed.get(DISPLAY_SETTINGS_KEY, b"")) >= 8:
         # Device, screen, then AC output timeouts in u32 seconds; 0 means never.
         data["display_timeout_s"] = int.from_bytes(display[4:8], "little")
 
@@ -1186,6 +1216,37 @@ def build_ac_set_payload(
     )
 
 
+def _parse_display_settings(value: bytes) -> dict[str, int]:
+    values = _DISPLAY_TIMEOUTS.unpack_from(value)
+    return dict(zip(_DISPLAY_TIMEOUT_FIELDS, values, strict=True))
+
+
+def build_display_setting_payload(
+    snapshot: str, field: str, option: str, *, timestamp_ms: int | None = None
+) -> bytes:
+    """Change one field in an exact 13-byte Power 1000 V2 settings snapshot."""
+    options = DISPLAY_SETTING_OPTIONS.get(field, {})
+    if option not in options:
+        raise ProtocolError("unsupported display or timeout setting")
+    try:
+        current = bytes.fromhex(snapshot)
+    except ValueError as error:
+        raise ProtocolError("invalid display settings snapshot") from error
+    if len(current) != _DISPLAY_SETTINGS_SIZE:
+        raise ProtocolError("station omitted complete display settings")
+    values = _parse_display_settings(current)
+    values[field] = options[option]
+    record = _DISPLAY_TIMEOUTS.pack(*(values[name] for name in _DISPLAY_TIMEOUT_FIELDS))
+    record += current[_DISPLAY_TIMEOUTS.size:]
+    return build_keyed_set_payload(
+        [
+            (DISPLAY_SETTINGS_KEY, record),
+            _SET_STATE_RULES_1_7_1,
+        ],
+        timestamp_ms=timestamp_ms,
+    )
+
+
 def _accessory_snapshot(current_value: str | bytes) -> bytes:
     """Read a complete snapshot without replacing unavailable state with defaults."""
     try:
@@ -1267,13 +1328,19 @@ def build_car_charger_set_payload(
     the station's Auto layout rule, which decides the voltages Auto mode uses.
     """
     _validate_sdc_identity(interface_type, seq)
-    if type(accessory_type) is not int or accessory_type not in (3, 4):
-        raise ProtocolError("car-charger controls require a 1 kW or 1.8 kW accessory")
+    if (
+        type(accessory_type) is not int
+        or accessory_type not in CAR_CHARGER_TYPES | {CAR_POWER_OUTLET_CABLE}
+    ):
+        raise ProtocolError("car-charger controls require a supported accessory")
     if unknown := sorted(numbers.keys() - CAR_CHARGER_NUMBERS.keys()):
         raise ProtocolError(f"unknown car-charger setting {unknown[0]}")
     numbers = {name: value for name, value in numbers.items() if value is not None}
     if sum(setting is not None for setting in (enabled, mode)) + len(numbers) != 1:
         raise ProtocolError("change exactly one car-charger setting at a time")
+    cable = accessory_type == CAR_POWER_OUTLET_CABLE
+    if cable and numbers.keys() != {"recharge_power_w"}:
+        raise ProtocolError("the car power outlet cable only supports recharge power")
     value = _accessory_snapshot(current_value)
     rows = parse_car_chargers(value)
     index = next(
@@ -1311,8 +1378,10 @@ def build_car_charger_set_payload(
     updated = _replace_accessory_row(
         value, CAR_CHARGERS_KEY, index, offset, replacement
     )
+    rules = _SET_STATE_RULES_1_7_1 if cable else _SET_STATE_RULES
     return build_keyed_set_payload(
-        [(CAR_CHARGERS_KEY, updated), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+        [(CAR_CHARGERS_KEY, updated), rules],
+        timestamp_ms=timestamp_ms,
     )
 
 

@@ -27,19 +27,24 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .accessory import (
-    SDC_ACCESSORY_NAMES,
-    PortIdentity,
+    CAR_POWER_ACCESSORY_TYPES,
     accessory_firmware,
     accessory_inputs,
     async_discover_feature,
     port_name,
-    reported_sdc_accessories,
 )
 from .const import DOMAIN
 from .coordinator import DjiPowerCoordinator
 from .duml import METER_PHASES
 from .entity import DjiPowerEntity
-from .features import ModelFeature, feature_available, is_known_model
+from .features import (
+    SDC_ACCESSORY_NAMES,
+    ModelFeature,
+    PortIdentity,
+    feature_available,
+    is_known_model,
+    reported_sdc_accessories,
+)
 
 DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -719,6 +724,17 @@ class DjiPowerSdcInputSensor(_DjiPowerSdcSensor):
         else:
             self._attr_device_class = SensorDeviceClass.VOLTAGE
             self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+
+    @property
+    def port(self) -> dict | None:
+        port = super().port
+        if (
+            port is not None
+            and self._slot[0] == "car"
+            and port["accessory_type"] not in CAR_POWER_ACCESSORY_TYPES
+        ):
+            return None
+        return port
 
     @property
     def native_value(self) -> float | int | None:

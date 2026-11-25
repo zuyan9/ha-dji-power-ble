@@ -1125,6 +1125,11 @@ class SdcAccessorySensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.sdc_entities()["5_1_accessory"].native_value, "car_power_outlet_cable"
         )
+        car_power = self.sdc_entities()["5_1_car_1_recharge_power"]
+        for interfaces in ([], [_sdc(_solar(15, 25.0), accessory_type=2)]):
+            self.publish(interfaces=interfaces)
+            self.assertFalse(car_power.available)
+            self.assertIsNone(car_power.native_value)
 
     async def test_auro_adds_reported_accessory_inputs(self) -> None:
         self.coordinator.device.model = "DJI Power Auro 2000 Elite"

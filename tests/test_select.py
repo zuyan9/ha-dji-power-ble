@@ -15,6 +15,38 @@ from tests.test_number import (
 )
 
 
+class DisplaySettingSelectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_v2_controls_appear_once_a_complete_record_is_reported(self) -> None:
+        listeners = []
+        entities = []
+        coordinator = types.SimpleNamespace(
+            entry=types.SimpleNamespace(data={"address": "AA:BB:CC:DD:EE:FF"}),
+            device=types.SimpleNamespace(model="DJI Power 1000 V2"),
+            last_update_success=True,
+            data={},
+            async_add_listener=lambda listener: listeners.append(listener) or Mock(),
+            async_set_display_setting=AsyncMock(),
+        )
+        entry = types.SimpleNamespace(entry_id="station", async_on_unload=Mock())
+        hass = types.SimpleNamespace(data={"dji_power_ble": {"station": coordinator}})
+        await select.async_setup_entry(hass, entry, entities.extend)
+        self.assertEqual(entities, [])
+        coordinator.data["display_settings"] = {
+            "device_timeout": 10800, "screen_timeout": 0,
+            "ac_timeout": 1800,
+        }
+        for listener in listeners:
+            listener()
+        self.assertEqual(
+            [entity.current_option for entity in entities],
+            ["3 h", "Never", "30 min"],
+        )
+        await entities[1].async_select_option("10 s")
+        coordinator.async_set_display_setting.assert_awaited_once_with(
+            "screen_timeout", "10 s"
+        )
+
+
 class PowerAdjustmentSelectTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.coordinator = types.SimpleNamespace(

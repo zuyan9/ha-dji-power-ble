@@ -181,7 +181,13 @@ remain visible.
 
 Key `0x0C` holds three u32 timeouts in seconds, for the whole device, its screen, and
 AC output, followed by a u8 temperature unit. A timeout of `0` means never.
-**Display timeout** reports the screen timeout.
+**Display timeout** reports the screen timeout. The Power 1000 V2 also has
+selectors for all three timeouts.
+
+Writes use `0x63` with the full 13-byte `0x0C` record and the DJI Home 1.7.1
+client rules record. The integration changes the selected timeout in a fresh
+record, preserves the temperature-unit byte, and verifies the new timeout with
+a read.
 
 ### Base information
 
@@ -546,6 +552,12 @@ shows it, and only with valid bounds for that field:
 | `1` Auto, rule 0 set | Both powers and the Auto voltage |
 | `1` Auto, rule 0 clear or no rules | Both powers and both direction voltages |
 
+Accessory type `1` is the Car Power Outlet to SDC cable. It only exposes the
+car-to-station power setting, in whole watts, within the row's reported bounds.
+The captured SDC 1 row offered 0–100 W. A matching interface telemetry row must
+still report the cable on that port when the SET is sent. A settings row can
+remain after the cable is unplugged.
+
 Key `0x0E` (`rules`) holds the station's own rules, which differ from the client
 record sent with writes. The value is a u16 LE text length followed by ASCII hex,
 which the station can end with NUL. The hex decodes to a u16 LE rule count and a
@@ -585,7 +597,11 @@ schema while validating every nested length. Row bodies and unknown extended tai
 are retained during edits. Truncated rows or duplicate port identities invalidate
 the snapshot rather than selecting an ambiguous target.
 
-Both accessory SET paths include the same rules key `0x0E` used for AC output.
+Accessory SETs include the client rules key `0x0E`. The type-1 cable and the
+timeout selectors use the declaration captured from DJI Home 1.7.1
+(`1f00efffff7f` as ASCII hex). The existing charger and port switch paths use
+the declaration captured from DJI Home 1.6.9.
+
 Each written key must return zero status. Confirmation uses a fresh targeted GET
 (`00 0a 10` or `00 0d 10`) and matches the addressed row, with immediate first
 read and the existing retry policy. A successful ACK can precede or accompany an

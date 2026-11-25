@@ -23,7 +23,12 @@ from .accessory import (
     async_discover_feature,
 )
 from .const import DOMAIN
-from .duml import CAR_CHARGER_NUMBERS, car_charger_numbers, energy_reserve_bounds
+from .duml import (
+    CAR_CHARGER_NUMBERS,
+    CAR_POWER_OUTLET_CABLE,
+    car_charger_numbers,
+    energy_reserve_bounds,
+)
 from .entity import DjiPowerEntity
 from .features import ModelFeature, feature_available
 
@@ -54,18 +59,23 @@ async def async_setup_entry(
         async_add_entities,
         lambda: [DjiPowerBackupReserveNumber(coordinator)],
     )
+    def charger_numbers(identity: AccessoryIdentity) -> list[DjiPowerEntity]:
+        if identity[2] == CAR_POWER_OUTLET_CABLE:
+            return [DjiPowerCarCableLimitNumber(coordinator, identity)]
+        return [
+            DjiPowerCarRechargePowerNumber(coordinator, identity),
+            DjiPowerCarMinimumVoltageNumber(coordinator, identity),
+            DjiPowerCarChargePowerNumber(coordinator, identity),
+            DjiPowerCarChargingVoltageNumber(coordinator, identity),
+            DjiPowerCarAutoVoltageNumber(coordinator, identity),
+        ]
+
     async_discover_accessories(
         coordinator,
         entry,
         async_add_entities,
         {
-            "car_chargers": lambda identity: [
-                DjiPowerCarRechargePowerNumber(coordinator, identity),
-                DjiPowerCarMinimumVoltageNumber(coordinator, identity),
-                DjiPowerCarChargePowerNumber(coordinator, identity),
-                DjiPowerCarChargingVoltageNumber(coordinator, identity),
-                DjiPowerCarAutoVoltageNumber(coordinator, identity),
-            ]
+            "car_chargers": charger_numbers,
         },
     )
 
@@ -374,6 +384,23 @@ class DjiPowerCarRechargePowerNumber(_DjiPowerCarPowerNumber):
         super().__init__(
             coordinator, identity, "car_recharge_power", "car recharge power"
         )
+
+
+class DjiPowerCarCableLimitNumber(_DjiPowerCarPowerNumber):
+    """Set the maximum power the SDC cable draws from the vehicle."""
+
+    _setting = "recharge_power_w"
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(self, coordinator, identity: AccessoryIdentity) -> None:
+        super().__init__(
+            coordinator, identity, "car_recharge_power", "car recharge limit"
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        if not self.available:
+            raise ServiceValidationError("the car power outlet cable is unavailable")
+        await super().async_set_native_value(value)
 
 
 class DjiPowerCarMinimumVoltageNumber(_DjiPowerCarVoltageNumber):

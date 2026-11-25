@@ -34,6 +34,8 @@ used only during setup to retrieve the device's local credential.
   - Discharge and recharge limit
   - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
   - SDC accessory [info and controls](docs/accessory-controls.md)
+  - Device, screen, and AC output [timeouts](docs/protocol.md#display) on the
+    Power 1000 V2
   - Individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs), car-outlet switches, where reported
   - [Energy Saver](docs/energy-saver.md) mode, Scheduled Periods controls and
     auto resume, plus Time of Use discharge/recharge watts and
