@@ -178,7 +178,9 @@ class DjiPowerRechargeModeSelect(DjiPowerEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         if option not in (labels := self._labels()):
-            raise ServiceValidationError("the station does not offer this recharge speed")
+            raise ServiceValidationError(
+                "the station does not offer this recharge speed"
+            )
         await self.coordinator.async_set_recharge_mode(labels[option])
 
 
