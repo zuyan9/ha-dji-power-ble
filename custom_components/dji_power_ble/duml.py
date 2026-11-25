@@ -63,6 +63,7 @@ POWER_SWITCH_KEY = 0x0D
 RULES_KEY = 0x0E
 TIME_PERIODS_KEY = 0x16
 ECO_MODE_KEY = 0x18
+RECHARGE_MODE_KEY = 0x1E
 
 # DJI Home requests these optional configuration keys on every station model.
 APP_DISCOVERY_KEYS = (
@@ -80,6 +81,7 @@ FULL_LIST_PORT_WRITE_RULE = 21
 ENERGY_SAVER_RULE = 5
 GRID_TIED_RULE = 6
 AUTO_RESUME_RULE = 17
+RECHARGE_MODE_RULE = 8
 
 # Eco `mode` 1 and 2, then `mode` 3 with `grid_mode` 2 or 3.
 ENERGY_SAVER_MODES = ("disabled", "scheduled", "self_consumption", "time_of_use")
@@ -1157,6 +1159,47 @@ def build_keyed_set_payload(
             raise ProtocolError("keyed value is too long")
         payload += bytes((key, 0x10)) + len(value).to_bytes(2, "little") + value
     return payload
+
+
+def parse_recharge_modes(value: str | bytes | None) -> dict[int, int] | None:
+    """Return {watts: switch} from the 0x1E AC recharge-speed record.
+
+    Each entry is a nested ``0x1F 0x10 len=6`` TLV holding index, watts (u32 LE)
+    and a switch: 1 for the selected speed, 2 for the others. Observed on the
+    Power 1000 Mini as 500 W and 1000 W.
+    """
+    try:
+        raw = bytes.fromhex(value) if isinstance(value, str) else value
+    except ValueError:
+        return None
+    if not raw or len(raw) % 10:
+        return None
+    modes: dict[int, int] = {}
+    for offset in range(0, len(raw), 10):
+        entry = raw[offset : offset + 10]
+        if entry[:4] != b"\x1f\x10\x06\x00" or entry[9] not in (1, 2):
+            return None
+        watts = int.from_bytes(entry[5:9], "little")
+        if watts == 0 or watts in modes:
+            return None
+        modes[watts] = entry[9]
+    return modes if len(modes) >= 2 and list(modes.values()).count(1) == 1 else None
+
+
+def build_recharge_mode_set_payload(
+    current: str | bytes, watts: int, *, timestamp_ms: int | None = None
+) -> bytes:
+    """Select ``watts`` (switch 1) and mark every other speed 2."""
+    modes = parse_recharge_modes(current)
+    if modes is None or watts not in modes:
+        raise ProtocolError("recharge speed is not offered by the station")
+    raw = bytearray(bytes.fromhex(current) if isinstance(current, str) else current)
+    for offset in range(0, len(raw), 10):
+        chosen = int.from_bytes(raw[offset + 5 : offset + 9], "little") == watts
+        raw[offset + 9] = 1 if chosen else 2
+    return build_keyed_set_payload(
+        [(RECHARGE_MODE_KEY, bytes(raw)), _SET_STATE_RULES], timestamp_ms=timestamp_ms
+    )
 
 
 def build_time_periods_set_payload(

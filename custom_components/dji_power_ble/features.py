@@ -10,6 +10,8 @@ from .duml import (
     GRID_TIED_RULE,
     MODEL_NAMES,
     PORT_SWITCH_RULE,
+    RECHARGE_MODE_RULE,
+    parse_recharge_modes,
 )
 
 PortIdentity = tuple[int, int]
@@ -38,6 +40,7 @@ class ModelFeature(StrEnum):
     USB_CONTROLS = "usb_controls"
     RESERVE_CONTROL = "reserve_control"
     DISPLAY_SETTINGS = "display_settings"
+    RECHARGE_MODE = "recharge_mode"
 
 
 _KNOWN_MODELS = frozenset(MODEL_NAMES.values())
@@ -69,6 +72,11 @@ def feature_available(data: dict, feature: ModelFeature) -> bool:
     """Apply the known record and station-rule gates for an optional feature."""
     if feature == ModelFeature.DISPLAY_SETTINGS:
         return isinstance(data.get("display_settings"), dict)
+    if feature == ModelFeature.RECHARGE_MODE:
+        return (
+            station_rule_enabled(data, RECHARGE_MODE_RULE)
+            and parse_recharge_modes(data.get("key_1e")) is not None
+        )
     if feature == ModelFeature.RESERVE_CONTROL:
         return data.get("energy_reserve_available") is True
     if feature == ModelFeature.TARIFF_SCHEDULE:

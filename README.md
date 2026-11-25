@@ -32,6 +32,7 @@ used only during setup to retrieve the device's local credential.
 - Control:
   - AC output
   - Discharge and recharge limit
+  - AC recharge speed (e.g. 500 W / 1000 W) on stations that report it, such as the Power 1000 Mini
   - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
   - SDC accessory [info and controls](docs/accessory-controls.md)
   - Device, screen, and AC output [timeouts](docs/protocol.md#display) on the

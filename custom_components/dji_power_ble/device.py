@@ -38,6 +38,7 @@ from .duml import (
     POWER_COMMAND_SET,
     POWER_DESTINATION,
     POWER_SWITCH_KEY,
+    RECHARGE_MODE_KEY,
     REPORT_COMMAND,
     RULES_KEY,
     SET_COMMAND,
@@ -59,6 +60,7 @@ from .duml import (
     build_off_peak_charge_power_set_payload,
     build_port_switch_set_payload,
     build_power_adjustment_set_payload,
+    build_recharge_mode_set_payload,
     build_scheduled_switch_set_payload,
     build_time_periods_set_payload,
     charge_power_readbacks,
@@ -68,6 +70,7 @@ from .duml import (
     normalize_pair_key,
     normalize_time_periods,
     parse_keyed_values,
+    parse_recharge_modes,
     parse_report,
     parse_set_ack,
     parse_telemetry,
@@ -1665,6 +1668,30 @@ class DjiPowerDevice:
             except ProtocolError as error:
                 raise DjiPowerError(str(error)) from error
             await self._write_eco_mode(current, payload, expected)
+
+    async def set_recharge_mode(self, watts: int) -> None:
+        """Select the AC recharge speed and confirm it from a fresh read."""
+        async with self._operation_lock:
+            try:
+                update = await self._read_config(
+                    RECHARGE_MODE_KEY, require_complete=True
+                )
+                payload = build_recharge_mode_set_payload(
+                    update.get("key_1e"), watts
+                )
+            except ProtocolError as error:
+                raise DjiPowerError(str(error)) from error
+            if parse_keyed_values(payload)[RECHARGE_MODE_KEY].hex() == update["key_1e"]:
+                return
+            await self._set(payload, (RECHARGE_MODE_KEY, RULES_KEY))
+            for attempt in range(READBACK_RETRIES + 1):
+                if attempt:
+                    await asyncio.sleep(READBACK_RETRY_INTERVAL)
+                fresh = await self._read_config(RECHARGE_MODE_KEY)
+                modes = parse_recharge_modes(fresh.get("key_1e"))
+                if modes and modes.get(watts) == 1:
+                    return
+            raise DjiPowerError("station did not report the requested recharge speed")
 
     async def set_auto_resume(self, enabled: bool) -> None:
         """Set Energy Saver Auto Resume and confirm its readback."""
