@@ -1,6 +1,6 @@
 {
   "domain": "dji_power_ble",
-  "name": "DJI Power (local BLE)",
+  "name": "DJI Power BLE",
   "after_dependencies": [
     "bluetooth"
   ],
@@ -50,5 +50,5 @@
   "requirements": [
     "bleak-retry-connector>=3.5.0"
   ],
-  "version": "0.2.6"
+  "version": "0.2.7b1"
 }

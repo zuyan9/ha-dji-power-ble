@@ -495,6 +495,20 @@ class EnergySaverCapabilityTests(unittest.TestCase):
             ):
                 self.assertEqual(features.energy_saver_options(data), expected)
 
+    def test_grid_tied_output_needs_the_page_and_rule_6_in_any_mode(self) -> None:
+        feature = features.ModelFeature.GRID_TIED_OUTPUT
+        for mode in (*duml.ENERGY_SAVER_MODES, None):
+            with self.subTest(mode=mode):
+                self.assertTrue(features.feature_available(
+                    offered(energy_saver_mode=mode, eco_grid_mode=0), feature
+                ))
+        for change in (
+            {"station_rules": [5, 17]}, {"station_rules": [6, 17]},
+            {"station_rules": None}, {"eco_available": False},
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(features.feature_available(offered(**change), feature))
+
     def test_auto_resume_scheduled_and_meter_phase_gates(self) -> None:
         feature = features.ModelFeature
         for mode in duml.GRID_TIED_MODES:

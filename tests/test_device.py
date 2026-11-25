@@ -14,6 +14,8 @@ from tests.test_duml import (
     CAPTURED_KEYED_CONFIG,
     CAPTURED_V2_BASE_INFO,
     expansion_battery,
+    group,
+    interface,
     record,
 )
 from tests.test_duml import (
@@ -2426,6 +2428,28 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.device.data["battery_percent"], 66)
         self.assertFalse(self.device.data["charging"])
         self.assertEqual(len(updates), 1)
+
+    async def test_grid_output_clears_when_the_station_omits_the_idle_port(
+        self,
+    ) -> None:
+        def push(total: int, *groups: bytes) -> None:
+            power = total.to_bytes(2, "little") + bytes(2)
+            payload = record(0x3030, power + record(0x3031, b"".join(groups)))
+            self.device._handle_packet(
+                duml.DumlPacket(
+                    0xAB, 0x02, 1, 0, duml.POWER_COMMAND_SET,
+                    duml.REPORT_COMMAND, payload,
+                )
+            )
+
+        sockets = group(2, interface(1, 2, 19, 0))
+        push(156, group(1, interface(1, 1, 137, 0)), sockets)
+        self.assertEqual(self.device.data["grid_output_w"], 137)
+
+        push(19, sockets)
+        self.assertEqual(self.device.data["grid_output_w"], 0)
+        # The per-port value keeps its last reading, so the sensor avoids it.
+        self.assertEqual(self.device.data["power_1_output_w"], 137)
 
     async def test_temperature_updates_clear_stale_values_and_preserve_partial_state(
         self,

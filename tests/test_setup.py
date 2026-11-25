@@ -82,7 +82,9 @@ with patch.dict(sys.modules, {**stubs, PACKAGE: integration}):
 
 class SetupTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.service_info = types.SimpleNamespace(time=99.0, manufacturer_data={})
+        self.service_info = types.SimpleNamespace(
+            time=99.0, manufacturer_data={}, name=None
+        )
         self.ble_device = object()
         self.device = types.SimpleNamespace(
             is_connected=True,
@@ -437,6 +439,22 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(configured=configured, expected=expected):
                 self.entry.data["model"] = configured
                 self.service_info.manufacturer_data = manufacturer_data
+                await integration._async_create_device(self.hass, self.entry)
+                self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
+                                 expected)
+
+    async def test_mini_is_recognised_from_its_advertised_name(self):
+        # An ESPHome proxy can cache the advertisement without manufacturer data.
+        self._local_device_lookup(types.SimpleNamespace(details={"props": {}}))
+        self.entry.data["model"] = "DJI Power"
+        self.service_info.manufacturer_data = {}
+        for name, expected in (
+            ("Power1000Mini-1104WD", "DJI Power 1000 Mini"),
+            ("Power2000-1104WD", "DJI Power"),
+            (None, "DJI Power"),
+        ):
+            with self.subTest(name=name):
+                self.service_info.name = name
                 await integration._async_create_device(self.hass, self.entry)
                 self.assertEqual(integration.DjiPowerDevice.call_args.kwargs["model"],
                                  expected)

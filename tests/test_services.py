@@ -34,6 +34,7 @@ def _load_services() -> tuple[types.ModuleType, types.ModuleType]:
     modules = {
         PACKAGE: _module(PACKAGE, __path__=[str(COMPONENT)]),
         "homeassistant": _module("homeassistant"),
+        "homeassistant.const": _module("homeassistant.const", CONF_ADDRESS="address"),
         "homeassistant.core": _module(
             "homeassistant.core", HomeAssistant=object, ServiceCall=object,
             callback=lambda function: function,
@@ -75,8 +76,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.device_entry = types.SimpleNamespace(
             identifiers={(DOMAIN, ADDRESS)}, config_entries={"station"}
         )
+        self.config_entry = types.SimpleNamespace(
+            domain=DOMAIN, data={"address": ADDRESS}
+        )
         self.hass = types.SimpleNamespace(
             data={DOMAIN: {"station": self.coordinator}},
+            config_entries=types.SimpleNamespace(
+                async_get_entry=Mock(return_value=self.config_entry)
+            ),
             device_registry=types.SimpleNamespace(
                 async_get=Mock(return_value=self.device_entry)
             ),
@@ -240,9 +247,33 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ServiceValidationError, "no longer exists"):
             await self.invoke()
         self.hass.device_registry.async_get.return_value = self.device_entry
+        # Each lost connection reloads the entry, and setup retries keep it unloaded.
         self.hass.data[DOMAIN].clear()
-        with self.assertRaisesRegex(ServiceValidationError, "loaded DJI Power"):
-            await self.invoke()
+        for address in (ADDRESS, ADDRESS.lower()):
+            with self.subTest(address=address):
+                self.config_entry.data = {"address": address}
+                with self.assertRaisesRegex(ServiceValidationError, "unavailable"):
+                    await self.invoke()
+        self.hass.config_entries.async_get_entry.assert_called_with("station")
+        self.coordinator.async_set_time_periods.assert_not_awaited()
+
+    async def test_unloaded_entry_still_rejects_other_devices(self) -> None:
+        self.hass.data[DOMAIN].clear()
+        other_integration = types.SimpleNamespace(
+            domain="other", data={"address": ADDRESS}
+        )
+        for identifiers, entry in (
+            ({(DOMAIN, "expansion_SYNTHETIC")}, self.config_entry),
+            ({("other", ADDRESS)}, self.config_entry),
+            ({(DOMAIN, "AA:BB:CC:DD:EE:00")}, self.config_entry),
+            ({(DOMAIN, ADDRESS)}, other_integration),
+            ({(DOMAIN, ADDRESS)}, None),
+        ):
+            with self.subTest(identifiers=identifiers, entry=entry):
+                self.device_entry.identifiers = identifiers
+                self.hass.config_entries.async_get_entry.return_value = entry
+                with self.assertRaisesRegex(ServiceValidationError, "loaded DJI Power"):
+                    await self.invoke()
         self.coordinator.async_set_time_periods.assert_not_awaited()
 
     async def test_disconnect_or_failed_update_prevents_write(self) -> None:

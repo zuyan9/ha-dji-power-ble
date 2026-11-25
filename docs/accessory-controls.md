@@ -37,6 +37,13 @@ when the station first reports that input. While the accessory stays attached, a
 that carries no power reads 0 W and its voltage is unknown. All accessory sensors 
 become unavailable when the accessory is removed.
 
+## Car Power Outlet to SDC cable
+
+When the station reports this cable attached, **SDC … car recharge limit**
+sets the maximum power drawn from the vehicle in whole watts. The slider
+uses the range reported for that SDC port. The cable's input readings and
+limit become unavailable when the station reports that the cable is unplugged.
+
 ## Car chargers
 
 The integration recognizes the 1 kW Car Charger and 1.8 kW Solar/Car Charger.

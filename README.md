@@ -1,4 +1,4 @@
-# DJI Power (local BLE) for Home Assistant
+# DJI Power BLE for Home Assistant
 
 Local Bluetooth monitoring and control for DJI Power stations. Runtime traffic goes
 directly between Home Assistant and the device; DJI cloud access is optional and is
@@ -11,7 +11,7 @@ used only during setup to retrieve the device's local credential.
 | Model | Status |
 | --- | --- |
 | DJI Power 1000 V2 | Hardware-tested |
-| DJI Power 1000 Mini | [Partially hardware-tested](https://github.com/zuyan9/ha-dji-power-ble/issues/4) |
+| DJI Power 1000 Mini | [Hardware-tested](https://github.com/zuyan9/ha-dji-power-ble/issues/4) |
 | DJI Power 1000 | [Hardware Tested](https://github.com/zuyan9/ha-dji-power-ble/issues/10)|
 | DJI Power 2000 | [Hardware Tested](https://github.com/zuyan9/ha-dji-power-ble/issues/17) |
 | DJI Power Auro 2000 Elite | Untested; uses the Power 2000 protocol profile |
@@ -22,15 +22,21 @@ used only during setup to retrieve the device's local credential.
   - Battery level, remaining time, charging time, temperature, and charging status
   - [Primary battery status](docs/protocol.md#battery-time-and-charging), where reported
   - Input, output, AC, USB, SDC, etc. power readings
+  - [Grid-tied AC port output](docs/energy-saver.md), on stations that offer
+    grid-tied modes
   - Expansion battery devices with battery level and pack diagnostics
   - Firmware, battery cycle, timezone, display, reserve, and cloud-status
     diagnostics
+  - [Bluetooth source](docs/troubleshooting.md#station-keeps-disconnecting): the
+    adapter or proxy holding the connection, with its signal strength at connection
 - Control:
   - AC output
   - Discharge and recharge limit
   - AC recharge speed (e.g. 500 W / 1000 W) on stations that report it, such as the Power 1000 Mini
   - Solar accessory [custom backup reserve level](docs/backup-reserve.md)
   - SDC accessory [info and controls](docs/accessory-controls.md)
+  - Device, screen, and AC output [timeouts](docs/protocol.md#display) on the
+    Power 1000 V2
   - Individual [USB-A and USB-C output switches](docs/accessory-controls.md#usb-outputs), car-outlet switches, where reported
   - [Energy Saver](docs/energy-saver.md) mode, Scheduled Periods controls and
     auto resume, plus Time of Use discharge/recharge watts and
@@ -54,7 +60,7 @@ Click the badge above, or add the repository manually:
 
 1. Open HACS → Custom repositories.
 2. Add `https://github.com/zuyan9/ha-dji-power-ble` as an Integration.
-3. Install **DJI Power (local BLE)** and restart Home Assistant.
+3. Install **DJI Power BLE** and restart Home Assistant.
 
 ### Manual
 
@@ -63,7 +69,7 @@ restart Home Assistant.
 
 ## Setup
 
-Add **DJI Power** from Settings → Devices & services. A nearby station should also be
+Add **DJI Power BLE** from Settings → Devices & services. A nearby station should also be
 discovered automatically. The setup flow offers three credential paths:
 
 1. **DJI account** — sign in and solve DJI's image captcha. The integration reads the

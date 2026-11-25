@@ -3,7 +3,7 @@
     "flow_title": "{name}",
     "step": {
       "user": {
-        "title": "DJI Power (local BLE)",
+        "title": "DJI Power BLE",
         "description": "How do you want to provide the station's local pair key?",
         "menu_options": {
           "account": "Fetch it from my DJI account",
@@ -245,6 +245,15 @@
           "self_consumption": "Max self-consumption",
           "time_of_use": "Time of use (TOU)"
         }
+      },
+      "device_timeout": {
+        "name": "Device timeout"
+      },
+      "screen_timeout": {
+        "name": "Device screen timeout"
+      },
+      "ac_timeout": {
+        "name": "AC timeout"
       }
     },
     "sensor": {
@@ -292,6 +301,9 @@
           "c": "C",
           "abc": "A+B+C"
         }
+      },
+      "grid_output": {
+        "name": "Grid-tied AC port output"
       }
     },
     "switch": {

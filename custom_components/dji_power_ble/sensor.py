@@ -27,19 +27,24 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .accessory import (
-    SDC_ACCESSORY_NAMES,
-    PortIdentity,
+    CAR_POWER_ACCESSORY_TYPES,
     accessory_firmware,
     accessory_inputs,
     async_discover_feature,
     port_name,
-    reported_sdc_accessories,
 )
 from .const import DOMAIN
 from .coordinator import DjiPowerCoordinator
 from .duml import METER_PHASES
 from .entity import DjiPowerEntity
-from .features import ModelFeature, feature_available, is_known_model
+from .features import (
+    SDC_ACCESSORY_NAMES,
+    ModelFeature,
+    PortIdentity,
+    feature_available,
+    is_known_model,
+    reported_sdc_accessories,
+)
 
 DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -259,6 +264,15 @@ METER_PHASE_DESCRIPTION = SensorEntityDescription(
     entity_category=EntityCategory.DIAGNOSTIC,
 )
 
+# DJI Home's Grid-Tied AC Port output; its input is the Charging input sensor.
+GRID_OUTPUT_DESCRIPTION = SensorEntityDescription(
+    key="grid_output_w",
+    translation_key="grid_output",
+    device_class=SensorDeviceClass.POWER,
+    native_unit_of_measurement=UnitOfPower.WATT,
+    state_class=SensorStateClass.MEASUREMENT,
+)
+
 EXPANSION_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
         key="battery_percent",
@@ -338,6 +352,7 @@ async def async_setup_entry(
         DjiPowerBatteryTimeSensor(coordinator, description)
         for description in BATTERY_TIME_DESCRIPTIONS
     )
+    async_add_entities([DjiPowerBluetoothSourceSensor(coordinator)])
     primary_status_added = False
 
     @callback
@@ -364,6 +379,10 @@ async def async_setup_entry(
     async_discover_feature(
         coordinator, entry, async_add_entities, ModelFeature.METER_PHASE,
         lambda: [DjiPowerMeterPhaseSensor(coordinator, METER_PHASE_DESCRIPTION)],
+    )
+    async_discover_feature(
+        coordinator, entry, async_add_entities, ModelFeature.GRID_TIED_OUTPUT,
+        lambda: [DjiPowerSensor(coordinator, GRID_OUTPUT_DESCRIPTION)],
     )
     device_registry = dr.async_get(hass)
     # Packs link to the station by device id. Entity registration is deferred, so
@@ -540,6 +559,29 @@ class DjiPowerTimePeriodsSensor(DjiPowerEntity, SensorEntity):
         return attributes
 
 
+class DjiPowerBluetoothSourceSensor(DjiPowerEntity, SensorEntity):
+    """The adapter or proxy holding the connection, and its signal at connection."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:bluetooth-connect"
+    _attr_name = "Bluetooth source"
+
+    def __init__(self, coordinator: DjiPowerCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.entry.data[CONF_ADDRESS]}_bluetooth_source"
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.bluetooth_source
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        # dBm from the last advertisement before connecting; not updated live.
+        return {"rssi_at_connection": self.coordinator.bluetooth_rssi}
+
+
 class DjiPowerExpansionSensor(CoordinatorEntity[DjiPowerCoordinator], SensorEntity):
     """A sensor on an expansion pack sharing the station's BLE connection."""
 
@@ -682,6 +724,17 @@ class DjiPowerSdcInputSensor(_DjiPowerSdcSensor):
         else:
             self._attr_device_class = SensorDeviceClass.VOLTAGE
             self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+
+    @property
+    def port(self) -> dict | None:
+        port = super().port
+        if (
+            port is not None
+            and self._slot[0] == "car"
+            and port["accessory_type"] not in CAR_POWER_ACCESSORY_TYPES
+        ):
+            return None
+        return port
 
     @property
     def native_value(self) -> float | int | None:

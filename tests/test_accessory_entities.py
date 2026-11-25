@@ -235,6 +235,28 @@ class AccessoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             len(self.entities),
         )
 
+    async def test_car_power_outlet_cable_limit_requires_attached_cable(self) -> None:
+        await self._setup()
+        row = _car(seq=2, type=1, p_from_car_low=0, p_from_car_v=100, p_from_car_up=100)
+        self.coordinator.publish({"car_chargers": [row]})
+        self.assertEqual(self._accessories(), [])
+        port = {"type": 5, "seq": 2, "accessory_type": 1}
+        self.coordinator.publish({"car_chargers": [row], "interfaces": [port]})
+        entity, = self._accessories()
+        self.assertIsInstance(entity, number.DjiPowerCarCableLimitNumber)
+        self.assertTrue(entity.available)
+        self.assertEqual(entity._attr_name, "SDC 2 car recharge limit")
+        self.assertEqual((entity.native_min_value, entity.native_max_value), (0, 100))
+        self.assertEqual(entity._attr_native_unit_of_measurement, "W")
+        self.assertEqual(entity._attr_native_step, 1)
+        await entity.async_set_native_value(49)
+        self.coordinator.async_set_car_charger.assert_awaited_once_with(
+            5, 2, 1, recharge_power_w=49
+        )
+        self.coordinator.publish({"car_chargers": [row], "interfaces": []})
+        self.assertFalse(entity.available)
+        self.assertIsNone(entity.native_value)
+
     async def test_zero_sequence_is_preserved_when_reported(self) -> None:
         await self._setup()
         self.coordinator.publish({"car_chargers": [_car(seq=0)]})

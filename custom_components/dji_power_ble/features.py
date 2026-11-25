@@ -14,6 +14,17 @@ from .duml import (
     parse_recharge_modes,
 )
 
+PortIdentity = tuple[int, int]
+SDC_INTERFACE_TYPES = {5, 6}
+# DJI Home's names for the accessory types an SDC port reports.
+SDC_ACCESSORY_NAMES = {
+    1: "car_power_outlet_cable",
+    2: "solar_panel_adapter",
+    3: "car_charger_1kw",
+    4: "solar_car_charger_1_8kw",
+    5: "poe_cable",
+}
+
 
 class ModelFeature(StrEnum):
     """Optional features whose availability comes from station records."""
@@ -24,9 +35,11 @@ class ModelFeature(StrEnum):
     SCHEDULED_CONTROLS = "scheduled_controls"
     AUTO_RESUME = "auto_resume"
     METER_PHASE = "meter_phase"
+    GRID_TIED_OUTPUT = "grid_tied_output"
     SDC_CONTROLS = "sdc_controls"
     USB_CONTROLS = "usb_controls"
     RESERVE_CONTROL = "reserve_control"
+    DISPLAY_SETTINGS = "display_settings"
     RECHARGE_MODE = "recharge_mode"
 
 
@@ -40,6 +53,8 @@ def is_known_model(model: str) -> bool:
 
 def supports_feature(model: str, feature: ModelFeature) -> bool:
     """Allow known models to discover a feature, subject to station capability."""
+    if feature == ModelFeature.DISPLAY_SETTINGS:
+        return model == MODEL_NAMES[0x97]
     return is_known_model(model) and feature in ModelFeature
 
 
@@ -55,6 +70,8 @@ def station_rule_enabled(data: dict, rule: int) -> bool:
 
 def feature_available(data: dict, feature: ModelFeature) -> bool:
     """Apply the known record and station-rule gates for an optional feature."""
+    if feature == ModelFeature.DISPLAY_SETTINGS:
+        return isinstance(data.get("display_settings"), dict)
     if feature == ModelFeature.RECHARGE_MODE:
         return (
             station_rule_enabled(data, RECHARGE_MODE_RULE)
@@ -97,6 +114,11 @@ def feature_available(data: dict, feature: ModelFeature) -> bool:
             and data.get("eco_meter_linked") is True
             and data.get("meter_phase") is not None
         )
+    if feature == ModelFeature.GRID_TIED_OUTPUT:
+        # Only a station that offers grid-tied modes feeds the grid.
+        return _energy_saver_offered(data) and station_rule_enabled(
+            data, GRID_TIED_RULE
+        )
     if feature == ModelFeature.USB_CONTROLS:
         return any(port[0] in (3, 4) for port in eligible_port_switches(data))
     if feature == ModelFeature.SDC_CONTROLS:
@@ -138,6 +160,31 @@ def energy_saver_options(data: dict) -> list[str]:
         if data.get("eco_meter_linked") is True:
             offered.add("self_consumption")
     return [mode for mode in ENERGY_SAVER_MODES if mode in offered]
+
+
+def reported_sdc_accessories(data: dict) -> dict[PortIdentity, dict]:
+    """Return unambiguous SDC-family ports that report a recognized accessory."""
+    result: dict[PortIdentity, dict] = {}
+    duplicates = set()
+    interfaces = data.get("interfaces")
+    for item in interfaces if isinstance(interfaces, list) else ():
+        if not isinstance(item, dict):
+            continue
+        interface_type, seq = item.get("type"), item.get("seq")
+        accessory_type = item.get("accessory_type")
+        if (
+            type(interface_type) is not int
+            or interface_type not in SDC_INTERFACE_TYPES
+            or type(seq) is not int
+            or type(accessory_type) is not int
+            or accessory_type not in SDC_ACCESSORY_NAMES
+        ):
+            continue
+        identity = interface_type, seq
+        if identity in result:
+            duplicates.add(identity)
+        result[identity] = item
+    return {key: value for key, value in result.items() if key not in duplicates}
 
 
 def eligible_port_switches(data: dict) -> dict[tuple[int, int], dict]:

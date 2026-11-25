@@ -10,58 +10,27 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .duml import CAR_CHARGER_TYPES, CAR_POWER_OUTLET_CABLE
 from .entity import DjiPowerEntity
 from .features import (
+    SDC_INTERFACE_TYPES,
     ModelFeature,
+    PortIdentity,
     eligible_port_switches,
     feature_available,
     is_known_model,
+    reported_sdc_accessories,
 )
 
 AccessoryIdentity = tuple[int, int, int]
-PortIdentity = tuple[int, int]
-CAR_CHARGER_TYPES = {3, 4}
-SDC_INTERFACE_TYPES = {5, 6}
+CAR_POWER_ACCESSORY_TYPES = CAR_CHARGER_TYPES | {CAR_POWER_OUTLET_CABLE}
 USB_INTERFACE_TYPES = {3, 4}
-# DJI Home's names for the accessory types an SDC port reports.
-SDC_ACCESSORY_NAMES = {
-    1: "car_power_outlet_cable",
-    2: "solar_panel_adapter",
-    3: "car_charger_1kw",
-    4: "solar_car_charger_1_8kw",
-    5: "poe_cable",
-}
 ACCESSORY_INPUT_FORMS = ("solar", "car", "grid")
 
 
 def port_name(interface_type: int, seq: int) -> str:
     """Return the station label for an SDC-family port."""
     return f"{'SDC' if interface_type == 5 else 'SDC Lite'} {seq}"
-
-
-def reported_sdc_accessories(data: dict) -> dict[PortIdentity, dict]:
-    """Return unambiguous SDC-family ports that report a recognized accessory."""
-    result: dict[PortIdentity, dict] = {}
-    duplicates = set()
-    interfaces = data.get("interfaces")
-    for item in interfaces if isinstance(interfaces, list) else ():
-        if not isinstance(item, dict):
-            continue
-        interface_type, seq = item.get("type"), item.get("seq")
-        accessory_type = item.get("accessory_type")
-        if (
-            type(interface_type) is not int
-            or interface_type not in SDC_INTERFACE_TYPES
-            or type(seq) is not int
-            or type(accessory_type) is not int
-            or accessory_type not in SDC_ACCESSORY_NAMES
-        ):
-            continue
-        identity = interface_type, seq
-        if identity in result:
-            duplicates.add(identity)
-        result[identity] = item
-    return {key: value for key, value in result.items() if key not in duplicates}
 
 
 def accessory_inputs(port: dict) -> dict[tuple[str, int], dict]:
@@ -112,6 +81,7 @@ def reported_rows(
         return {}
     result = {}
     duplicates = set()
+    ports = reported_sdc_accessories(data) if key == "car_chargers" else {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -124,9 +94,16 @@ def reported_rows(
             or type(seq) is not int
             or not 0 <= seq <= 255
             or type(accessory_type) is not int
-            or (key == "car_chargers" and accessory_type not in CAR_CHARGER_TYPES)
+            or (
+                key == "car_chargers"
+                and accessory_type not in CAR_POWER_ACCESSORY_TYPES
+            )
         ):
             continue
+        if accessory_type == CAR_POWER_OUTLET_CABLE:
+            port = ports.get((interface_type, seq), {})
+            if port.get("accessory_type") != CAR_POWER_OUTLET_CABLE:
+                continue
         identity = interface_type, seq, accessory_type
         if identity in result:
             duplicates.add(identity)

@@ -73,6 +73,7 @@ from .duml import (
     TIME_PERIOD_DAYS,
     AdvertisementInfo,
     ProtocolError,
+    model_from_name,
     normalize_pair_key,
     normalize_time_periods,
     parse_manufacturer_data,
@@ -272,6 +273,8 @@ class DjiPowerConfigFlow(ConfigFlow, domain=DOMAIN):
             if manufacturer_data:
                 with contextlib.suppress(ProtocolError):
                     return parse_manufacturer_data(manufacturer_data).model
+            if model := model_from_name(info.name):
+                return model
         return "DJI Power"
 
     def _address_schema_part(self) -> dict:

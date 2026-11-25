@@ -404,6 +404,19 @@ class BatteryTimeSensorTests(unittest.IsolatedAsyncioTestCase):
             self.coordinator.data = {"battery_cycle_count": count}
             self.assertEqual(entity.native_value, count)
 
+    def test_bluetooth_source_is_a_diagnostic_with_its_signal(self) -> None:
+        self.coordinator.bluetooth_source = self.coordinator.bluetooth_rssi = None
+        entity = sensor.DjiPowerBluetoothSourceSensor(self.coordinator)
+
+        self.assertEqual(entity._attr_unique_id, f"{ADDRESS}_bluetooth_source")
+        self.assertEqual(entity._attr_entity_category, "diagnostic")
+        self.assertIsNone(entity.native_value)
+        self.assertEqual(entity.extra_state_attributes, {"rssi_at_connection": None})
+        self.coordinator.bluetooth_source = "bt-proxy-01 (AA:BB:CC:DD:EE:01)"
+        self.coordinator.bluetooth_rssi = -63
+        self.assertEqual(entity.native_value, "bt-proxy-01 (AA:BB:CC:DD:EE:01)")
+        self.assertEqual(entity.extra_state_attributes, {"rssi_at_connection": -63})
+
     def test_primary_runtime_remains_an_independent_disabled_sensor(self) -> None:
         description = next(
             item for item in sensor.DESCRIPTIONS if item.key == "primary_runtime_min"
@@ -627,7 +640,8 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         await self.setup([pack])
         self.assertEqual(
             len(self.entities) - len(self.packs()),
-            len(sensor.DESCRIPTIONS) + len(sensor.BATTERY_TIME_DESCRIPTIONS),
+            # Plus the Bluetooth source sensor.
+            len(sensor.DESCRIPTIONS) + len(sensor.BATTERY_TIME_DESCRIPTIONS) + 1,
         )
         self.assertEqual(len(self.packs()), 4)
         self.assertEqual(len(self.hass.device_registry.devices), 2)
@@ -768,8 +782,9 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
         pack = _pack(temperature=20, firmware="01.00.00.00")
         await self.setup([pack])
         unique_ids = {entity._attr_unique_id for entity in self.packs()}
-        # Primary status, packs, tariff, meter phase and SDC keep a listener.
-        self.assertEqual(len(self.listeners), 5)
+        # Primary status, packs, tariff, meter phase, grid-tied output and SDC
+        # keep a listener.
+        self.assertEqual(len(self.listeners), 6)
         for callback in self.unload_callbacks:
             callback()
         self.assertEqual(self.listeners, [])
@@ -861,6 +876,55 @@ class ExpansionSensorTests(unittest.IsolatedAsyncioTestCase):
                         isinstance(item, sensor.DjiPowerTimePeriodsSensor)
                         for item in self.entities
                     ), 1)
+
+    async def test_grid_output_sensor_waits_for_grid_tied_modes(self) -> None:
+        def grid_outputs() -> list:
+            return [
+                item for item in self.entities
+                if item._attr_unique_id == f"{ADDRESS}_grid_output_w"
+            ]
+
+        for model in ("DJI Power 2000", "DJI Power Auro 2000 Elite", "DJI Power"):
+            with self.subTest(model=model):
+                self.entities.clear()
+                self.listeners.clear()
+                self.coordinator.device.model = model
+                # Rule 5 alone offers the page without its grid-tied modes.
+                await self.setup(
+                    [], eco_available=True, station_rules=[5], grid_output_w=0
+                )
+                self.assertEqual(grid_outputs(), [])
+                self.coordinator.data.update(station_rules=[5, 6], grid_output_w=137)
+                for _ in range(2):
+                    for listener in self.listeners.copy():
+                        listener()
+                self.assertEqual(len(grid_outputs()), int(model != "DJI Power"))
+
+        self.coordinator.device.model = "DJI Power 2000"
+        self.entities.clear()
+        await self.setup(
+            [], eco_available=True, station_rules=[5, 6], grid_output_w=137
+        )
+        (entity,) = grid_outputs()
+        description = entity.entity_description
+        self.assertEqual(description.translation_key, "grid_output")
+        self.assertEqual(description.device_class, "power")
+        self.assertEqual(description.native_unit_of_measurement, "W")
+        self.assertEqual(description.state_class, "measurement")
+        self.assertIsNone(description.entity_category)
+        self.assertTrue(description.entity_registry_enabled_default)
+        self.assertEqual(entity.native_value, 137)
+        # The reading is telemetry: it stays available without the mode records.
+        self.coordinator.data = {"grid_output_w": 0}
+        self.assertTrue(entity.available)
+        self.assertEqual(entity.native_value, 0)
+        self.coordinator.last_update_success = False
+        self.assertFalse(entity.available)
+        strings = json.loads((COMPONENT / "strings.json").read_text())
+        self.assertEqual(
+            strings["entity"]["sensor"]["grid_output"]["name"],
+            "Grid-tied AC port output",
+        )
 
     async def test_schedule_count_attributes_and_availability(self) -> None:
         await self.setup([], time_periods=[], eco_available=True, station_rules=[5])
@@ -1061,6 +1125,11 @@ class SdcAccessorySensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.sdc_entities()["5_1_accessory"].native_value, "car_power_outlet_cable"
         )
+        car_power = self.sdc_entities()["5_1_car_1_recharge_power"]
+        for interfaces in ([], [_sdc(_solar(15, 25.0), accessory_type=2)]):
+            self.publish(interfaces=interfaces)
+            self.assertFalse(car_power.available)
+            self.assertIsNone(car_power.native_value)
 
     async def test_auro_adds_reported_accessory_inputs(self) -> None:
         self.coordinator.device.model = "DJI Power Auro 2000 Elite"
