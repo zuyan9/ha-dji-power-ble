@@ -36,6 +36,9 @@
       ]
     }
   ],
+  "categories": [
+    "energy.backup_power"
+  ],
   "codeowners": [
     "@zuyan9"
   ],
