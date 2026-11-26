@@ -112,6 +112,21 @@ class FeatureCapabilityTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(features.feature_available(data | change, feature))
 
+    def test_recharge_mode_requires_rule_8_and_one_selected_speed(self):
+        # 500 W selected and 1000 W, as a Power 1000 Mini reports them.
+        speeds = "1f10060001f4010000011f10060002e803000002"
+        data = {"key_1e": speeds, "station_rules": [8]}
+        feature = features.ModelFeature.RECHARGE_MODE
+        self.assertTrue(features.feature_available(data, feature))
+        for change in (
+            {"station_rules": [7]}, {"station_rules": None}, {"key_1e": None},
+            {"key_1e": speeds[:20]},  # One speed.
+            {"key_1e": speeds[:18] + "02" + speeds[20:]},  # None selected.
+            {"key_1e": speeds[:-2] + "01"},  # Two selected.
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(features.feature_available(data | change, feature))
+
     def test_eco_availability_clears_on_short_record_and_survives_unrelated_data(self):
         for value, expected in (
             (b"\x01" + SYNTHETIC_ECO_MODE[1:], True),

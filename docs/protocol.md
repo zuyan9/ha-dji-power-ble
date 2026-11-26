@@ -163,9 +163,10 @@ The integration decodes these fields:
 | `0x06` | Energy storage | Backup reserve availability, switch, and level |
 | `0x0C` | Display | Display (screen) timeout |
 | `0x0D` | Power switch | AC, SDC, USB and car-outlet states |
-| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0); Energy Saver page, grid-tied modes and Auto Resume (rules 5, 6, 17); SDC/USB switches (rule 11); port SET scope (rule 21) |
+| `0x0E` | Rules | Station rule numbers (diagnostics); Auto car-charger layout (rule 0); Energy Saver page, grid-tied modes and Auto Resume (rules 5, 6, 17); recharge speed (rule 8); SDC/USB switches (rule 11); port SET scope (rule 21) |
 | `0x15` | Timezone | UTC offset in minutes |
 | `0x18` | Eco mode | Energy Saver mode, Scheduled Periods switches and off-peak charging power, power adjustment, manual recharge/discharge watts, meter phase, Auto Resume |
+| `0x1E` | AC recharge speeds | Offered recharge speeds and the selected one |
 
 Raw keyed values are retained internally as `key_XX` hexadecimal state. Downloaded
 diagnostics redact records containing known private identifiers, including expansion
@@ -188,6 +189,24 @@ Writes use `0x63` with the full 13-byte `0x0C` record and the DJI Home 1.7.1
 client rules record. The integration changes the selected timeout in a fresh
 record, preserves the temperature-unit byte, and verifies the new timeout with
 a read.
+
+### Recharge speed
+
+Key `0x1E` lists the AC recharge speeds a station offers, which DJI Home shows as
+Recharging Mode. Each speed is a nested record with child tag `0x101F` and six bytes
+of data: a u8 index, the power in watts as a u32 LE, and a u8 switch that is `1` on
+the selected speed and `2` on the others. A Power 1000 Mini reports 500 W and
+1000 W.
+
+The **Recharge speed** selector needs station rule 8 and a list of at least two
+speeds with exactly one selected. Its options are the reported powers. A list with
+another child tag or record length is not offered.
+
+Writes use `0x63` with the full `0x1E` list and the DJI Home 1.6.9 client rules
+record. The integration takes the list from a fresh read, sets the switch to `1` on
+the chosen speed and `2` on the others, and keeps every other byte as reported,
+including the child tags. It sends nothing when that speed is already selected, and
+verifies the selection with a read.
 
 ### Base information
 
